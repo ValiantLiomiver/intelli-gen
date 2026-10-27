@@ -227,7 +227,7 @@ impl JdtlsConfig {
 /// Locate Lombok only when a Maven or Gradle descriptor in this workspace declares it.
 /// The IDE never downloads dependencies: only jars already present in the user's caches qualify.
 fn find_project_lombok(root: &Path) -> Option<PathBuf> {
-    fn inspect(dir: &Path, depth: usize, descriptors: &mut Vec<String>) {
+    fn inspect(dir: &Path, depth: usize, descriptors: &mut Vec<String>, catalogs: &mut Vec<String>) {
         if depth > 6 { return; }
         let Ok(entries) = std::fs::read_dir(dir) else { return; };
         for entry in entries.flatten() {
@@ -235,20 +235,50 @@ fn find_project_lombok(root: &Path) -> Option<PathBuf> {
             let name = entry.file_name();
             if path.is_dir() {
                 if matches!(name.to_str(), Some(".git" | "target" | "build" | ".gradle" | "node_modules")) { continue; }
-                inspect(&path, depth + 1, descriptors);
+                inspect(&path, depth + 1, descriptors, catalogs);
             } else if matches!(name.to_str(), Some("pom.xml" | "build.gradle" | "build.gradle.kts")) {
                 if let Ok(text) = std::fs::read_to_string(path) { descriptors.push(text); }
+            } else if name == "libs.versions.toml" {
+                if let Ok(text) = std::fs::read_to_string(path) { catalogs.push(text); }
             }
         }
     }
     let mut descriptors = Vec::new();
-    inspect(root, 0, &mut descriptors);
+    let mut catalogs = Vec::new();
+    inspect(root, 0, &mut descriptors, &mut catalogs);
+    let catalog_version = catalogs.iter().find_map(|catalog| {
+        let parsed = toml::from_str::<toml::Value>(catalog).ok()?;
+        let libraries = parsed.get("libraries")?.as_table()?;
+        let versions = parsed.get("versions").and_then(toml::Value::as_table);
+        libraries.iter().find_map(|(alias, definition)| {
+            let gradle_alias = alias.replace('-', ".").replace('_', ".");
+            if !descriptors.iter().any(|text| text.contains(&format!("libs.{gradle_alias}"))) { return None; }
+            let (coordinate, version) = if let Some(coordinate) = definition.as_str() {
+                let mut parts = coordinate.split(':');
+                let group = parts.next()?;
+                let artifact = parts.next()?;
+                let version = parts.next().map(str::to_owned);
+                (format!("{group}:{artifact}"), version)
+            } else {
+                let group = definition.get("group").and_then(toml::Value::as_str).unwrap_or_default();
+                let artifact = definition.get("name").and_then(toml::Value::as_str).unwrap_or_default();
+                let coordinate = definition.get("module").and_then(toml::Value::as_str)
+                    .map(str::to_owned).unwrap_or_else(|| format!("{group}:{artifact}"));
+                let version = definition.get("version").and_then(toml::Value::as_str).map(str::to_owned)
+                    .or_else(|| definition.get("version").and_then(|value| value.get("ref"))
+                        .and_then(toml::Value::as_str).and_then(|reference| versions?.get(reference))
+                        .and_then(toml::Value::as_str).map(str::to_owned));
+                (coordinate, version)
+            };
+            (coordinate == "org.projectlombok:lombok").then_some(version).flatten()
+        })
+    });
     let declared = descriptors.iter().any(|text| {
         text.contains("org.projectlombok")
             || text.contains("projectlombok:lombok")
             || text.contains("lombok(\"")
             || text.contains("lombok:")
-    });
+    }) || catalog_version.is_some();
     if !declared { return None; }
 
     let version = descriptors.iter().find_map(|text| {
@@ -266,7 +296,7 @@ fn find_project_lombok(root: &Path) -> Option<PathBuf> {
         let start = text.find("projectlombok:lombok:")? + "projectlombok:lombok:".len();
         let version: String = text[start..].chars().take_while(|ch| ch.is_ascii_digit() || *ch == '.').collect();
         (!version.is_empty()).then_some(version)
-    }));
+    })).or(catalog_version);
     let version = version.map(|version| {
         if version.starts_with("${") && version.ends_with('}') {
             let property = &version[2..version.len() - 1];
