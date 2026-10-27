@@ -199,6 +199,7 @@ pub enum DebuggerAction {
 pub enum RunAction {
     Start,
     Stop,
+    Input(String),
     Save(crate::java::run_config::RunConfiguration),
     Delete,
 }

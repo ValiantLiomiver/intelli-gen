@@ -10,7 +10,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
-use tokio::io::{AsyncRead, AsyncReadExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{mpsc, watch};
 
 use super::jdk::JdkInstallation;
@@ -264,11 +264,21 @@ impl RunConfigurationLoader {
 pub enum RunEvent { Output { stderr: bool, text: String }, State(String), Exit { code: Option<i32>, cancelled: bool } }
 pub struct RunHandle {
     events: mpsc::Receiver<RunEvent>,
+    input: mpsc::Sender<String>,
     cancellation: watch::Sender<bool>,
     worker: Option<JoinHandle<()>>,
 }
 impl RunHandle {
     pub fn cancel(&self) { let _ = self.cancellation.send(true); }
+    pub fn send_input(&self, line: &str) -> Result<(), String> {
+        if line.len() > 65_536 { return Err("Run Console input is limited to 64 KiB per line".into()); }
+        let mut line = line.to_owned();
+        line.push('\n');
+        self.input.try_send(line).map_err(|error| match error {
+            mpsc::error::TrySendError::Full(_) => "Run Console input queue is full; wait and try again".to_owned(),
+            mpsc::error::TrySendError::Closed(_) => "The Java process is no longer accepting input".to_owned(),
+        })
+    }
     pub fn poll(&mut self) -> Vec<RunEvent> {
         let mut result = Vec::new();
         for _ in 0..128 { match self.events.try_recv() { Ok(event) => result.push(event), Err(_) => break } }
@@ -289,6 +299,7 @@ impl RunService {
         let cwd = config.working_directory_at(&project.root);
         let executable = jdk.home.join("bin/java");
         let (events, receiver) = mpsc::channel(128);
+        let (input, input_receiver) = mpsc::channel(32);
         let (cancellation, cancel) = watch::channel(false);
         let config = config.clone();
         let project = project.clone();
@@ -304,7 +315,7 @@ impl RunService {
                             else { Err(RunError(format!("Working directory does not exist: {}", cwd.display()))) }
                         });
                     match setup {
-                        Ok(environment) => if let Err(error) = launch(config, project, executable, environment, cwd, resolver, events.clone(), cancel).await {
+                        Ok(environment) => if let Err(error) = launch(config, project, executable, environment, cwd, resolver, events.clone(), input_receiver, cancel).await {
                             let _ = events.send(RunEvent::State(format!("Run failed: {error}"))).await;
                         },
                         Err(error) => { let _ = events.send(RunEvent::State(format!("Run failed: {error}"))).await; }
@@ -313,12 +324,12 @@ impl RunService {
                 Err(error) => { let _ = events.blocking_send(RunEvent::State(format!("Run runtime failed: {error}"))); }
             }
         }).map_err(|error| RunError(error.to_string()))?;
-        Ok(RunHandle { events: receiver, cancellation, worker: Some(worker) })
+        Ok(RunHandle { events: receiver, input, cancellation, worker: Some(worker) })
     }
 }
 async fn launch(config: RunConfiguration, project: ProjectModel, executable: PathBuf,
     environment: Vec<(std::ffi::OsString, std::ffi::OsString)>, cwd: PathBuf, resolver: ClasspathResolver,
-    events: mpsc::Sender<RunEvent>, mut cancel: watch::Receiver<bool>) -> Result<(), RunError> {
+    events: mpsc::Sender<RunEvent>, mut input: mpsc::Receiver<String>, mut cancel: watch::Receiver<bool>) -> Result<(), RunError> {
     if *cancel.borrow() { return Ok(()); }
     let _ = events.send(RunEvent::State("Resolving runtime classpath with JDT LS…".into())).await;
     let paths = tokio::select! {
@@ -343,10 +354,17 @@ async fn launch(config: RunConfiguration, project: ProjectModel, executable: Pat
     else { command.arg(&config.main_class); }
     // Each saved vector entry is one argv element. No shell or command parsing.
     command.args(&config.program_args).current_dir(cwd).envs(environment).envs(&config.environment)
-        .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
+        .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
     #[cfg(unix)] command.process_group(0);
     let mut child = command.spawn().map_err(|error| RunError(format!("Cannot launch {}: {error}", executable.display())))?;
     let pid = child.id();
+    let mut stdin = child.stdin.take().ok_or_else(|| RunError("Missing Java stdin".into()))?;
+    let input_worker = tokio::spawn(async move {
+        while let Some(line) = input.recv().await {
+            if stdin.write_all(line.as_bytes()).await.is_err() { break; }
+            if stdin.flush().await.is_err() { break; }
+        }
+    });
     let stdout = child.stdout.take().ok_or_else(|| RunError("Missing Java stdout".into()))?;
     let stderr = child.stderr.take().ok_or_else(|| RunError("Missing Java stderr".into()))?;
     let out = tokio::spawn(capture(stdout, false, events.clone()));
@@ -364,6 +382,8 @@ async fn launch(config: RunConfiguration, project: ProjectModel, executable: Pat
     for mut task in [out, err] {
         if tokio::time::timeout(Duration::from_millis(300), &mut task).await.is_err() { task.abort(); let _ = task.await; }
     }
+    input_worker.abort();
+    let _ = input_worker.await;
     let status = status.map_err(|error| RunError(error.to_string()))?;
     let _ = events.send(RunEvent::Exit { code: status.code(), cancelled }).await;
     Ok(())
@@ -471,6 +491,8 @@ pub struct RunTool {
     writable: bool,
     pub summary: String,
     pub output: String,
+    pub input_line: String,
+    pub input_error: Option<String>,
     pub working_directory: Option<PathBuf>,
     pub jdk: String,
     active: Option<RunHandle>,
@@ -480,7 +502,8 @@ impl RunTool {
     pub fn begin_project_load(&mut self) {
         self.cancel();
         if let Some(handle) = self.active.take() { self.retiring.push(handle); }
-        self.output.clear(); self.summary.clear(); self.working_directory = None; self.jdk.clear(); self.editor = None;
+        self.output.clear(); self.input_line.clear(); self.input_error = None;
+        self.summary.clear(); self.working_directory = None; self.jdk.clear(); self.editor = None;
         self.configurations.clear();
         self.configuration_error = None;
         self.writable = false;
@@ -523,13 +546,28 @@ impl RunTool {
     pub fn start(&mut self, service: RunService, config: &RunConfiguration, project: &ProjectModel, jdk: &JdkInstallation) -> Result<(), RunError> {
         if self.has_workers() { return Err(RunError("Wait for the previous run to finish stopping".into())); }
         let handle = service.start(config, project, jdk)?;
-        self.active = Some(handle); self.output.clear(); self.summary = "Preparing Java run…".into();
+        self.active = Some(handle); self.output.clear(); self.input_line.clear(); self.input_error = None;
+        self.summary = "Preparing Java run…".into();
         self.working_directory = Some(config.working_directory_at(&project.root));
         self.jdk = format!("{} — {}", jdk.label(), jdk.home.display());
         Ok(())
     }
     pub fn cancel(&self) { if let Some(handle) = &self.active { handle.cancel(); } for handle in &self.retiring { handle.cancel(); } }
     pub fn has_workers(&self) -> bool { self.active.is_some() || !self.retiring.is_empty() }
+    pub fn can_send_input(&self) -> bool { self.active.is_some() }
+    pub fn send_input(&mut self, line: &str) -> Result<(), String> {
+        self.active.as_ref().ok_or_else(|| "No Java process is accepting input".to_owned())?.send_input(line)?;
+        self.output.push_str("> ");
+        self.output.push_str(line);
+        self.output.push('\n');
+        if self.output.len() > 1_048_576 {
+            let mut boundary = self.output.len() - 1_048_576;
+            while !self.output.is_char_boundary(boundary) { boundary += 1; }
+            self.output.drain(..boundary);
+        }
+        self.input_error = None;
+        Ok(())
+    }
     pub fn poll(&mut self) {
         self.retiring.retain_mut(|handle| { handle.poll(); handle.reap().is_none() });
         let Some(handle) = &mut self.active else { return; };
@@ -656,6 +694,16 @@ pub fn render(ui: &mut eframe::egui::Ui, state: &mut crate::app::AppState) {
     ui.label(&state.run.summary);
     if let Some(cwd) = &state.run.working_directory { ui.small(format!("Working directory: {}", cwd.display())); }
     if !state.run.jdk.is_empty() { ui.small(format!("Launch JDK: {}", state.run.jdk)); }
+    ui.horizontal(|ui| {
+        let input = ui.add_enabled(state.run.can_send_input(),
+            egui::TextEdit::singleline(&mut state.run.input_line).hint_text("Send input to Java process"));
+        let submit = ui.add_enabled(state.run.can_send_input(), egui::Button::new("Send")).clicked()
+            || input.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
+        if submit {
+            intents.push(AppEvent::Run(RunAction::Input(std::mem::take(&mut state.run.input_line))));
+        }
+    });
+    if let Some(error) = &state.run.input_error { ui.colored_label(ui.visuals().error_fg_color, error); }
     egui::ScrollArea::both().id_salt("run_output").stick_to_bottom(true).show(ui, |ui| { ui.monospace(&state.run.output); });
     for intent in intents { state.enqueue(intent); }
 }

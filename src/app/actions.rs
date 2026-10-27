@@ -1309,6 +1309,12 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                 };
                 match action {
                     RunAction::Stop => state.run.cancel(),
+                    RunAction::Input(line) => {
+                        if let Err(error) = state.run.send_input(&line) {
+                            state.run.input_line = line;
+                            state.run.input_error = Some(error);
+                        }
+                    }
                     RunAction::Save(config) => {
                         if state.run.loading || state.run.saving {
                             continue;
