@@ -1752,6 +1752,7 @@ pub struct LanguageTool {
     generation: u64,
     pub diagnostics: HashMap<PathBuf, Vec<LanguageDiagnostic>>,
     pub summary: String,
+    pub lombok_warning: Option<String>,
     pub completion: Option<(PathBuf, i64, Position, Vec<CompletionItem>)>,
     pub completion_selection: Option<usize>,
     pub signature_help: Option<(PathBuf, i64, Vec<SignatureInformation>, usize)>,
@@ -1906,6 +1907,7 @@ impl LanguageTool {
         selection_root: Option<&Path>,
     ) {
         self.shutdown();
+        self.lombok_warning = None;
         self.pending_maven_files.clear();
         self.documents.clear();
         self.pending_saves.clear();
@@ -2007,7 +2009,12 @@ impl LanguageTool {
                         &config,
                         self.generation,
                     ) {
-                        Ok(session) => self.session = Some(session),
+                        Ok(session) => {
+                            self.lombok_warning = (config.lombok_declared && config.lombok_agent.is_none()).then(||
+                                "Lombok is declared, but its JAR is not in the local Maven/Gradle cache. Resolve the dependency, then restart Java intelligence.".to_owned()
+                            );
+                            self.session = Some(session);
+                        }
                         Err(error) => {
                             self.summary = format!("Java intelligence unavailable: {error}")
                         }
@@ -2578,11 +2585,17 @@ pub fn render(ui: &mut eframe::egui::Ui, state: &mut crate::app::AppState) {
         }
     });
     ui.small(&state.language.summary);
+    let mut events = Vec::new();
+    if let Some(warning) = &state.language.lombok_warning {
+        ui.colored_label(ui.visuals().warn_fg_color, warning);
+        if ui.small_button("Restart Java intelligence after resolving Lombok").clicked() {
+            events.push(AppEvent::RestartLanguage);
+        }
+    }
     let active_path = state
         .active_tab
         .and_then(|index| state.editor_tabs.get(index))
         .map(|tab| tab.path.clone());
-    let mut events = Vec::new();
     if let Some(path) = &active_path {
         if let Some(items) = state.language.diagnostics.get(path) {
             egui::CollapsingHeader::new(format!("Java diagnostics ({})", items.len())).show(

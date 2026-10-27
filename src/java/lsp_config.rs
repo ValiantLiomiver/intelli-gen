@@ -135,6 +135,7 @@ pub struct JdtlsConfig {
     pub launcher_arguments: Vec<OsString>,
     /// Project-resolved Lombok agent, when Lombok is declared and already cached locally.
     pub lombok_agent: Option<PathBuf>,
+    pub lombok_declared: bool,
     pub shared_configuration: Option<PathBuf>,
     pub package_version: Option<OsString>,
     pub runtime_jdk_id: String,
@@ -164,7 +165,7 @@ impl JdtlsConfig {
         let runtime_jdk_id = settings.jdt_ls_jdk().map_err(LspError)?.id.clone();
         let application = std::env::current_exe().map_err(|error| LspError(format!("Cannot locate Intelli-gen executable: {error}")))?;
         let resolved = resolve_jdtls(settings, &application)?;
-        let lombok_agent = find_project_lombok(root);
+        let (lombok_declared, lombok_agent) = find_project_lombok(root);
         let (debug_bundle, debug_bundle_error) = match resolve_debug_bundle(settings, &application) {
             Ok(path) => (Some(path), None),
             Err(error) => (None, Some(error.to_string())),
@@ -177,7 +178,7 @@ impl JdtlsConfig {
             hash ^= u64::from(*byte);
             hash = hash.wrapping_mul(0x100000001b3);
         }
-        Ok(Self { executable: resolved.display_path, launcher_arguments: resolved.arguments, lombok_agent,
+        Ok(Self { executable: resolved.display_path, launcher_arguments: resolved.arguments, lombok_agent, lombok_declared,
             shared_configuration: resolved.shared_configuration, package_version: resolved.package_version, runtime_jdk_id,
             workspace_data: dirs.data_local_dir().join("jdtls").join(format!("{hash:016x}")),
             jdks: settings.jdks.clone(),
@@ -226,7 +227,7 @@ impl JdtlsConfig {
 
 /// Locate Lombok only when a Maven or Gradle descriptor in this workspace declares it.
 /// The IDE never downloads dependencies: only jars already present in the user's caches qualify.
-fn find_project_lombok(root: &Path) -> Option<PathBuf> {
+fn find_project_lombok(root: &Path) -> (bool, Option<PathBuf>) {
     fn inspect(dir: &Path, depth: usize, descriptors: &mut Vec<String>, catalogs: &mut Vec<String>) {
         if depth > 6 { return; }
         let Ok(entries) = std::fs::read_dir(dir) else { return; };
@@ -281,7 +282,7 @@ fn find_project_lombok(root: &Path) -> Option<PathBuf> {
             || text.contains("lombok(\"")
             || text.contains("lombok:")
     }) || catalog_version.is_some();
-    if !declared { return None; }
+    if !declared { return (false, None); }
 
     let version = descriptors.iter().find_map(|text| {
         let start = text.find("<lombok.version>")? + "<lombok.version>".len();
@@ -314,7 +315,9 @@ fn find_project_lombok(root: &Path) -> Option<PathBuf> {
             }).unwrap_or_default()
         } else { version }
     }).filter(|version| !version.is_empty() && !version.contains("${"));
-    let home = directories::UserDirs::new().map(|dirs| dirs.home_dir().to_path_buf())?;
+    let Some(home) = directories::UserDirs::new().map(|dirs| dirs.home_dir().to_path_buf()) else {
+        return (true, None);
+    };
     let maven_repository = maven_local_repository(&home);
     let gradle_home = std::env::var_os("GRADLE_USER_HOME")
         .map(PathBuf::from)
@@ -333,7 +336,7 @@ fn find_project_lombok(root: &Path) -> Option<PathBuf> {
             }
         }
     }
-    candidates.into_iter().find(|path| path.is_file())
+    (true, candidates.into_iter().find(|path| path.is_file()))
 }
 
 fn resolve_gradle_version(notation: &str, descriptors: &[String]) -> Option<String> {
