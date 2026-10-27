@@ -426,15 +426,43 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
     egui::CentralPanel::default().show(ui, |ui| {
         if state.editor_tabs.is_empty() {
             ui.vertical_centered(|ui| {
-                ui.add_space(60.0);
-                ui.heading("Java Workbench");
-                ui.label("Open a Maven or Gradle project, then select a source file.");
-                ui.add_space(12.0);
-                if ui.button("Open Project…").clicked() {
-                    actions::open_project_dialog(state);
+                ui.add_space(36.0);
+                if state.project.is_some() {
+                    ui.heading("No file open");
+                    ui.label("Choose a source file from the project tree or open another project.");
+                } else {
+                    ui.heading("Java Workbench");
+                    ui.label("Create a Java project or open an existing Maven or Gradle workspace.");
                 }
-                if ui.button("Open File…").clicked() {
-                    actions::open_file_dialog(state);
+                ui.add_space(12.0);
+                ui.horizontal(|ui| {
+                    if ui.button("New Java Project…").clicked() {
+                        state.enqueue(AppEvent::NewJavaProjectOpen);
+                    }
+                    if ui.button("Open Project…").clicked() {
+                        actions::open_project_dialog(state);
+                    }
+                    if ui.button("Open File…").clicked() {
+                        actions::open_file_dialog(state);
+                    }
+                });
+                if !state.settings.recent_projects.is_empty() {
+                    ui.add_space(28.0);
+                    ui.strong("Recent Projects");
+                    for path in state.settings.recent_projects.clone().into_iter().take(8) {
+                        let name = path
+                            .file_name()
+                            .unwrap_or(path.as_os_str())
+                            .to_string_lossy()
+                            .into_owned();
+                        if ui
+                            .button(name)
+                            .on_hover_text(path.display().to_string())
+                            .clicked()
+                        {
+                            state.enqueue(AppEvent::OpenProject(path));
+                        }
+                    }
                 }
             });
         } else {
