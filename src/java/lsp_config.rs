@@ -133,6 +133,9 @@ pub fn resolve_debug_bundle(settings: &crate::settings::UserSettings, executable
 pub struct JdtlsConfig {
     pub executable: PathBuf,
     pub launcher_arguments: Vec<OsString>,
+    /// Project-resolved Lombok agent, when Lombok is declared and already cached locally.
+    pub lombok_agent: Option<PathBuf>,
+    pub lombok_declared: bool,
     pub shared_configuration: Option<PathBuf>,
     pub package_version: Option<OsString>,
     pub runtime_jdk_id: String,
@@ -159,15 +162,14 @@ pub(crate) fn java_settings_for_maven_refresh(settings: &Value) -> Value {
 
 impl JdtlsConfig {
     pub fn from_settings(settings: &crate::settings::UserSettings, root: &Path) -> Result<Self, LspError> {
-        settings.jdt_ls_jdk().map_err(LspError)?;
+        let runtime_jdk_id = settings.jdt_ls_jdk().map_err(LspError)?.id.clone();
         let application = std::env::current_exe().map_err(|error| LspError(format!("Cannot locate Intelli-gen executable: {error}")))?;
         let resolved = resolve_jdtls(settings, &application)?;
+        let (lombok_declared, lombok_agent) = find_project_lombok(root);
         let (debug_bundle, debug_bundle_error) = match resolve_debug_bundle(settings, &application) {
             Ok(path) => (Some(path), None),
             Err(error) => (None, Some(error.to_string())),
         };
-        let runtime_jdk_id = settings.jdt_ls_jdk_id.clone()
-            .ok_or_else(|| LspError(format!("Choose a dedicated Java {}+ JDT LS runtime in Settings", settings.jdt_ls_minimum_major())))?;
         let dirs = directories::ProjectDirs::from("dev", "Intelli-gen", "Intelli-gen")
             .ok_or_else(|| LspError("Application data directory is unavailable".into()))?;
         // Stable per-build-root data identity, independent of basename or hash randomization.
@@ -176,7 +178,7 @@ impl JdtlsConfig {
             hash ^= u64::from(*byte);
             hash = hash.wrapping_mul(0x100000001b3);
         }
-        Ok(Self { executable: resolved.display_path, launcher_arguments: resolved.arguments,
+        Ok(Self { executable: resolved.display_path, launcher_arguments: resolved.arguments, lombok_agent, lombok_declared,
             shared_configuration: resolved.shared_configuration, package_version: resolved.package_version, runtime_jdk_id,
             workspace_data: dirs.data_local_dir().join("jdtls").join(format!("{hash:016x}")),
             jdks: settings.jdks.clone(),
@@ -221,4 +223,157 @@ impl JdtlsConfig {
             "autobuild": {"enabled": true}
         }}))
     }
+}
+
+/// Locate Lombok only when a Maven or Gradle descriptor in this workspace declares it.
+/// The IDE never downloads dependencies: only jars already present in the user's caches qualify.
+fn find_project_lombok(root: &Path) -> (bool, Option<PathBuf>) {
+    fn inspect(dir: &Path, depth: usize, descriptors: &mut Vec<String>, catalogs: &mut Vec<String>) {
+        if depth > 6 { return; }
+        let Ok(entries) = std::fs::read_dir(dir) else { return; };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = entry.file_name();
+            if path.is_dir() {
+                if matches!(name.to_str(), Some(".git" | "target" | "build" | ".gradle" | "node_modules")) { continue; }
+                inspect(&path, depth + 1, descriptors, catalogs);
+            } else if matches!(name.to_str(), Some("pom.xml" | "build.gradle" | "build.gradle.kts")) {
+                if let Ok(text) = std::fs::read_to_string(path) { descriptors.push(text); }
+            } else if name == "libs.versions.toml" {
+                if let Ok(text) = std::fs::read_to_string(path) { catalogs.push(text); }
+            } else if name == "gradle.properties" {
+                if let Ok(text) = std::fs::read_to_string(path) { descriptors.push(text); }
+            }
+        }
+    }
+    let mut descriptors = Vec::new();
+    let mut catalogs = Vec::new();
+    inspect(root, 0, &mut descriptors, &mut catalogs);
+    let catalog_version = catalogs.iter().find_map(|catalog| {
+        let parsed = toml::from_str::<toml::Value>(catalog).ok()?;
+        let libraries = parsed.get("libraries")?.as_table()?;
+        let versions = parsed.get("versions").and_then(toml::Value::as_table);
+        libraries.iter().find_map(|(alias, definition)| {
+            let gradle_alias = alias.replace('-', ".").replace('_', ".");
+            if !descriptors.iter().any(|text| text.contains(&format!("libs.{gradle_alias}"))) { return None; }
+            let (coordinate, version) = if let Some(coordinate) = definition.as_str() {
+                let mut parts = coordinate.split(':');
+                let group = parts.next()?;
+                let artifact = parts.next()?;
+                let version = parts.next().map(str::to_owned);
+                (format!("{group}:{artifact}"), version)
+            } else {
+                let group = definition.get("group").and_then(toml::Value::as_str).unwrap_or_default();
+                let artifact = definition.get("name").and_then(toml::Value::as_str).unwrap_or_default();
+                let coordinate = definition.get("module").and_then(toml::Value::as_str)
+                    .map(str::to_owned).unwrap_or_else(|| format!("{group}:{artifact}"));
+                let version = definition.get("version").and_then(toml::Value::as_str).map(str::to_owned)
+                    .or_else(|| definition.get("version").and_then(|value| value.get("ref"))
+                        .and_then(toml::Value::as_str).and_then(|reference| versions?.get(reference))
+                        .and_then(toml::Value::as_str).map(str::to_owned));
+                (coordinate, version)
+            };
+            (coordinate == "org.projectlombok:lombok").then_some(version).flatten()
+        })
+    });
+    let declared = descriptors.iter().any(|text| {
+        text.contains("org.projectlombok")
+            || text.contains("projectlombok:lombok")
+            || text.contains("lombok(\"")
+            || text.contains("lombok:")
+    }) || catalog_version.is_some();
+    if !declared { return (false, None); }
+
+    let version = descriptors.iter().find_map(|text| {
+        let start = text.find("<lombok.version>")? + "<lombok.version>".len();
+        let end = text[start..].find("</lombok.version>")? + start;
+        Some(text[start..end].trim().to_owned())
+    }).or_else(|| descriptors.iter().find_map(|text| {
+        let start = text.find("<artifactId>lombok</artifactId>")?;
+        let dependency_end = text[start..].find("</dependency>")? + start;
+        let block = &text[start..dependency_end];
+        let start = block.find("<version>")? + "<version>".len();
+        let end = block[start..].find("</version>")? + start;
+        Some(block[start..end].trim().to_owned())
+    })).or_else(|| {
+        descriptors.iter().find_map(|text| {
+            let start = text.find("projectlombok:lombok:")? + "projectlombok:lombok:".len();
+            let notation: String = text[start..].chars()
+                .take_while(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-' | '$' | '{' | '}'))
+                .collect();
+            resolve_gradle_version(&notation, &descriptors)
+        })
+    }).or(catalog_version);
+    let version = version.map(|version| {
+        if version.starts_with("${") && version.ends_with('}') {
+            let property = &version[2..version.len() - 1];
+            descriptors.iter().find_map(|text| {
+                let tag = format!("<{property}>");
+                let start = text.find(&tag)? + tag.len();
+                let end = text[start..].find(&format!("</{property}>"))? + start;
+                Some(text[start..end].trim().to_owned())
+            }).unwrap_or_default()
+        } else { version }
+    }).filter(|version| !version.is_empty() && !version.contains("${"));
+    let Some(home) = directories::UserDirs::new().map(|dirs| dirs.home_dir().to_path_buf()) else {
+        return (true, None);
+    };
+    let maven_repository = maven_local_repository(&home);
+    let gradle_home = std::env::var_os("GRADLE_USER_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.join(".gradle"));
+    let mut candidates = Vec::new();
+    if let Some(version) = version {
+        {
+            candidates.push(maven_repository.join("org/projectlombok/lombok").join(&version).join(format!("lombok-{version}.jar")));
+            let gradle = gradle_home.join("caches/modules-2/files-2.1/org.projectlombok/lombok").join(&version);
+            if let Ok(entries) = std::fs::read_dir(gradle) {
+                for hash in entries.flatten() {
+                    if let Ok(jars) = std::fs::read_dir(hash.path()) {
+                        candidates.extend(jars.flatten().map(|entry| entry.path()).filter(|path| path.extension().is_some_and(|ext| ext == "jar")));
+                    }
+                }
+            }
+        }
+    }
+    (true, candidates.into_iter().find(|path| path.is_file()))
+}
+
+fn resolve_gradle_version(notation: &str, descriptors: &[String]) -> Option<String> {
+    let is_version = |value: &str| {
+        !value.is_empty() && value.chars().all(|character| character.is_ascii_digit() || character == '.')
+    };
+    if is_version(notation) { return Some(notation.to_owned()); }
+    let property = notation.strip_prefix("${").and_then(|value| value.strip_suffix('}'))
+        .or_else(|| notation.strip_prefix('$'))?;
+    descriptors.iter().find_map(|text| {
+        text.lines().find_map(|line| {
+            let line = line.split("//").next()?.trim().trim_end_matches(';');
+            let (name, value) = line.split_once('=')?;
+            let name = name.trim().trim_start_matches("def ").trim_start_matches("val ")
+                .trim_start_matches("var ").trim_start_matches("ext.").trim();
+            if name != property { return None; }
+            let value = value.trim().trim_end_matches(';').trim_matches(['\'', '"']).trim();
+            is_version(value).then(|| value.to_owned())
+        })
+    })
+}
+
+fn maven_local_repository(home: &Path) -> PathBuf {
+    let settings = std::env::var_os("MAVEN_CONFIG")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.join(".m2"))
+        .join("settings.xml");
+    if let Ok(text) = std::fs::read_to_string(settings)
+        && let Some(start) = text.find("<localRepository>")
+    {
+        let start = start + "<localRepository>".len();
+        if let Some(end) = text[start..].find("</localRepository>") {
+            let configured = text[start..start + end].trim()
+                .replace("${user.home}", &home.to_string_lossy());
+            let path = PathBuf::from(configured);
+            if path.is_absolute() { return path; }
+        }
+    }
+    home.join(".m2/repository")
 }

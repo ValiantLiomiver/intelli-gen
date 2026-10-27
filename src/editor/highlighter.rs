@@ -2,12 +2,13 @@ use std::path::Path;
 use std::sync::OnceLock;
 
 use eframe::egui::{self, text::LayoutJob};
+use super::document::PAGED_EDITOR_BYTES;
 use syntect::easy::HighlightLines;
 use syntect::highlighting::ThemeSet;
 use syntect::parsing::SyntaxSet;
 use syntect::util::LinesWithEndings;
 
-pub const MAX_HIGHLIGHT_BYTES: usize = 64 * 1024;
+pub const MAX_HIGHLIGHT_BYTES: usize = PAGED_EDITOR_BYTES;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum SourceLanguage {
@@ -63,7 +64,7 @@ impl Highlighter {
                 return job.clone();
             }
         }
-        // Plain text and large buffers must not invoke the synchronous parser.
+        // The editor pages files above this bound before they reach the parser.
         if language == SourceLanguage::Plain || text.len() > MAX_HIGHLIGHT_BYTES {
             let mut job = LayoutJob::default();
             job.append(text, 0.0, egui::TextFormat {

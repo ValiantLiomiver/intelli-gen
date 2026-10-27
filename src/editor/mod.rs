@@ -13,9 +13,12 @@ use std::sync::{
 pub use document::Document;
 pub use tabs::EditorTab;
 
+pub const MAX_WORKSPACE_EDIT_BYTES: usize = 128 * 1024 * 1024;
+
 enum IoCommand {
     Load(PathBuf),
-    Save(Document),
+    LoadMany { request: u64, paths: Vec<PathBuf> },
+    Save { document: Document, destination: Option<PathBuf> },
     CreateJavaClass { root: PathBuf, directory: PathBuf, name: String, package: String },
 }
 
@@ -25,8 +28,10 @@ pub enum EditorCompletion {
         requested_path: PathBuf,
         result: Result<Document, String>,
     },
+    LoadedMany { request: u64, result: Result<Vec<Document>, String> },
     Saved {
         path: PathBuf,
+        saved_path: PathBuf,
         snapshot: String,
         result: Result<(), String>,
     },
@@ -63,10 +68,30 @@ impl EditorIo {
                             result,
                         }
                     }
-                    IoCommand::Save(mut document) => {
-                        let result = document.save().map_err(|error| error.to_string());
+                    IoCommand::LoadMany { request, paths } => {
+                        let result = (|| {
+                            let mut documents = Vec::with_capacity(paths.len());
+                            let mut bytes = 0usize;
+                            for path in paths {
+                                let document = Document::load(&path).map_err(|error| error.to_string())?;
+                                bytes = bytes.checked_add(document.text.len()).ok_or("Workspace edit size overflow")?;
+                                if bytes > MAX_WORKSPACE_EDIT_BYTES {
+                                    return Err(format!("Rename targets exceed the {} MiB workspace edit limit", MAX_WORKSPACE_EDIT_BYTES / (1024 * 1024)));
+                                }
+                                documents.push(document);
+                            }
+                            Ok(documents)
+                        })();
+                        EditorCompletion::LoadedMany { request, result }
+                    }
+                    IoCommand::Save { mut document, destination } => {
+                        let old_path = document.path.clone();
+                        let result = if let Some(destination) = destination.as_deref() {
+                            document.save_as(destination)
+                        } else { document.save() }.map_err(|error| error.to_string());
                         EditorCompletion::Saved {
-                            path: document.path,
+                            path: old_path,
+                            saved_path: if result.is_ok() { document.path } else { destination.unwrap_or(document.path) },
                             snapshot: document.text,
                             result,
                         }
@@ -105,8 +130,13 @@ impl EditorIo {
         self.submit(IoCommand::Load(path))
     }
 
-    pub fn save(&self, document: Document) -> Result<(), String> {
-        self.submit(IoCommand::Save(document))
+    pub fn load_many(&self, request: u64, paths: Vec<PathBuf>) -> Result<(), String> {
+        if paths.len() > 200 { return Err("Workspace edit load exceeds the 200-file limit".into()); }
+        self.submit(IoCommand::LoadMany { request, paths })
+    }
+
+    pub fn save(&self, document: Document, destination: Option<PathBuf>) -> Result<(), String> {
+        self.submit(IoCommand::Save { document, destination })
     }
 
     pub fn create_java_class(&self, root: PathBuf, directory: PathBuf, name: String, package: String) -> Result<(), String> {

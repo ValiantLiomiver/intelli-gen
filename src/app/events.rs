@@ -51,7 +51,10 @@ pub enum AppEvent {
     RequestQuit,
     EditorCompleted(crate::editor::EditorCompletion),
     EditorCommand(crate::java::lsp::EditorCommand),
+    RenameSymbolOpen,
+    RenameSymbolConfirm(String),
     ApplyCompletion(usize),
+    ApplyCodeAction(usize),
     Language(crate::java::lsp::LanguageUpdate),
     RestartLanguage,
     ShowPanel(ActivePanel),
@@ -196,6 +199,7 @@ pub enum DebuggerAction {
 pub enum RunAction {
     Start,
     Stop,
+    Input(String),
     Save(crate::java::run_config::RunConfiguration),
     Delete,
 }

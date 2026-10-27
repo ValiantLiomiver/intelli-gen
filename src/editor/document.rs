@@ -102,6 +102,23 @@ impl Document {
         Ok(())
     }
 
+    pub fn save_as(&mut self, destination: &Path) -> Result<(), EditorError> {
+        let source = self.path.clone();
+        if destination == source { return self.save(); }
+        let parent = destination.parent().ok_or_else(|| EditorError::new(destination, "rename", io::Error::new(io::ErrorKind::InvalidInput, "file has no parent directory")))?;
+        if parent.canonicalize().map_err(|e| EditorError::new(destination, "inspect destination", e))? != source.parent().unwrap_or(Path::new("")).canonicalize().map_err(|e| EditorError::new(&source, "inspect source directory", e))? {
+            return Err(EditorError::new(destination, "rename", io::Error::new(io::ErrorKind::InvalidInput, "Java rename must stay in the same directory")));
+        }
+        atomic_write_new(destination, self.text.as_bytes(), &source)?;
+        if let Err(error) = fs::remove_file(&source) {
+            let _ = fs::remove_file(destination);
+            return Err(EditorError::new(&source, "remove original after rename", error));
+        }
+        self.path = destination.to_owned();
+        self.saved_text.clone_from(&self.text);
+        Ok(())
+    }
+
     pub fn set_cursor(&mut self, character_index: usize) {
         self.cursor_line = 1;
         self.cursor_column = 1;
@@ -270,6 +287,33 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), EditorError> {
     Ok(())
 }
 
+fn atomic_write_new(path: &Path, bytes: &[u8], source: &Path) -> Result<(), EditorError> {
+    static NEXT_TEMP: AtomicU64 = AtomicU64::new(1_000_000);
+    let original = fs::metadata(source).map_err(|e| EditorError::new(source, "inspect before renaming", e))?;
+    if original.permissions().readonly() { return Err(EditorError::new(source, "rename", io::Error::new(io::ErrorKind::PermissionDenied, "file is read-only"))); }
+    let parent = path.parent().ok_or_else(|| EditorError::new(path, "rename", io::Error::new(io::ErrorKind::InvalidInput, "file has no parent directory")))?;
+    for _ in 0..128 {
+        let temporary = parent.join(format!(".intelli-gen-{}-{}.tmp", std::process::id(), NEXT_TEMP.fetch_add(1, Ordering::Relaxed)));
+        let mut file = match OpenOptions::new().write(true).create_new(true).open(&temporary) {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(EditorError::new(path, "create temporary rename file", error)),
+        };
+        let result = (|| {
+            file.set_permissions(original.permissions())?;
+            file.write_all(bytes)?;
+            file.sync_all()?;
+            drop(file);
+            fs::hard_link(&temporary, path)?;
+            let _ = fs::remove_file(&temporary);
+            Ok(())
+        })();
+        if let Err(error) = result { let _ = fs::remove_file(&temporary); return Err(EditorError::new(path, "write renamed file", error)); }
+        return Ok(());
+    }
+    Err(EditorError::new(path, "rename", io::Error::new(io::ErrorKind::AlreadyExists, "cannot allocate temporary rename file")))
+}
+
 impl Document {
     /// LSP columns count UTF-16 code units; the editor counts Unicode scalars.
     pub fn lsp_position(&self) -> crate::java::lsp::Position {
@@ -282,6 +326,39 @@ impl Document {
     pub fn character_index(&self) -> usize {
         self.text.split_inclusive('\n').take(self.cursor_line.saturating_sub(1)).map(|line| line.chars().count()).sum::<usize>()
             + self.cursor_column.saturating_sub(1)
+    }
+
+    pub fn word_at_cursor(&self) -> Option<String> {
+        let cursor = self.lsp_byte_offset(self.lsp_position())?;
+        let line_start = self.text[..cursor].rfind('\n').map_or(0, |newline| newline + 1);
+        let line_end = self.text[cursor..].find('\n').map_or(self.text.len(), |newline| cursor + newline);
+        let line = &self.text[line_start..line_end];
+        let cursor = cursor - line_start;
+        let is_identifier_part = |character: char| {
+            character.is_alphanumeric() || character == '_' || character == '$'
+        };
+        let start = if line.get(cursor..).and_then(|tail| tail.chars().next()).is_some_and(is_identifier_part) {
+            cursor
+        } else {
+            let (byte, character) = line[..cursor].char_indices().next_back()?;
+            is_identifier_part(character).then_some(byte)?
+        };
+        let mut start = start;
+        while start > 0 {
+            let Some((byte, character)) = line[..start].char_indices().next_back() else { break; };
+            if !is_identifier_part(character) { break; }
+            start = byte;
+        }
+        let mut end = cursor.max(start);
+        if end == start {
+            end += line[start..].chars().next()?.len_utf8();
+        }
+        while end < line.len() {
+            let character = line[end..].chars().next()?;
+            if !is_identifier_part(character) { break; }
+            end += character.len_utf8();
+        }
+        Some(line[start..end].to_owned())
     }
 
     fn lsp_byte_offset(&self, position: crate::java::lsp::Position) -> Option<usize> {

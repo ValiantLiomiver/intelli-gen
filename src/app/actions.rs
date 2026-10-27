@@ -1,4 +1,5 @@
 use eframe::egui;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use super::events::{AppEvent, MavenAction};
@@ -63,6 +64,45 @@ pub fn open_file_dialog(state: &mut AppState) {
 pub fn keyboard_shortcuts(ctx: &egui::Context, state: &mut AppState) {
     if state.quit_approved {
         return;
+    }
+    if ctx.input_mut(|input| input.consume_key(egui::Modifiers::SHIFT, egui::Key::F6)) {
+        state.enqueue(AppEvent::RenameSymbolOpen);
+    }
+    if ctx.input_mut(|input| input.consume_key(egui::Modifiers::ALT, egui::Key::Enter)) {
+        state.enqueue(AppEvent::EditorCommand(crate::java::lsp::EditorCommand::CodeActions));
+    }
+    let completion_editor = state
+        .active_tab
+        .and_then(|index| state.editor_tabs.get(index))
+        .and_then(|tab| {
+            let is_current = state.language.completion.as_ref().is_some_and(
+                |(path, _, _, items)| {
+                    path == &tab.path && items.iter().any(|item| item.applicable)
+                },
+            );
+            is_current.then(|| {
+                if tab.document.text.len() > crate::editor::document::PAGED_EDITOR_BYTES {
+                    egui::Id::unique(("paged_source_editor", &tab.path))
+                } else {
+                    egui::Id::unique(("source_editor", &tab.path))
+                }
+            })
+        });
+    if completion_editor.is_some_and(|id| ctx.memory(|memory| memory.focused() == Some(id))) {
+        if ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown)) {
+            state.language.move_completion_selection(1);
+        }
+        if ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp)) {
+            state.language.move_completion_selection(-1);
+        }
+        if ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Enter))
+            && let Some(index) = state.language.completion_selection
+        {
+            state.enqueue(AppEvent::ApplyCompletion(index));
+        }
+        if ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
+            state.language.dismiss_completion();
+        }
     }
     if ctx.input_mut(|input| {
         input.consume_key(
@@ -225,6 +265,9 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                 state.symbol_search.close();
                 state.new_java_class = None;
                 state.new_java_project = None;
+                state.rename_symbol = None;
+                state.pending_rename_request = None;
+                state.pending_workspace_edits.clear();
                 state.project_open_generation = state.project_open_generation.wrapping_add(1);
                 state.project_opening = true;
                 state.status = format!("Opening {}…", path.display());
@@ -312,6 +355,7 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                     .filter(|model| model.kind == ProjectKind::Maven)
                     .map(|model| model.root.clone());
                 state.maven_profiles.clear();
+                state.maven_profiles_user_modified = false;
                 state.maven_selected_module = None;
                 state.maven_loading = false;
                 state.maven_cache_loading = false;
@@ -629,7 +673,7 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                     .iter()
                     // The pending snapshot can differ even after edits return to
                     // the old baseline; queue another save for those tabs too.
-                    .filter(|tab| tab.document.is_dirty() || tab.saving)
+                    .filter(|tab| tab.document.is_dirty() || tab.saving || tab.pending_rename_to.is_some())
                     .map(|tab| tab.path.clone())
                     .collect();
                 for path in paths {
@@ -674,6 +718,48 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                     state.language.request(command, &tab.document);
                 }
             }
+            AppEvent::RenameSymbolOpen => begin_symbol_rename(state),
+            AppEvent::RenameSymbolConfirm(new_name) => {
+                if state.pending_rename_request.is_some() || !state.pending_workspace_edits.is_empty() {
+                    state.last_error = Some("Wait for the current Java rename to finish".into());
+                    continue;
+                }
+                let Some(dialog) = state.rename_symbol.take() else { continue; };
+                let Some(document) = state.editor_tabs.iter().find(|tab| tab.path == dialog.path).map(|tab| tab.document.clone()) else {
+                    state.last_error = Some("The Java file closed before rename started".into());
+                    continue;
+                };
+                if document.revision != dialog.revision || document.lsp_position() != dialog.position {
+                    state.last_error = Some("The Java source changed; invoke Rename Symbol again".into());
+                    continue;
+                }
+                let Some(root) = state.project.as_ref().map(|project| project.root.canonicalize().ok()).flatten() else {
+                    state.last_error = Some("Cannot resolve the open project root".into());
+                    continue;
+                };
+                let open_revisions = state.editor_tabs.iter().map(|tab| (tab.path.clone(), tab.document.revision)).collect();
+                let generation = state.language.generation();
+                state.language.sync_documents(&state.editor_tabs);
+                let synchronized_versions = state.language.document_versions();
+                let open_java_documents_synced = state.editor_tabs.iter()
+                    .filter(|tab| tab.path.extension().is_some_and(|extension| extension == "java")
+                        && tab.path.starts_with(&root))
+                    .all(|tab| synchronized_versions.get(&tab.path).is_some_and(|version|
+                        state.language.is_document_current(&tab.path, *version, &tab.document.text)));
+                if !open_java_documents_synced {
+                    state.last_error = Some("Wait for open Java files to synchronize before renaming".into());
+                    continue;
+                }
+                let open_versions = synchronized_versions.into_iter()
+                    .map(|(path, version)| (path.canonicalize().unwrap_or(path), version)).collect();
+                match state.language.request_rename(&document, dialog.position, new_name) {
+                    Ok(()) => state.pending_rename_request = Some(super::PendingRenameRequest {
+                        root, generation, source_path: dialog.path, source_revision: dialog.revision,
+                        position: dialog.position, open_revisions, open_versions,
+                    }),
+                    Err(error) => state.last_error = Some(error.to_string()),
+                }
+            }
             AppEvent::ApplyCompletion(index) => {
                 if let Some(tab) = state
                     .active_tab
@@ -681,6 +767,17 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                 {
                     match state.language.apply_completion(index, &mut tab.document) {
                         Ok(()) => tab.restore_document_cursor(),
+                        Err(error) => state.language.summary = error.to_string(),
+                    }
+                }
+            }
+            AppEvent::ApplyCodeAction(index) => {
+                if let Some(tab) = state.active_tab.and_then(|tab_index| state.editor_tabs.get_mut(tab_index)) {
+                    match state.language.apply_code_action(index, &mut tab.document) {
+                        Ok(title) => {
+                            tab.restore_document_cursor();
+                            state.language.summary = format!("Applied Java code action: {title}");
+                        }
                         Err(error) => state.language.summary = error.to_string(),
                     }
                 }
@@ -693,9 +790,26 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                     }
                     _ => None,
                 };
+                let rename_edits = match &update.event {
+                    crate::java::lsp::LanguageEvent::RenameEdits { path, version, position, result } => {
+                        Some((path.clone(), *version, *position, result.clone()))
+                    }
+                    _ => None,
+                };
                 let accepted = state.language.accepts_generation(generation);
                 state.language.receive(update);
                 if accepted {
+                    if let Some((path, version, position, result)) = rename_edits {
+                        let Some(snapshot) = state.pending_rename_request.take() else {
+                            state.language.summary = "Discarded Java rename without a current request".into();
+                            continue;
+                        };
+                        if snapshot.source_path != path || snapshot.position != position || snapshot.generation != generation {
+                            state.language.summary = "Discarded stale Java rename response".into();
+                            continue;
+                        }
+                        begin_workspace_rename(state, snapshot, version, result);
+                    }
                     if let Some((path, version, kind, result)) = document_edits {
                         if let Some(tab) = state.editor_tabs.iter_mut().find(|tab| tab.path == path) {
                             if state.language.is_document_current(&path, version, &tab.document.text) {
@@ -839,6 +953,7 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                     {
                         continue;
                     }
+                    state.maven_profiles_user_modified = true;
                     if !state.maven_profiles.remove(&profile) {
                         state.maven_profiles.insert(profile);
                     }
@@ -1026,11 +1141,7 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                 state.maven_cache_error = cache_error;
                 match result {
                     Ok(view) => {
-                        if view.profiles.iter().any(|profile| profile.id == "local") {
-                            state.maven_profiles.insert("local".into());
-                        } else {
-                            state.maven_profiles.remove("local");
-                        }
+                        sync_maven_profiles(state, &view);
                         if find_maven_module(
                             &view.root_module,
                             state.maven_selected_module.as_deref(),
@@ -1063,12 +1174,8 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                             state.maven_view = Some(cached.view);
                             state.maven_error = None;
                         }
-                        if let Some(view) = &state.maven_view {
-                            if view.profiles.iter().any(|profile| profile.id == "local") {
-                                state.maven_profiles.insert("local".into());
-                            } else {
-                                state.maven_profiles.remove("local");
-                            }
+                        if let Some(view) = state.maven_view.clone() {
+                            sync_maven_profiles(state, &view);
                         }
                         match current_pom_fingerprint {
                             Ok(current)
@@ -1121,6 +1228,8 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                         retire_maven_watcher(state);
                         state.maven_view_root = None;
                         state.maven_view = None;
+                        state.maven_profiles.clear();
+                        state.maven_profiles_user_modified = false;
                         state.maven_loading = false;
                         state.maven_view_loader.cancel();
                         state.maven_generation = state.maven_generation.wrapping_add(1);
@@ -1200,6 +1309,12 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                 };
                 match action {
                     RunAction::Stop => state.run.cancel(),
+                    RunAction::Input(line) => {
+                        if let Err(error) = state.run.send_input(&line) {
+                            state.run.input_line = line;
+                            state.run.input_error = Some(error);
+                        }
+                    }
                     RunAction::Save(config) => {
                         if state.run.loading || state.run.saving {
                             continue;
@@ -1358,6 +1473,27 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
     advance_quit(state);
 }
 
+fn sync_maven_profiles(state: &mut AppState, view: &crate::project::maven_view::MavenView) {
+    if !state.maven_profiles_user_modified {
+        state.maven_profiles = view
+            .profiles
+            .iter()
+            .filter(|profile| profile.id == "local" || profile.active_by_default)
+            .map(|profile| profile.id.clone())
+            .collect();
+        return;
+    }
+
+    let available: std::collections::HashSet<_> =
+        view.profiles.iter().map(|profile| profile.id.as_str()).collect();
+    state
+        .maven_profiles
+        .retain(|profile| available.contains(profile.as_str()));
+    if available.contains("local") {
+        state.maven_profiles.insert("local".into());
+    }
+}
+
 fn reload_maven_view(state: &mut AppState) {
     state.maven_generation = state.maven_generation.wrapping_add(1);
     state.maven_loading = false;
@@ -1386,6 +1522,7 @@ fn reload_maven_view(state: &mut AppState) {
             executable: state.settings.maven_executable.clone(),
             jdk,
             profiles,
+            profiles_user_modified: state.maven_profiles_user_modified,
             generation: state.maven_generation,
         })
     })();
@@ -1539,13 +1676,13 @@ fn save_file(state: &mut AppState, path: &std::path::Path) {
         tab.save_again = true;
         return;
     }
-    if !tab.document.is_dirty() {
+    if !tab.document.is_dirty() && tab.pending_rename_to.is_none() {
         if tab.close_after_save {
             remove_tab(state, path);
         }
         return;
     }
-    match state.editor_io.save(tab.document.clone()) {
+    match state.editor_io.save(tab.document.clone(), tab.pending_rename_to.clone()) {
         Ok(()) => {
             tab.saving = true;
             state.status = format!("Saving {}…", path.display());
@@ -1589,8 +1726,214 @@ fn remove_tab(state: &mut AppState, path: &std::path::Path) {
     }
 }
 
+fn begin_symbol_rename(state: &mut AppState) {
+    let dialog = state.active_tab.and_then(|index| state.editor_tabs.get(index)).and_then(|tab| {
+        if tab.path.extension().is_none_or(|extension| extension != "java") { return None; }
+        Some(super::RenameSymbolDialog {
+            path: tab.path.clone(), revision: tab.document.revision,
+            position: tab.document.lsp_position(),
+            old_name: tab.document.word_at_cursor()?,
+            new_name: tab.document.word_at_cursor()?,
+        })
+    });
+    match dialog {
+        Some(dialog) => state.rename_symbol = Some(dialog),
+        None => state.last_error = Some("Place the caret on a Java identifier before renaming".into()),
+    }
+}
+
+fn begin_workspace_rename(
+    state: &mut AppState,
+    snapshot: super::PendingRenameRequest,
+    version: i64,
+    result: Result<Vec<crate::java::lsp::WorkspaceFileEdits>, String>,
+) {
+    let files = match result {
+        Ok(files) => files,
+        Err(error) => { state.last_error = Some(format!("Rename failed: {error}")); return; }
+    }.into_iter().filter(|file| !file.edits.is_empty() || file.rename_to.is_some()).collect::<Vec<_>>();
+    if files.is_empty() {
+        state.language.summary = "Rename made no changes".into();
+        return;
+    }
+    if !state.language.accepts_generation(snapshot.generation) {
+        state.language.summary = "Discarded stale Java rename result".into();
+        return;
+    }
+    if state.project.as_ref().is_none_or(|project| project.root.canonicalize().ok().as_deref() != Some(&snapshot.root)) {
+        state.last_error = Some("The project changed before rename completed".into());
+        return;
+    }
+    let Some(source) = state.editor_tabs.iter().find(|tab| tab.path == snapshot.source_path) else {
+        state.last_error = Some("The Java source closed before rename completed".into());
+        return;
+    };
+    if source.document.revision != snapshot.source_revision
+        || source.document.lsp_position() != snapshot.position
+        || !state.language.is_document_current(&snapshot.source_path, version, &source.document.text)
+    {
+        state.last_error = Some("The Java source changed; invoke Rename Symbol again".into());
+        return;
+    }
+    if !state.pending_workspace_edits.is_empty() {
+        state.last_error = Some("Another workspace edit is still loading; wait and retry".into());
+        return;
+    }
+    let mut open_revisions = HashMap::new();
+    let mut closed_paths = Vec::new();
+    for file in &files {
+        if !file.path.starts_with(&snapshot.root) {
+            state.last_error = Some(format!("Rename target leaves the project: {}", file.path.display()));
+            return;
+        }
+        if let Some(version) = file.version
+            && snapshot.open_versions.get(&file.path) != Some(&version)
+        {
+            state.last_error = Some(format!("{} changed in Java intelligence while rename was running", file.path.display()));
+            return;
+        }
+        let tab = state.editor_tabs.iter().find(|tab| tab.path == file.path);
+        if let Some(revision) = snapshot.open_revisions.get(&file.path) {
+            let Some(tab) = tab.filter(|tab| tab.document.revision == *revision) else {
+                state.last_error = Some(format!("{} changed or closed while the rename was running", file.path.display()));
+                return;
+            };
+            if tab.saving || tab.close_after_save {
+                state.last_error = Some(format!("Wait for {} to finish saving or closing before renaming", file.path.display()));
+                return;
+            }
+            open_revisions.insert(file.path.clone(), *revision);
+        } else {
+            if tab.is_some() {
+                state.last_error = Some(format!("{} opened while the rename was running; retry", file.path.display()));
+                return;
+            }
+            closed_paths.push(file.path.clone());
+        }
+    }
+    state.next_workspace_edit_id = state.next_workspace_edit_id.wrapping_add(1).max(1);
+    let request = state.next_workspace_edit_id;
+    state.pending_workspace_edits.insert(request, super::PendingWorkspaceRename {
+        root: snapshot.root, generation: snapshot.generation, source_path: snapshot.source_path,
+        version, position: snapshot.position, source_revision: snapshot.source_revision,
+        open_revisions, files,
+    });
+    if closed_paths.is_empty() {
+        finish_workspace_rename(state, request, Ok(Vec::new()));
+    } else if let Err(error) = state.editor_io.load_many(request, closed_paths) {
+        state.pending_workspace_edits.remove(&request);
+        state.last_error = Some(format!("Cannot load rename targets: {error}"));
+    } else {
+        state.status = "Loading files for Java symbol rename…".into();
+    }
+}
+
+fn finish_workspace_rename(
+    state: &mut AppState,
+    request: u64,
+    result: Result<Vec<crate::editor::Document>, String>,
+) {
+    let Some(pending) = state.pending_workspace_edits.remove(&request) else { return; };
+    if !state.language.accepts_generation(pending.generation)
+        || state.project.as_ref().is_none_or(|project| project.root.canonicalize().ok().as_deref() != Some(&pending.root))
+    {
+        state.language.summary = "Discarded stale Java rename result".into();
+        return;
+    }
+    let loaded = match result {
+        Ok(documents) => documents,
+        Err(error) => { state.last_error = Some(format!("Cannot load all files for rename: {error}")); return; }
+    };
+    let Some(source) = state.editor_tabs.iter().find(|tab| tab.path == pending.source_path) else {
+        state.last_error = Some("The Java source closed before rename was applied".into());
+        return;
+    };
+    if source.document.revision != pending.source_revision
+        || source.document.lsp_position() != pending.position
+        || !state.language.is_document_current(&pending.source_path, pending.version, &source.document.text)
+    {
+        state.last_error = Some("The Java source changed while rename targets loaded; try again".into());
+        return;
+    }
+    for (path, revision) in &pending.open_revisions {
+        if state.editor_tabs.iter().find(|tab| &tab.path == path)
+            .is_none_or(|tab| tab.document.revision != *revision || tab.saving || tab.close_after_save)
+        {
+            state.last_error = Some("An open file changed while rename targets loaded; try again".into());
+            return;
+        }
+    }
+    let mut loaded: HashMap<_, _> = loaded.into_iter().map(|document| (document.path.clone(), document)).collect();
+    let mut staged = Vec::with_capacity(pending.files.len());
+    let mut staged_bytes = 0usize;
+    for file in pending.files {
+        let mut document = if let Some(tab) = state.editor_tabs.iter().find(|tab| tab.path == file.path) {
+            if !pending.open_revisions.contains_key(&file.path) {
+                state.last_error = Some("A rename target opened while the operation was loading; retry".into());
+                return;
+            }
+            tab.document.clone()
+        } else {
+            if pending.open_revisions.contains_key(&file.path) {
+                state.last_error = Some("A rename target closed while the operation was loading; retry".into());
+                return;
+            }
+            let Some(document) = loaded.remove(&file.path) else {
+                state.last_error = Some(format!("Rename target was not loaded: {}", file.path.display()));
+                return;
+            };
+            document
+        };
+        if let Err(error) = document.apply_lsp_edits(&file.edits) {
+            state.last_error = Some(format!("Cannot apply rename edits to {}: {error}", file.path.display()));
+            return;
+        }
+        staged_bytes = match staged_bytes.checked_add(document.text.len()) {
+            Some(bytes) if bytes <= crate::editor::MAX_WORKSPACE_EDIT_BYTES => bytes,
+            _ => {
+                state.last_error = Some(format!("Rename targets exceed the {} MiB workspace edit limit", crate::editor::MAX_WORKSPACE_EDIT_BYTES / (1024 * 1024)));
+                return;
+            }
+        };
+        if let Some(destination) = &file.rename_to {
+            if !destination.starts_with(&pending.root) || destination.exists() {
+                state.last_error = Some(format!("Rename destination is unavailable: {}", destination.display()));
+                return;
+            }
+            if document.path.parent() != destination.parent() {
+                state.last_error = Some("Java file rename must stay in the same directory".into());
+                return;
+            }
+        }
+        staged.push((file.path, document, file.rename_to));
+    }
+    if !loaded.is_empty() {
+        state.last_error = Some("The rename response changed while target files were loading".into());
+        return;
+    }
+    let changed = staged.len();
+    for (path, document, rename_to) in staged {
+        if let Some(tab) = state.editor_tabs.iter_mut().find(|tab| tab.path == path) {
+            tab.document = document;
+            tab.pending_rename_to = rename_to;
+            tab.refresh_after_workspace_edit();
+        } else {
+            let mut tab = EditorTab::new(document);
+            tab.pending_rename_to = rename_to;
+            state.editor_tabs.push(tab);
+        }
+    }
+    state.active_tab = state.editor_tabs.iter().position(|tab| tab.path == pending.source_path);
+    state.last_error = None;
+    state.status = format!("Renamed Java symbol across {changed} file(s); save changed tabs to keep the edits");
+    state.language.summary = format!("Rename applied to {changed} file(s)");
+}
+
 fn editor_completed(state: &mut AppState, completion: EditorCompletion) {
     match completion {
+        EditorCompletion::LoadedMany { request, result } => {
+            finish_workspace_rename(state, request, result);
+        }
         EditorCompletion::Loaded {
             requested_path,
             result,
@@ -1623,6 +1966,7 @@ fn editor_completed(state: &mut AppState, completion: EditorCompletion) {
         }
         EditorCompletion::Saved {
             path,
+            saved_path,
             snapshot,
             result,
         } => {
@@ -1632,6 +1976,7 @@ fn editor_completed(state: &mut AppState, completion: EditorCompletion) {
             let Some(index) = state.editor_tabs.iter().position(|tab| tab.path == path) else {
                 return;
             };
+            let mut refresh_directory = None;
             let tab = &mut state.editor_tabs[index];
             tab.saving = false;
             let save_again = std::mem::take(&mut tab.save_again);
@@ -1639,6 +1984,18 @@ fn editor_completed(state: &mut AppState, completion: EditorCompletion) {
                 Ok(()) => {
                     // Only the exact snapshot written to disk becomes the clean baseline.
                     tab.document.saved_text = snapshot;
+                    let mut current_path = path.clone();
+                    if saved_path != path {
+                        state.debugger.rename_breakpoint_source(&path, saved_path.clone());
+                        tab.path = saved_path.clone();
+                        tab.document.path = saved_path.clone();
+                        tab.pending_rename_to = None;
+                        current_path = saved_path.clone();
+                        if state.pending_close.as_deref() == Some(path.as_path()) {
+                            state.pending_close = Some(saved_path.clone());
+                        }
+                        refresh_directory = saved_path.parent().map(std::path::Path::to_path_buf);
+                    }
                     let dirty = tab.document.is_dirty();
                     let close = tab.close_after_save && !dirty;
                     state.status = format!(
@@ -1651,17 +2008,20 @@ fn editor_completed(state: &mut AppState, completion: EditorCompletion) {
                         }
                     );
                     if close {
-                        remove_tab(state, &path);
+                        remove_tab(state, &current_path);
                     } else if save_again && dirty {
-                        save_file(state, &path);
-                    } else if state.pending_close.as_deref() == Some(path.as_path()) && !dirty {
-                        remove_tab(state, &path);
+                        save_file(state, &current_path);
+                    } else if state.pending_close.as_deref() == Some(current_path.as_path()) && !dirty {
+                        remove_tab(state, &current_path);
                     }
                 }
                 Err(error) => {
                     tab.close_after_save = false;
                     state.last_error = Some(error);
                 }
+            }
+            if let Some(directory) = refresh_directory {
+                state.enqueue(AppEvent::RefreshProjectTree(directory));
             }
         }
         EditorCompletion::JavaClassCreated { root, directory, result } => {
@@ -1882,6 +2242,21 @@ pub fn jdk_settings_ui(ui: &mut egui::Ui, state: &mut AppState) {
         &mut state.events,
         state.jdk_discovery.has_worker(),
     );
+    if !selection_changed
+        && let (Some(selected), Ok(runtime)) = (
+            state.settings.jdt_ls_jdk_id.as_deref(),
+            state.settings.jdt_ls_jdk(),
+        )
+        && selected != runtime.id
+    {
+        ui.colored_label(
+            ui.visuals().warn_fg_color,
+            format!(
+                "Saved JDT LS runtime is incompatible; using {} for Java intelligence.",
+                runtime.label()
+            ),
+        );
+    }
     changed |= selection_changed;
     if selection_changed {
         state.pending_language_restart = true;
@@ -2064,6 +2439,8 @@ pub(crate) fn restart_language(state: &mut AppState) {
     if state.quit_requested {
         return;
     }
+    state.pending_rename_request = None;
+    state.pending_workspace_edits.clear();
     state.run.cancel();
     state.debugger.cancel();
     if state.debugger.has_workers() {

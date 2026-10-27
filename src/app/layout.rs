@@ -77,6 +77,11 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
                 }
             });
             ui.menu_button("Edit", |ui| {
+                if ui.add_enabled(state.active_tab.is_some(), egui::Button::new("Rename Symbol…    Shift+F6")).clicked() {
+                    state.enqueue(AppEvent::RenameSymbolOpen);
+                    ui.close();
+                }
+                ui.separator();
                 if ui.button("Find in Project…    ⇧⌘F").clicked() {
                     state.enqueue(AppEvent::Search(super::events::SearchAction::Open));
                     ui.close();
@@ -228,6 +233,10 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
                 ));
                 ui.separator();
                 ui.label(tab.path.display().to_string());
+                if let Some(destination) = &tab.pending_rename_to {
+                    ui.separator();
+                    ui.colored_label(ui.visuals().warn_fg_color, format!("Rename on save → {}", destination.file_name().unwrap_or_default().to_string_lossy()));
+                }
             });
         }
         if state.project_opening {
@@ -417,15 +426,43 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
     egui::CentralPanel::default().show(ui, |ui| {
         if state.editor_tabs.is_empty() {
             ui.vertical_centered(|ui| {
-                ui.add_space(60.0);
-                ui.heading("Java Workbench");
-                ui.label("Open a Maven or Gradle project, then select a source file.");
-                ui.add_space(12.0);
-                if ui.button("Open Project…").clicked() {
-                    actions::open_project_dialog(state);
+                ui.add_space(36.0);
+                if state.project.is_some() {
+                    ui.heading("No file open");
+                    ui.label("Choose a source file from the project tree or open another project.");
+                } else {
+                    ui.heading("Java Workbench");
+                    ui.label("Create a Java project or open an existing Maven or Gradle workspace.");
                 }
-                if ui.button("Open File…").clicked() {
-                    actions::open_file_dialog(state);
+                ui.add_space(12.0);
+                ui.horizontal(|ui| {
+                    if ui.button("New Java Project…").clicked() {
+                        state.enqueue(AppEvent::NewJavaProjectOpen);
+                    }
+                    if ui.button("Open Project…").clicked() {
+                        actions::open_project_dialog(state);
+                    }
+                    if ui.button("Open File…").clicked() {
+                        actions::open_file_dialog(state);
+                    }
+                });
+                if !state.settings.recent_projects.is_empty() {
+                    ui.add_space(28.0);
+                    ui.strong("Recent Projects");
+                    for path in state.settings.recent_projects.clone().into_iter().take(8) {
+                        let name = path
+                            .file_name()
+                            .unwrap_or(path.as_os_str())
+                            .to_string_lossy()
+                            .into_owned();
+                        if ui
+                            .button(name)
+                            .on_hover_text(path.display().to_string())
+                            .clicked()
+                        {
+                            state.enqueue(AppEvent::OpenProject(path));
+                        }
+                    }
                 }
             });
         } else {
@@ -529,6 +566,28 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
             }
         } else if cancel {
             state.new_java_project = None;
+        }
+    }
+    if let Some(dialog) = state.rename_symbol.as_mut() {
+        let mut confirm = false;
+        let mut cancel = false;
+        egui::Modal::new(egui::Id::unique("rename_symbol_modal")).show(ui.ctx(), |ui| {
+            ui.heading("Rename Java Symbol");
+            ui.label(format!("{} in {}", dialog.old_name, dialog.path.display()));
+            let input_id = egui::Id::new("rename_symbol_name");
+            let was_focused = ui.ctx().memory(|memory| memory.has_focus(input_id));
+            let input = ui.add(egui::TextEdit::singleline(&mut dialog.new_name).id(input_id).hint_text("New name"));
+            if !was_focused { input.request_focus(); }
+            confirm = ui.add_enabled(!dialog.new_name.trim().is_empty(), egui::Button::new("Rename")).clicked()
+                || input.has_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
+            cancel = ui.button("Cancel").clicked();
+        });
+        if confirm {
+            let new_name = dialog.new_name.trim().to_owned();
+            state.rename_symbol = None;
+            state.enqueue(AppEvent::RenameSymbolConfirm(new_name));
+        } else if cancel {
+            state.rename_symbol = None;
         }
     }
 }

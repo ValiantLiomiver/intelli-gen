@@ -1,5 +1,6 @@
 //! Stdio JSON RPC client with worker-owned process and explicit shutdown/reaping.
 use std::collections::HashMap;
+use std::ffi::OsString;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -38,9 +39,11 @@ pub enum EditorCommand {
     TypeDefinition,
     Implementation,
     References,
+    CodeActions,
     DocumentSymbols,
     Format,
     OrganizeImports,
+    Rename,
 }
 impl EditorCommand {
     fn method(self) -> &'static str {
@@ -52,9 +55,11 @@ impl EditorCommand {
             Self::TypeDefinition => "textDocument/typeDefinition",
             Self::Implementation => "textDocument/implementation",
             Self::References => "textDocument/references",
+            Self::CodeActions => "textDocument/codeAction",
             Self::DocumentSymbols => "textDocument/documentSymbol",
             Self::Format => "textDocument/formatting",
             Self::OrganizeImports => "java/organizeImports",
+            Self::Rename => "textDocument/rename",
         }
     }
 }
@@ -75,7 +80,7 @@ pub struct Range {
     pub start: Position,
     pub end: Position,
 }
-#[derive(Clone, Debug, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 pub struct LanguageDiagnostic {
     pub range: Range,
     pub severity: Option<u32>,
@@ -85,6 +90,13 @@ pub struct LanguageDiagnostic {
 pub struct Location {
     pub path: PathBuf,
     pub range: Range,
+}
+#[derive(Clone, Debug)]
+pub struct WorkspaceFileEdits {
+    pub path: PathBuf,
+    pub edits: Vec<(Range, String)>,
+    pub rename_to: Option<PathBuf>,
+    pub version: Option<i64>,
 }
 #[derive(Clone, Debug)]
 pub struct WorkspaceSymbol {
@@ -99,6 +111,11 @@ pub struct OutlineSymbol {
     pub kind: u64,
     pub location: Location,
     pub depth: usize,
+}
+#[derive(Clone, Debug)]
+pub struct CodeActionItem {
+    pub title: String,
+    pub edits: Vec<(Range, String)>,
 }
 #[derive(Clone, Debug)]
 pub struct CompletionItem {
@@ -159,6 +176,12 @@ pub enum LanguageEvent {
         version: i64,
         locations: Vec<Location>,
     },
+    CodeActions {
+        path: PathBuf,
+        version: i64,
+        position: Position,
+        result: Result<Vec<CodeActionItem>, String>,
+    },
     WorkspaceSymbols {
         query: String,
         result: Result<Vec<WorkspaceSymbol>, String>,
@@ -173,6 +196,12 @@ pub enum LanguageEvent {
         version: i64,
         kind: DocumentEditKind,
         result: Result<Vec<(Range, String)>, String>,
+    },
+    RenameEdits {
+        path: PathBuf,
+        version: i64,
+        position: Position,
+        result: Result<Vec<WorkspaceFileEdits>, String>,
     },
     ServerState(String),
 }
@@ -397,9 +426,13 @@ enum LanguageCommand {
     Request {
         command: EditorCommand,
         path: PathBuf,
+        project_root: PathBuf,
         position: Position,
         document_end: Position,
+        range: Range,
+        diagnostics: Vec<LanguageDiagnostic>,
         version: i64,
+        rename_to: Option<String>,
     },
     SearchSymbols {
         query: String,
@@ -540,6 +573,16 @@ fn document_end_position(text: &str) -> Position {
         character: u32::try_from(last_line.encode_utf16().count()).unwrap_or(u32::MAX),
     }
 }
+fn document_line_range(text: &str, line: u32) -> Range {
+    let contents = text.lines().nth(line as usize).unwrap_or_default();
+    Range {
+        start: Position { line, character: 0 },
+        end: Position {
+            line,
+            character: u32::try_from(contents.encode_utf16().count()).unwrap_or(u32::MAX),
+        },
+    }
+}
 fn file_path(value: &Value) -> Option<PathBuf> {
     Url::parse(value.as_str()?).ok()?.to_file_path().ok()
 }
@@ -635,6 +678,17 @@ async fn run(
     }
     std::fs::create_dir_all(&config.workspace_data)?;
     let mut launcher_arguments = config.launcher_arguments.clone();
+    // Lombok patches JDT inside the language-server JVM, so attach the project's
+    // existing jar before Equinox starts. Do not affect custom launchers whose
+    // argument contract is user-defined.
+    if config.shared_configuration.is_some()
+        && let Some(agent) = &config.lombok_agent
+    {
+        let mut argument = OsString::from("-javaagent:");
+        argument.push(agent.as_os_str());
+        let position = launcher_arguments.iter().position(|value| value == "-jar").unwrap_or(launcher_arguments.len());
+        launcher_arguments.insert(position, argument);
+    }
     if let (Some(shared), Some(version)) = (&config.shared_configuration, &config.package_version) {
         let configuration = config.workspace_data.join("configuration").join(version);
         if !configuration.exists() {
@@ -657,17 +711,36 @@ async fn run(
     } else {
         runtime.home.join("bin/java")
     };
+    let mut child_environment = runtime
+        .child_environment()
+        .map_err(|error| LspError(error.to_string()))?;
+    if config.shared_configuration.is_none()
+        && let Some(agent) = &config.lombok_agent
+    {
+        let mut options = std::env::var_os("JAVA_TOOL_OPTIONS").unwrap_or_default();
+        let agent_text = agent.to_string_lossy();
+        if !options.to_string_lossy().contains(agent_text.as_ref()) {
+            if !options.is_empty() { options.push(" "); }
+            options.push("-javaagent:");
+            let quote = if agent_text.chars().any(char::is_whitespace)
+                || agent_text.contains('"') || agent_text.contains('\'') {
+                if !agent_text.contains('"') { Some('"') }
+                else if !agent_text.contains('\'') { Some('\'') }
+                else { return Err(LspError("Cannot quote the Lombok JAR path for the custom JDT LS launcher".into())); }
+            } else { None };
+            if let Some(quote) = quote { options.push(quote.to_string()); }
+            options.push(agent.as_os_str());
+            if let Some(quote) = quote { options.push(quote.to_string()); }
+            child_environment.push(("JAVA_TOOL_OPTIONS".into(), options));
+        }
+    }
     let mut command = tokio::process::Command::new(program);
     command
         .args(&launcher_arguments)
         .arg("-data")
         .arg(&config.workspace_data)
         .current_dir(&project.root)
-        .envs(
-            runtime
-                .child_environment()
-                .map_err(|error| LspError(error.to_string()))?,
-        )
+        .envs(child_environment)
         // JDT LS uses stdio unless one of these inherited socket settings exists.
         .env_remove("CLIENT_PORT")
         .env_remove("CLIENT_HOST")
@@ -912,8 +985,10 @@ fn kill_group(pid: Option<u32>) {
 struct Pending {
     command: EditorCommand,
     path: PathBuf,
+    project_root: PathBuf,
     version: i64,
     position: Position,
+    rename_to: Option<String>,
     sent: Instant,
 }
 
@@ -933,10 +1008,12 @@ async fn protocol(
         "rootUri": root_uri, "workspaceFolders": [{"uri": root_uri, "name": project.root.file_name().unwrap_or_default().to_string_lossy()}],
         "capabilities": {"general": {"positionEncodings": ["utf-16"]},
             "workspace": {"configuration": true, "workspaceFolders": true, "applyEdit": false,
+                "workspaceEdit": {"documentChanges": true, "resourceOperations": ["rename"]},
                 "didChangeWatchedFiles": {"dynamicRegistration": true},
                 "symbol": {"symbolKind": {"valueSet": (1..=26).collect::<Vec<_>>()}}},
                 "textDocument": {"synchronization": {"didSave": true}, "publishDiagnostics": {"versionSupport": true},
                 "documentSymbol": {"hierarchicalDocumentSymbolSupport": true},
+                "codeAction": {"codeActionLiteralSupport": {"codeActionKind": {"valueSet": ["quickfix", "refactor", "source"]}}},
                 "completion": {"completionItem": {"snippetSupport": false, "resolveSupport": {"properties": []}}},
                 "signatureHelp": {"signatureInformation": {"documentationFormat": ["plaintext"]}},
                 "hover": {"contentFormat": ["plaintext"]}, "definition": {"linkSupport": true},
@@ -1044,15 +1121,29 @@ async fn protocol(
                     LanguageCommand::Change { path, text, version } => notify(input, "textDocument/didChange", json!({"textDocument": {"uri": uri(&path)?, "version": version}, "contentChanges": [{"text": text}]})).await?,
                     LanguageCommand::Save(path) => notify(input, "textDocument/didSave", json!({"textDocument": {"uri": uri(&path)?}})).await?,
                     LanguageCommand::Close(path) => notify(input, "textDocument/didClose", json!({"textDocument": {"uri": uri(&path)?}})).await?,
-                    LanguageCommand::Request { command, path, position, document_end, version } => {
+                    LanguageCommand::Request { command, path, project_root, position, document_end, range, diagnostics, version, rename_to } => {
                         let id = next_id; next_id += 1;
                         let mut params = json!({"textDocument": {"uri": uri(&path)?}, "position": position});
+                        if let Some(new_name) = &rename_to {
+                            params["newName"] = json!(new_name);
+                        }
                         if command == EditorCommand::DocumentSymbols { params = json!({"textDocument": {"uri": uri(&path)?}}); }
                         if command == EditorCommand::Format { params = json!({"textDocument": {"uri": uri(&path)?}, "options": {"tabSize": 4, "insertSpaces": true}}); }
                         if command == EditorCommand::OrganizeImports { params = json!({"textDocument": {"uri": uri(&path)?}, "range": {"start": {"line": 0, "character": 0}, "end": document_end}, "context": {"diagnostics": []}}); }
+                        if command == EditorCommand::CodeActions { params = json!({"textDocument": {"uri": uri(&path)?}, "range": range, "context": {"diagnostics": diagnostics}}); }
                         if command == EditorCommand::References { params["context"] = json!({"includeDeclaration": true}); }
-                        if pending.len() + pending_symbols.len() >= 32 { let _ = events.send(LanguageEvent::ServerState("Too many Java requests pending; try again shortly".into())).await; continue; }
-                        pending.insert(id, Pending { command, path, version, position, sent: Instant::now() });
+                        if pending.len() + pending_symbols.len() >= 32 {
+                            if rename_to.is_some() {
+                                let _ = events.send(LanguageEvent::RenameEdits {
+                                    path, version, position,
+                                    result: Err("Too many Java requests pending; try again shortly".into()),
+                                }).await;
+                            } else {
+                                let _ = events.send(LanguageEvent::ServerState("Too many Java requests pending; try again shortly".into())).await;
+                            }
+                            continue;
+                        }
+                        pending.insert(id, Pending { command, path, project_root, version, position, rename_to, sent: Instant::now() });
                         send(input, json!({"jsonrpc": "2.0", "id": id, "method": command.method(), "params": params})).await?;
                     }
                     LanguageCommand::SearchSymbols { query } => {
@@ -1238,6 +1329,13 @@ async fn server_message(
 }
 
 async fn deliver_response(request: Pending, result: &Value, events: &LanguageEventSender) {
+    if request.rename_to.is_some() {
+        let result = parse_rename_workspace_edits(&request.project_root, result);
+        let _ = events.send(LanguageEvent::RenameEdits {
+            path: request.path, version: request.version, position: request.position, result,
+        }).await;
+        return;
+    }
     let Pending {
         command,
         path,
@@ -1350,6 +1448,10 @@ async fn deliver_response(request: Pending, result: &Value, events: &LanguageEve
             version,
             locations: locations(result),
         },
+        EditorCommand::CodeActions => {
+            let result = parse_code_actions(&path, version, result);
+            LanguageEvent::CodeActions { path, version, position, result }
+        }
         EditorCommand::DocumentSymbols => LanguageEvent::DocumentSymbols {
             result: document_symbols(result, &path),
             path,
@@ -1363,10 +1465,11 @@ async fn deliver_response(request: Pending, result: &Value, events: &LanguageEve
             };
             let result = match kind {
                 DocumentEditKind::Format => parse_text_edits(result),
-                DocumentEditKind::OrganizeImports => parse_workspace_edits(&path, result),
+                DocumentEditKind::OrganizeImports => parse_workspace_edits(&path, version, result),
             };
             LanguageEvent::DocumentEdits { path, version, kind, result }
         }
+        EditorCommand::Rename => LanguageEvent::ServerState("Rename response was missing its new name".into()),
     };
     let _ = events.send(event).await;
 }
@@ -1388,9 +1491,69 @@ fn parse_text_edits(value: &Value) -> Result<Vec<(Range, String)>, String> {
     }).collect()
 }
 
-fn parse_workspace_edits(path: &Path, value: &Value) -> Result<Vec<(Range, String)>, String> {
+fn parse_code_actions(path: &Path, version: i64, value: &Value) -> Result<Vec<CodeActionItem>, String> {
+    if value.is_null() { return Ok(Vec::new()); }
+    let actions = value.as_array().ok_or("JDT LS returned an invalid code action list")?;
+    let mut result = Vec::new();
+    let mut total_edits = 0usize;
+    for action in actions.iter().take(100) {
+        let Some(title) = action["title"].as_str() else { continue; };
+        if title.is_empty() || action.get("disabled").is_some_and(|disabled| !disabled.is_null())
+            || action.get("command").is_some_and(|command| !command.is_null())
+        { continue; }
+        let edit = &action["edit"];
+        if edit.is_null() || edit["changeAnnotations"].as_object().is_some_and(|items| !items.is_empty()) { continue; }
+        if edit.get("changes").is_some_and(|changes| !changes.is_null())
+            && edit.get("documentChanges").is_some_and(|changes| !changes.is_null())
+        { continue; }
+        let mut edits = Vec::new();
+        let mut valid = true;
+        if let Some(changes) = edit["changes"].as_object() {
+            for (document_uri, raw_edits) in changes {
+                let Some(target) = file_path(&Value::String(document_uri.clone())) else { valid = false; break; };
+                if !same_document_path(&target, path) { valid = false; break; }
+                let Ok(parsed) = parse_text_edits(raw_edits) else { valid = false; break; };
+                edits.extend(parsed);
+            }
+        }
+        if valid {
+            if let Some(changes) = edit["documentChanges"].as_array() {
+                for change in changes {
+                    if change.get("kind").is_some() { valid = false; break; }
+                    let Some(document_uri) = change["textDocument"]["uri"].as_str() else { valid = false; break; };
+                    let document_version = &change["textDocument"]["version"];
+                    if !document_version.is_null() && document_version.as_i64() != Some(version) {
+                        valid = false;
+                        break;
+                    }
+                    let Some(target) = file_path(&Value::String(document_uri.to_owned())) else { valid = false; break; };
+                    if !same_document_path(&target, path) { valid = false; break; }
+                    let Ok(parsed) = parse_text_edits(&change["edits"]) else { valid = false; break; };
+                    edits.extend(parsed);
+                }
+            }
+        }
+        if valid && !edits.is_empty() {
+            total_edits = total_edits.checked_add(edits.len()).ok_or("Too many code action edits")?;
+            if total_edits > 20_000 { return Err("JDT LS returned too many code action edits".into()); }
+            result.push(CodeActionItem { title: title.chars().take(256).collect(), edits });
+        }
+    }
+    Ok(result)
+}
+
+fn same_document_path(candidate: &Path, current: &Path) -> bool {
+    candidate == current || candidate.canonicalize().ok().as_deref() == Some(current)
+}
+
+fn parse_workspace_edits(path: &Path, version: i64, value: &Value) -> Result<Vec<(Range, String)>, String> {
     if value.is_null() {
         return Ok(Vec::new());
+    }
+    if value.get("changes").is_some_and(|changes| !changes.is_null())
+        && value.get("documentChanges").is_some_and(|changes| !changes.is_null())
+    {
+        return Err("JDT LS returned both workspace change formats".into());
     }
     let mut edits = Vec::new();
     let mut found = false;
@@ -1407,7 +1570,12 @@ fn parse_workspace_edits(path: &Path, value: &Value) -> Result<Vec<(Range, Strin
     }
     if let Some(document_changes) = value["documentChanges"].as_array() {
         for change in document_changes {
-            let uri = change["textDocument"]["uri"].as_str()
+            let document = change.get("textDocument").ok_or("JDT LS returned an unsupported resource operation")?;
+            let document_version = &document["version"];
+            if !document_version.is_null() && document_version.as_i64() != Some(version) {
+                return Err("JDT LS returned edits for an outdated document version".into());
+            }
+            let uri = document["uri"].as_str()
                 .ok_or("JDT LS returned an unsupported resource operation")?;
             let target = file_path(&Value::String(uri.to_owned()))
                 .ok_or_else(|| format!("JDT LS returned a non-file edit URI: {uri}"))?;
@@ -1425,6 +1593,83 @@ fn parse_workspace_edits(path: &Path, value: &Value) -> Result<Vec<(Range, Strin
         return Err("JDT LS returned too many workspace edits".into());
     }
     Ok(edits)
+}
+
+fn parse_rename_workspace_edits(
+    root: &Path,
+    value: &Value,
+) -> Result<Vec<WorkspaceFileEdits>, String> {
+    if value.is_null() { return Ok(Vec::new()); }
+    let root = root.canonicalize().map_err(|error| format!("Cannot resolve project root: {error}"))?;
+    if value.get("changes").is_some_and(|changes| !changes.is_null() && !changes.is_object()) {
+        return Err("JDT LS returned an invalid workspace changes map".into());
+    }
+    if value.get("documentChanges").is_some_and(|changes| !changes.is_null() && !changes.is_array()) {
+        return Err("JDT LS returned an invalid document changes list".into());
+    }
+    let mut by_path: std::collections::BTreeMap<PathBuf, WorkspaceFileEdits> = std::collections::BTreeMap::new();
+    let mut resource_renames = Vec::new();
+    let mut total_edits = 0usize;
+    let mut append = |uri_value: &Value, edits_value: &Value, version: Option<i64>| -> Result<(), String> {
+        let raw_uri = uri_value.as_str().ok_or("JDT LS returned an edit without a document URI")?;
+        let path = file_path(&Value::String(raw_uri.to_owned()))
+            .ok_or_else(|| format!("JDT LS returned a non-file edit URI: {raw_uri}"))?;
+        let canonical = path.canonicalize().map_err(|error| format!("Cannot resolve rename target {}: {error}", path.display()))?;
+        let metadata = std::fs::metadata(&canonical).map_err(|error| format!("Cannot inspect rename target {}: {error}", canonical.display()))?;
+        if !metadata.is_file() || !canonical.starts_with(&root) {
+            return Err(format!("Rename target must be a regular file inside the open project: {}", canonical.display()));
+        }
+        let edits = parse_text_edits(edits_value)?;
+        total_edits = total_edits.checked_add(edits.len()).ok_or("Too many rename edits")?;
+        if total_edits > 20_000 { return Err("JDT LS returned too many rename edits".into()); }
+        let entry = by_path.entry(canonical.clone()).or_insert_with(|| WorkspaceFileEdits {
+            path: canonical, edits: Vec::new(), rename_to: None, version,
+        });
+        if entry.version != version {
+            return Err(format!("JDT LS returned inconsistent document versions for {}", entry.path.display()));
+        }
+        entry.edits.extend(edits);
+        if by_path.len() > 200 { return Err("Rename affects more than 200 files; narrow the symbol scope and try again".into()); }
+        Ok(())
+    };
+    if let Some(changes) = value["changes"].as_object() {
+        for (uri, edits) in changes { append(&Value::String(uri.clone()), edits, None)?; }
+    }
+    if let Some(changes) = value["documentChanges"].as_array() {
+        for change in changes {
+            if change.get("kind").is_some() {
+                if change["kind"].as_str() != Some("rename") { return Err("JDT LS returned an unsupported resource operation".into()); }
+                let old_uri = change["oldUri"].as_str().ok_or("JDT LS returned a rename without oldUri")?;
+                let new_uri = change["newUri"].as_str().ok_or("JDT LS returned a rename without newUri")?;
+                let old_path = file_path(&Value::String(old_uri.to_owned())).ok_or("JDT LS returned a non-file rename source")?.canonicalize().map_err(|error| format!("Cannot resolve rename source: {error}"))?;
+                let new_path = file_path(&Value::String(new_uri.to_owned())).ok_or("JDT LS returned a non-file rename destination")?;
+                let parent = new_path.parent().ok_or("Rename destination has no parent")?.canonicalize().map_err(|error| format!("Cannot resolve rename destination directory: {error}"))?;
+                let destination = parent.join(new_path.file_name().ok_or("Rename destination has no filename")?);
+                if !old_path.starts_with(&root) || parent != old_path.parent().unwrap_or(Path::new(""))
+                    || old_path.extension().is_none_or(|ext| ext != "java")
+                    || destination.extension().is_none_or(|ext| ext != "java")
+                    || std::fs::symlink_metadata(&destination).is_ok()
+                { return Err("Java source rename must stay in the same project directory and cannot overwrite a file".into()); }
+                resource_renames.push((old_path, destination));
+            } else {
+                let document = change.get("textDocument").ok_or("JDT LS returned an invalid document change")?;
+                let version = match &document["version"] {
+                    Value::Null => None,
+                    value => Some(value.as_i64().ok_or("JDT LS returned an invalid document version")?),
+                };
+                append(&document["uri"], &change["edits"], version)?;
+            }
+        }
+    }
+    if value.get("changes").is_none() && value.get("documentChanges").is_none() {
+        return Err("JDT LS returned an invalid workspace edit".into());
+    }
+    drop(append);
+    for (old_path, destination) in resource_renames {
+        let entry = by_path.entry(old_path.clone()).or_insert_with(|| WorkspaceFileEdits { path: old_path, edits: Vec::new(), rename_to: None, version: None });
+        if entry.rename_to.replace(destination).is_some() { return Err("JDT LS returned multiple file renames for one source".into()); }
+    }
+    Ok(by_path.into_values().collect())
 }
 
 fn signature_parameter_label(signature_label: &str, parameter_label: &Value) -> Option<String> {
@@ -1460,6 +1705,12 @@ fn utf16_offset_to_byte(text: &str, offset: usize) -> Option<usize> {
 }
 
 async fn deliver_request_error(request: Pending, error: String, events: &LanguageEventSender) {
+    if request.rename_to.is_some() {
+        let _ = events.send(LanguageEvent::RenameEdits {
+            path: request.path, version: request.version, position: request.position, result: Err(error),
+        }).await;
+        return;
+    }
     if matches!(request.command, EditorCommand::Format | EditorCommand::OrganizeImports) {
         let kind = if request.command == EditorCommand::Format {
             DocumentEditKind::Format
@@ -1480,6 +1731,13 @@ async fn deliver_request_error(request: Pending, error: String, events: &Languag
                 result: Err(error),
             })
             .await;
+    } else if request.command == EditorCommand::CodeActions {
+        let _ = events.send(LanguageEvent::CodeActions {
+            path: request.path,
+            version: request.version,
+            position: request.position,
+            result: Err(error),
+        }).await;
     } else {
         let _ = events.send(LanguageEvent::ServerState(error)).await;
     }
@@ -1627,7 +1885,11 @@ pub struct LanguageTool {
     generation: u64,
     pub diagnostics: HashMap<PathBuf, Vec<LanguageDiagnostic>>,
     pub summary: String,
+    pub lombok_warning: Option<String>,
+    pub code_actions: Option<(PathBuf, i64, Position, Vec<CodeActionItem>)>,
+    pub code_actions_error: Option<(PathBuf, i64, String)>,
     pub completion: Option<(PathBuf, i64, Position, Vec<CompletionItem>)>,
+    pub completion_selection: Option<usize>,
     pub signature_help: Option<(PathBuf, i64, Vec<SignatureInformation>, usize)>,
     pub hover: Option<(PathBuf, String)>,
     pub locations: Vec<Location>,
@@ -1780,11 +2042,13 @@ impl LanguageTool {
         selection_root: Option<&Path>,
     ) {
         self.shutdown();
+        self.lombok_warning = None;
         self.pending_maven_files.clear();
         self.documents.clear();
         self.pending_saves.clear();
         self.diagnostics.clear();
         self.completion = None;
+        self.completion_selection = None;
         self.signature_help = None;
         self.hover = None;
         self.locations.clear();
@@ -1797,6 +2061,8 @@ impl LanguageTool {
         self.document_symbols.clear();
         self.document_symbols_loading = false;
         self.document_symbols_error = None;
+        self.code_actions = None;
+        self.code_actions_error = None;
         self.root = project.map(|project| project.root.clone());
         let Some(project) =
             project.filter(|project| project.kind != crate::project::ProjectKind::Unknown)
@@ -1880,7 +2146,12 @@ impl LanguageTool {
                         &config,
                         self.generation,
                     ) {
-                        Ok(session) => self.session = Some(session),
+                        Ok(session) => {
+                            self.lombok_warning = (config.lombok_declared && config.lombok_agent.is_none()).then(||
+                                "Lombok is declared, but its JAR is not in the local Maven/Gradle cache. Resolve the dependency, then restart Java intelligence.".to_owned()
+                            );
+                            self.session = Some(session);
+                        }
                         Err(error) => {
                             self.summary = format!("Java intelligence unavailable: {error}")
                         }
@@ -2012,9 +2283,13 @@ impl LanguageTool {
             session.try_command(LanguageCommand::Request {
                 command: EditorCommand::DocumentSymbols,
                 path: document.path.clone(),
+                project_root: self.root.clone().ok_or_else(|| LspError("No Java workspace is open".into()))?,
                 position: document.lsp_position(),
                 document_end: document_end_position(&document.text),
+                range: document_line_range(&document.text, document.lsp_position().line),
+                diagnostics: Vec::new(),
                 version: synced.version,
+                rename_to: None,
             })?;
             self.document_symbols_version = Some(synced.version);
             Ok::<(), LspError>(())
@@ -2093,7 +2368,10 @@ impl LanguageTool {
                     previous.version = version;
                     previous.text.clone_from(&document.text);
                     self.diagnostics.remove(&tab.path);
+                    self.code_actions = None;
+                    self.code_actions_error = None;
                     self.completion = None;
+                    self.completion_selection = None;
                     self.signature_help = None;
                     self.hover = None;
                     if self.document_symbols_path.as_ref() == Some(&tab.path) {
@@ -2127,6 +2405,10 @@ impl LanguageTool {
         }
     }
     pub fn request(&mut self, command: EditorCommand, document: &Document) {
+        if command == EditorCommand::CodeActions {
+            self.code_actions = None;
+            self.code_actions_error = None;
+        }
         let result = (|| {
             let session = self
                 .session
@@ -2142,14 +2424,52 @@ impl LanguageTool {
             session.try_command(LanguageCommand::Request {
                 command,
                 path: document.path.clone(),
+                project_root: self.root.clone().ok_or_else(|| LspError("No Java workspace is open".into()))?,
                 position: document.lsp_position(),
                 document_end: document_end_position(&document.text),
+                range: document_line_range(&document.text, document.lsp_position().line),
+                diagnostics: if command == EditorCommand::CodeActions {
+                    self.diagnostics.get(&document.path).into_iter().flatten()
+                        .filter(|diagnostic| diagnostic.range.start.line <= document.lsp_position().line
+                            && diagnostic.range.end.line >= document.lsp_position().line)
+                        .cloned().collect()
+                } else { Vec::new() },
                 version: synced.version,
+                rename_to: None,
             })
         })();
         if let Err(error) = result {
             self.summary = error.to_string();
         }
+    }
+    pub fn request_rename(&mut self, document: &Document, position: Position, new_name: String) -> Result<(), LspError> {
+        let result = (|| {
+            if new_name.trim().is_empty() || new_name.chars().count() > 256 {
+                return Err(LspError("Enter a nonempty Java name of at most 256 characters".into()));
+            }
+            if document.lsp_position() != position {
+                return Err(LspError("The rename location changed; invoke Rename Symbol again".into()));
+            }
+            let session = self.session.as_ref().ok_or_else(|| LspError(self.summary.clone()))?;
+            let synced = self.documents.get(&document.path)
+                .filter(|synced| synced.text == document.text)
+                .ok_or_else(|| LspError("Java document is not synchronized yet; try again shortly".into()))?;
+            let project_root = self.root.clone().ok_or_else(|| LspError("No Java workspace is open".into()))?;
+            session.try_command(LanguageCommand::Request {
+                command: EditorCommand::Rename,
+                path: document.path.clone(), project_root, position,
+                document_end: document_end_position(&document.text),
+                range: document_line_range(&document.text, position.line), diagnostics: Vec::new(),
+                version: synced.version,
+                rename_to: Some(new_name.trim().to_owned()),
+            })
+        })();
+        if let Err(error) = &result { self.summary = error.to_string(); }
+        result
+    }
+    pub fn generation(&self) -> u64 { self.generation }
+    pub fn document_versions(&self) -> std::collections::HashMap<PathBuf, i64> {
+        self.documents.iter().map(|(path, document)| (path.clone(), document.version)).collect()
     }
     pub fn accepts_generation(&self, generation: u64) -> bool {
         self.generation == generation
@@ -2191,7 +2511,19 @@ impl LanguageTool {
                 position,
                 items,
             } if self.current(&path, version) => {
+                self.completion_selection = items.iter().position(|item| item.applicable);
                 self.completion = Some((path, version, position, items));
+            }
+            LanguageEvent::CodeActions { path, version, position, result }
+                if self.current(&path, version) =>
+            {
+                match result {
+                    Ok(actions) => {
+                        self.code_actions = Some((path, version, position, actions));
+                        self.code_actions_error = None;
+                    }
+                    Err(error) => self.code_actions_error = Some((path, version, error)),
+                }
             }
             LanguageEvent::SignatureHelp {
                 path,
@@ -2333,7 +2665,54 @@ impl LanguageTool {
         edits.push((range, item.insert_text.clone()));
         document.apply_lsp_edits(&edits).map_err(LspError)?;
         self.completion = None;
+        self.completion_selection = None;
         Ok(())
+    }
+
+    pub fn apply_code_action(&mut self, index: usize, document: &mut Document) -> Result<String, LspError> {
+        let (path, version, position, action) = self.code_actions.as_ref()
+            .and_then(|(path, version, position, actions)| actions.get(index).map(|action| (path, version, position, action)))
+            .ok_or_else(|| LspError("The selected Java code action is no longer available".into()))?;
+        if path != &document.path || document.lsp_position() != *position || !self.is_document_current(path, *version, &document.text) {
+            self.code_actions = None;
+            return Err(LspError("The Java source changed; request code actions again".into()));
+        }
+        let title = action.title.clone();
+        document.apply_lsp_edits(&action.edits).map_err(LspError)?;
+        self.code_actions = None;
+        Ok(title)
+    }
+
+    pub fn move_completion_selection(&mut self, direction: i32) -> Option<usize> {
+        let items = &self.completion.as_ref()?.3;
+        let available: Vec<_> = items
+            .iter()
+            .enumerate()
+            .filter_map(|(index, item)| item.applicable.then_some(index))
+            .collect();
+        if available.is_empty() {
+            self.completion_selection = None;
+            return None;
+        }
+        let current = self
+            .completion_selection
+            .and_then(|selected| available.iter().position(|index| *index == selected))
+            .unwrap_or(0);
+        let next = if direction < 0 {
+            if current == 0 { available.len() - 1 } else { current - 1 }
+        } else if current + 1 == available.len() {
+            0
+        } else {
+            current + 1
+        };
+        let selected = available[next];
+        self.completion_selection = Some(selected);
+        Some(selected)
+    }
+
+    pub fn dismiss_completion(&mut self) {
+        self.completion = None;
+        self.completion_selection = None;
     }
 }
 
@@ -2381,6 +2760,7 @@ pub fn render(ui: &mut eframe::egui::Ui, state: &mut crate::app::AppState) {
             ("Type definition", EditorCommand::TypeDefinition),
             ("Implementation", EditorCommand::Implementation),
             ("References", EditorCommand::References),
+            ("Quick fixes", EditorCommand::CodeActions),
         ] {
             if ui.button(label).clicked() {
                 state.enqueue(AppEvent::EditorCommand(command));
@@ -2388,12 +2768,43 @@ pub fn render(ui: &mut eframe::egui::Ui, state: &mut crate::app::AppState) {
         }
     });
     ui.small(&state.language.summary);
+    let mut events = Vec::new();
+    if let Some(warning) = &state.language.lombok_warning {
+        ui.colored_label(ui.visuals().warn_fg_color, warning);
+        if ui.small_button("Restart Java intelligence after resolving Lombok").clicked() {
+            events.push(AppEvent::RestartLanguage);
+        }
+    }
     let active_path = state
         .active_tab
         .and_then(|index| state.editor_tabs.get(index))
         .map(|tab| tab.path.clone());
-    let mut events = Vec::new();
     if let Some(path) = &active_path {
+        if let Some((error_path, error_version, error)) = &state.language.code_actions_error
+            && error_path == path
+            && state.language.current(error_path, *error_version)
+        {
+            ui.colored_label(ui.visuals().warn_fg_color, error);
+        }
+        if let Some((actions_path, version, position, actions)) = &state.language.code_actions
+            && actions_path == path
+            && state.language.is_document_current(path, *version, state.active_tab.and_then(|index| state.editor_tabs.get(index)).map(|tab| tab.document.text.as_str()).unwrap_or_default())
+            && state.active_tab.and_then(|index| state.editor_tabs.get(index)).is_some_and(|tab| tab.document.lsp_position() == *position)
+        {
+            if actions.is_empty() {
+                ui.small("No direct quick fixes at the caret");
+            } else {
+                egui::CollapsingHeader::new(format!("Quick fixes ({})", actions.len())).show(ui, |ui| {
+                    egui::ScrollArea::vertical().max_height(120.0).show(ui, |ui| {
+                        for (index, action) in actions.iter().take(30).enumerate() {
+                            if ui.button(&action.title).clicked() {
+                                events.push(AppEvent::ApplyCodeAction(index));
+                            }
+                        }
+                    });
+                });
+            }
+        }
         if let Some(items) = state.language.diagnostics.get(path) {
             egui::CollapsingHeader::new(format!("Java diagnostics ({})", items.len())).show(
                 ui,
@@ -2477,17 +2888,23 @@ pub fn render(ui: &mut eframe::egui::Ui, state: &mut crate::app::AppState) {
                 .max_height(140.0)
                 .show(ui, |ui| {
                     for (index, item) in items.iter().enumerate() {
-                        if ui
-                            .add_enabled(item.applicable, egui::Button::new(&item.label))
-                            .on_hover_text(&item.detail)
-                            .clicked()
-                        {
+                        let selected = state.language.completion_selection == Some(index);
+                        let response = ui
+                            .add_enabled(
+                                item.applicable,
+                                egui::Button::new(&item.label).selected(selected),
+                            )
+                            .on_hover_text(&item.detail);
+                        if selected {
+                            response.scroll_to_me(Some(egui::Align::Center));
+                        }
+                        if response.clicked() {
                             events.push(AppEvent::ApplyCompletion(index));
                         }
                     }
                 });
             if ui.small_button("Dismiss completions").clicked() {
-                state.language.completion = None;
+                state.language.dismiss_completion();
             }
         }
     }

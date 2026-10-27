@@ -499,6 +499,26 @@ impl DebugTool {
         self.breakpoint_touched.insert(source.to_path_buf());
         if self.breakpoint_loaded { self.save_breakpoints(); }
     }
+    pub fn rename_breakpoint_source(&mut self, old: &std::path::Path, new: PathBuf) {
+        self.breakpoint_touched.insert(old.to_path_buf());
+        self.breakpoint_touched.insert(new.clone());
+        let had_breakpoints = self.breakpoints.rename_source(old, new.clone());
+        if had_breakpoints {
+            if let Some(controller) = self.controller() {
+                self.inspector.submit(controller.clone(), InspectRequest::Breakpoints {
+                    source: old.to_path_buf(),
+                    revision: self.breakpoints.source_revision(old),
+                    arguments: json!({"source":{"path":old,"name":old.file_name().map(|name|name.to_string_lossy())},"breakpoints":[],"sourceModified":false}),
+                });
+                self.inspector.submit(controller, InspectRequest::Breakpoints {
+                    source: new.clone(),
+                    revision: self.breakpoints.source_revision(&new),
+                    arguments: self.breakpoints.arguments(&new),
+                });
+            }
+        }
+        if self.breakpoint_loaded { self.save_breakpoints(); }
+    }
     fn save_breakpoints(&mut self) {
         let Some(root) = self.breakpoint_root.clone() else { return; };
         if let Err(error) = self.breakpoint_store.save(root, self.breakpoint_generation, self.breakpoints.snapshot()) {

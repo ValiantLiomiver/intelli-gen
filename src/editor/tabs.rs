@@ -13,6 +13,7 @@ pub struct EditorTab {
     pub saving: bool,
     pub save_again: bool,
     pub close_after_save: bool,
+    pub pending_rename_to: Option<PathBuf>,
     highlighter: Highlighter,
     pending_line: Option<usize>,
     pending_character_index: Option<usize>,
@@ -30,6 +31,7 @@ impl EditorTab {
             saving: false,
             save_again: false,
             close_after_save: false,
+            pending_rename_to: None,
             highlighter: Highlighter::default(),
             pending_line: None,
             pending_character_index: None,
@@ -51,6 +53,14 @@ impl EditorTab {
 
     pub fn restore_document_cursor(&mut self) {
         self.pending_character_index = Some(self.document.character_index());
+    }
+
+    pub fn refresh_after_workspace_edit(&mut self) {
+        self.page_start = 0;
+        self.page_end = 0;
+        self.page_cursor = None;
+        self.pending_character_index = Some(self.document.character_index());
+        self.highlighter = Highlighter::default();
     }
 
     pub fn select_char_range(&mut self, start: usize, end: usize) {
@@ -81,9 +91,6 @@ impl EditorTab {
             );
         }
         self.page_end = 0;
-        if self.document.text.len() > super::highlighter::MAX_HIGHLIGHT_BYTES {
-            ui.small("Syntax highlighting is disabled above 64 KiB; editing and saving remain available.");
-        }
         let mut toggled = None;
         let editor_id = egui::Id::new(("source_editor", &self.path));
         if let Some((start, end)) = self.pending_selection.take() {
@@ -293,9 +300,33 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
                         .file_name()
                         .unwrap_or(tab.path.as_os_str())
                         .to_string_lossy();
+                    let duplicate_name = state
+                        .editor_tabs
+                        .iter()
+                        .enumerate()
+                        .any(|(other_index, other)| {
+                            other_index != index
+                                && other.path.file_name() == tab.path.file_name()
+                        });
+                    let display_name = if duplicate_name {
+                        let location = state
+                            .project
+                            .as_ref()
+                            .and_then(|project| tab.path.strip_prefix(&project.root).ok())
+                            .unwrap_or(&tab.path);
+                        let parent = location
+                            .parent()
+                            .filter(|parent| !parent.as_os_str().is_empty());
+                        parent.map_or_else(
+                            || name.to_string(),
+                            |parent| format!("{name} — {}", parent.display()),
+                        )
+                    } else {
+                        name.to_string()
+                    };
                     let label = format!(
                         "{}{}{}",
-                        name,
+                        display_name,
                         if tab.document.is_dirty() { " •" } else { "" },
                         if tab.saving { " (saving…)" } else { "" }
                     );

@@ -157,9 +157,19 @@ impl UserSettings {
             .ok_or_else(|| format!("Choose a Java {minimum} or newer runtime for JDT LS in Settings"))?;
         let jdk = self.jdks.iter().find(|jdk| jdk.id == id)
             .ok_or_else(|| "The JDT LS runtime is no longer registered".to_owned())?;
-        if !jdk.valid { return Err("The registered JDT LS runtime is unavailable; validate or replace it".into()); }
-        if jdk.version.major < minimum { return Err(format!("{} JDT LS requires Java {minimum} or newer; selected runtime is Java {}", if self.jdt_ls_executable.is_some() { "Custom" } else { "Bundled" }, jdk.version.major)); }
-        Ok(jdk)
+        if jdk.valid && jdk.version.major >= minimum {
+            return Ok(jdk);
+        }
+        self.jdks.iter()
+            .filter(|candidate| candidate.valid && candidate.version.major >= minimum)
+            .max_by_key(|candidate| candidate.version.major)
+            .ok_or_else(|| {
+                if !jdk.valid {
+                    format!("The selected JDT LS runtime is unavailable, and no valid Java {minimum}+ runtime is installed")
+                } else {
+                    format!("{} JDT LS requires Java {minimum} or newer; selected runtime is Java {} and no compatible runtime is installed", if self.jdt_ls_executable.is_some() { "Custom" } else { "Bundled" }, jdk.version.major)
+                }
+            })
     }
 
     pub fn jdt_ls_minimum_major(&self) -> u32 {
