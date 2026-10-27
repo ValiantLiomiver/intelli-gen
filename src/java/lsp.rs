@@ -1465,7 +1465,7 @@ async fn deliver_response(request: Pending, result: &Value, events: &LanguageEve
             };
             let result = match kind {
                 DocumentEditKind::Format => parse_text_edits(result),
-                DocumentEditKind::OrganizeImports => parse_workspace_edits(&path, result),
+                DocumentEditKind::OrganizeImports => parse_workspace_edits(&path, version, result),
             };
             LanguageEvent::DocumentEdits { path, version, kind, result }
         }
@@ -1546,9 +1546,14 @@ fn same_document_path(candidate: &Path, current: &Path) -> bool {
     candidate == current || candidate.canonicalize().ok().as_deref() == Some(current)
 }
 
-fn parse_workspace_edits(path: &Path, value: &Value) -> Result<Vec<(Range, String)>, String> {
+fn parse_workspace_edits(path: &Path, version: i64, value: &Value) -> Result<Vec<(Range, String)>, String> {
     if value.is_null() {
         return Ok(Vec::new());
+    }
+    if value.get("changes").is_some_and(|changes| !changes.is_null())
+        && value.get("documentChanges").is_some_and(|changes| !changes.is_null())
+    {
+        return Err("JDT LS returned both workspace change formats".into());
     }
     let mut edits = Vec::new();
     let mut found = false;
@@ -1565,7 +1570,12 @@ fn parse_workspace_edits(path: &Path, value: &Value) -> Result<Vec<(Range, Strin
     }
     if let Some(document_changes) = value["documentChanges"].as_array() {
         for change in document_changes {
-            let uri = change["textDocument"]["uri"].as_str()
+            let document = change.get("textDocument").ok_or("JDT LS returned an unsupported resource operation")?;
+            let document_version = &document["version"];
+            if !document_version.is_null() && document_version.as_i64() != Some(version) {
+                return Err("JDT LS returned edits for an outdated document version".into());
+            }
+            let uri = document["uri"].as_str()
                 .ok_or("JDT LS returned an unsupported resource operation")?;
             let target = file_path(&Value::String(uri.to_owned()))
                 .ok_or_else(|| format!("JDT LS returned a non-file edit URI: {uri}"))?;
