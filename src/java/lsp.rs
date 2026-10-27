@@ -39,6 +39,7 @@ pub enum EditorCommand {
     TypeDefinition,
     Implementation,
     References,
+    CodeActions,
     DocumentSymbols,
     Format,
     OrganizeImports,
@@ -54,6 +55,7 @@ impl EditorCommand {
             Self::TypeDefinition => "textDocument/typeDefinition",
             Self::Implementation => "textDocument/implementation",
             Self::References => "textDocument/references",
+            Self::CodeActions => "textDocument/codeAction",
             Self::DocumentSymbols => "textDocument/documentSymbol",
             Self::Format => "textDocument/formatting",
             Self::OrganizeImports => "java/organizeImports",
@@ -78,7 +80,7 @@ pub struct Range {
     pub start: Position,
     pub end: Position,
 }
-#[derive(Clone, Debug, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 pub struct LanguageDiagnostic {
     pub range: Range,
     pub severity: Option<u32>,
@@ -108,6 +110,11 @@ pub struct OutlineSymbol {
     pub kind: u64,
     pub location: Location,
     pub depth: usize,
+}
+#[derive(Clone, Debug)]
+pub struct CodeActionItem {
+    pub title: String,
+    pub edits: Vec<(Range, String)>,
 }
 #[derive(Clone, Debug)]
 pub struct CompletionItem {
@@ -167,6 +174,12 @@ pub enum LanguageEvent {
         path: PathBuf,
         version: i64,
         locations: Vec<Location>,
+    },
+    CodeActions {
+        path: PathBuf,
+        version: i64,
+        position: Position,
+        result: Result<Vec<CodeActionItem>, String>,
     },
     WorkspaceSymbols {
         query: String,
@@ -415,6 +428,8 @@ enum LanguageCommand {
         project_root: PathBuf,
         position: Position,
         document_end: Position,
+        range: Range,
+        diagnostics: Vec<LanguageDiagnostic>,
         version: i64,
         rename_to: Option<String>,
     },
@@ -555,6 +570,16 @@ fn document_end_position(text: &str) -> Position {
     Position {
         line: u32::try_from(line).unwrap_or(u32::MAX),
         character: u32::try_from(last_line.encode_utf16().count()).unwrap_or(u32::MAX),
+    }
+}
+fn document_line_range(text: &str, line: u32) -> Range {
+    let contents = text.lines().nth(line as usize).unwrap_or_default();
+    Range {
+        start: Position { line, character: 0 },
+        end: Position {
+            line,
+            character: u32::try_from(contents.encode_utf16().count()).unwrap_or(u32::MAX),
+        },
     }
 }
 fn file_path(value: &Value) -> Option<PathBuf> {
@@ -968,6 +993,7 @@ async fn protocol(
                 "symbol": {"symbolKind": {"valueSet": (1..=26).collect::<Vec<_>>()}}},
                 "textDocument": {"synchronization": {"didSave": true}, "publishDiagnostics": {"versionSupport": true},
                 "documentSymbol": {"hierarchicalDocumentSymbolSupport": true},
+                "codeAction": {"codeActionLiteralSupport": {"codeActionKind": {"valueSet": ["quickfix", "refactor", "source"]}}},
                 "completion": {"completionItem": {"snippetSupport": false, "resolveSupport": {"properties": []}}},
                 "signatureHelp": {"signatureInformation": {"documentationFormat": ["plaintext"]}},
                 "hover": {"contentFormat": ["plaintext"]}, "definition": {"linkSupport": true},
@@ -1075,7 +1101,7 @@ async fn protocol(
                     LanguageCommand::Change { path, text, version } => notify(input, "textDocument/didChange", json!({"textDocument": {"uri": uri(&path)?, "version": version}, "contentChanges": [{"text": text}]})).await?,
                     LanguageCommand::Save(path) => notify(input, "textDocument/didSave", json!({"textDocument": {"uri": uri(&path)?}})).await?,
                     LanguageCommand::Close(path) => notify(input, "textDocument/didClose", json!({"textDocument": {"uri": uri(&path)?}})).await?,
-                    LanguageCommand::Request { command, path, project_root, position, document_end, version, rename_to } => {
+                    LanguageCommand::Request { command, path, project_root, position, document_end, range, diagnostics, version, rename_to } => {
                         let id = next_id; next_id += 1;
                         let mut params = json!({"textDocument": {"uri": uri(&path)?}, "position": position});
                         if let Some(new_name) = &rename_to {
@@ -1084,6 +1110,7 @@ async fn protocol(
                         if command == EditorCommand::DocumentSymbols { params = json!({"textDocument": {"uri": uri(&path)?}}); }
                         if command == EditorCommand::Format { params = json!({"textDocument": {"uri": uri(&path)?}, "options": {"tabSize": 4, "insertSpaces": true}}); }
                         if command == EditorCommand::OrganizeImports { params = json!({"textDocument": {"uri": uri(&path)?}, "range": {"start": {"line": 0, "character": 0}, "end": document_end}, "context": {"diagnostics": []}}); }
+                        if command == EditorCommand::CodeActions { params = json!({"textDocument": {"uri": uri(&path)?}, "range": range, "context": {"diagnostics": diagnostics}}); }
                         if command == EditorCommand::References { params["context"] = json!({"includeDeclaration": true}); }
                         if pending.len() + pending_symbols.len() >= 32 {
                             if rename_to.is_some() {
@@ -1401,6 +1428,10 @@ async fn deliver_response(request: Pending, result: &Value, events: &LanguageEve
             version,
             locations: locations(result),
         },
+        EditorCommand::CodeActions => {
+            let result = parse_code_actions(&path, result);
+            LanguageEvent::CodeActions { path, version, position, result }
+        }
         EditorCommand::DocumentSymbols => LanguageEvent::DocumentSymbols {
             result: document_symbols(result, &path),
             path,
@@ -1438,6 +1469,56 @@ fn parse_text_edits(value: &Value) -> Result<Vec<(Range, String)>, String> {
             .ok_or_else(|| "Text edit has no replacement text".to_owned())?;
         Ok((range, text.to_owned()))
     }).collect()
+}
+
+fn parse_code_actions(path: &Path, value: &Value) -> Result<Vec<CodeActionItem>, String> {
+    if value.is_null() { return Ok(Vec::new()); }
+    let actions = value.as_array().ok_or("JDT LS returned an invalid code action list")?;
+    let mut result = Vec::new();
+    let mut total_edits = 0usize;
+    for action in actions.iter().take(100) {
+        let Some(title) = action["title"].as_str() else { continue; };
+        if title.is_empty() || action.get("disabled").is_some_and(|disabled| !disabled.is_null())
+            || action.get("command").is_some_and(|command| !command.is_null())
+        { continue; }
+        let edit = &action["edit"];
+        if edit.is_null() || edit["changeAnnotations"].as_object().is_some_and(|items| !items.is_empty()) { continue; }
+        if edit.get("changes").is_some_and(|changes| !changes.is_null())
+            && edit.get("documentChanges").is_some_and(|changes| !changes.is_null())
+        { continue; }
+        let mut edits = Vec::new();
+        let mut valid = true;
+        if let Some(changes) = edit["changes"].as_object() {
+            for (document_uri, raw_edits) in changes {
+                let Some(target) = file_path(&Value::String(document_uri.clone())) else { valid = false; break; };
+                if !same_document_path(&target, path) { valid = false; break; }
+                let Ok(parsed) = parse_text_edits(raw_edits) else { valid = false; break; };
+                edits.extend(parsed);
+            }
+        }
+        if valid {
+            if let Some(changes) = edit["documentChanges"].as_array() {
+                for change in changes {
+                    if change.get("kind").is_some() { valid = false; break; }
+                    let Some(document_uri) = change["textDocument"]["uri"].as_str() else { valid = false; break; };
+                    let Some(target) = file_path(&Value::String(document_uri.to_owned())) else { valid = false; break; };
+                    if !same_document_path(&target, path) { valid = false; break; }
+                    let Ok(parsed) = parse_text_edits(&change["edits"]) else { valid = false; break; };
+                    edits.extend(parsed);
+                }
+            }
+        }
+        if valid && !edits.is_empty() {
+            total_edits = total_edits.checked_add(edits.len()).ok_or("Too many code action edits")?;
+            if total_edits > 20_000 { return Err("JDT LS returned too many code action edits".into()); }
+            result.push(CodeActionItem { title: title.chars().take(256).collect(), edits });
+        }
+    }
+    Ok(result)
+}
+
+fn same_document_path(candidate: &Path, current: &Path) -> bool {
+    candidate == current || candidate.canonicalize().ok().as_deref() == Some(current)
 }
 
 fn parse_workspace_edits(path: &Path, value: &Value) -> Result<Vec<(Range, String)>, String> {
@@ -1605,6 +1686,13 @@ async fn deliver_request_error(request: Pending, error: String, events: &Languag
                 result: Err(error),
             })
             .await;
+    } else if request.command == EditorCommand::CodeActions {
+        let _ = events.send(LanguageEvent::CodeActions {
+            path: request.path,
+            version: request.version,
+            position: request.position,
+            result: Err(error),
+        }).await;
     } else {
         let _ = events.send(LanguageEvent::ServerState(error)).await;
     }
@@ -1753,6 +1841,8 @@ pub struct LanguageTool {
     pub diagnostics: HashMap<PathBuf, Vec<LanguageDiagnostic>>,
     pub summary: String,
     pub lombok_warning: Option<String>,
+    pub code_actions: Option<(PathBuf, i64, Position, Vec<CodeActionItem>)>,
+    pub code_actions_error: Option<(PathBuf, i64, String)>,
     pub completion: Option<(PathBuf, i64, Position, Vec<CompletionItem>)>,
     pub completion_selection: Option<usize>,
     pub signature_help: Option<(PathBuf, i64, Vec<SignatureInformation>, usize)>,
@@ -1926,6 +2016,8 @@ impl LanguageTool {
         self.document_symbols.clear();
         self.document_symbols_loading = false;
         self.document_symbols_error = None;
+        self.code_actions = None;
+        self.code_actions_error = None;
         self.root = project.map(|project| project.root.clone());
         let Some(project) =
             project.filter(|project| project.kind != crate::project::ProjectKind::Unknown)
@@ -2149,6 +2241,8 @@ impl LanguageTool {
                 project_root: self.root.clone().ok_or_else(|| LspError("No Java workspace is open".into()))?,
                 position: document.lsp_position(),
                 document_end: document_end_position(&document.text),
+                range: document_line_range(&document.text, document.lsp_position().line),
+                diagnostics: Vec::new(),
                 version: synced.version,
                 rename_to: None,
             })?;
@@ -2264,6 +2358,10 @@ impl LanguageTool {
         }
     }
     pub fn request(&mut self, command: EditorCommand, document: &Document) {
+        if command == EditorCommand::CodeActions {
+            self.code_actions = None;
+            self.code_actions_error = None;
+        }
         let result = (|| {
             let session = self
                 .session
@@ -2282,6 +2380,13 @@ impl LanguageTool {
                 project_root: self.root.clone().ok_or_else(|| LspError("No Java workspace is open".into()))?,
                 position: document.lsp_position(),
                 document_end: document_end_position(&document.text),
+                range: document_line_range(&document.text, document.lsp_position().line),
+                diagnostics: if command == EditorCommand::CodeActions {
+                    self.diagnostics.get(&document.path).into_iter().flatten()
+                        .filter(|diagnostic| diagnostic.range.start.line <= document.lsp_position().line
+                            && diagnostic.range.end.line >= document.lsp_position().line)
+                        .cloned().collect()
+                } else { Vec::new() },
                 version: synced.version,
                 rename_to: None,
             })
@@ -2306,7 +2411,9 @@ impl LanguageTool {
             session.try_command(LanguageCommand::Request {
                 command: EditorCommand::Rename,
                 path: document.path.clone(), project_root, position,
-                document_end: document_end_position(&document.text), version: synced.version,
+                document_end: document_end_position(&document.text),
+                range: document_line_range(&document.text, position.line), diagnostics: Vec::new(),
+                version: synced.version,
                 rename_to: Some(new_name.trim().to_owned()),
             })
         })();
@@ -2356,6 +2463,17 @@ impl LanguageTool {
             } if self.current(&path, version) => {
                 self.completion_selection = items.iter().position(|item| item.applicable);
                 self.completion = Some((path, version, position, items));
+            }
+            LanguageEvent::CodeActions { path, version, position, result }
+                if self.current(&path, version) =>
+            {
+                match result {
+                    Ok(actions) => {
+                        self.code_actions = Some((path, version, position, actions));
+                        self.code_actions_error = None;
+                    }
+                    Err(error) => self.code_actions_error = Some((path, version, error)),
+                }
             }
             LanguageEvent::SignatureHelp {
                 path,
@@ -2501,6 +2619,20 @@ impl LanguageTool {
         Ok(())
     }
 
+    pub fn apply_code_action(&mut self, index: usize, document: &mut Document) -> Result<String, LspError> {
+        let (path, version, position, action) = self.code_actions.as_ref()
+            .and_then(|(path, version, position, actions)| actions.get(index).map(|action| (path, version, position, action)))
+            .ok_or_else(|| LspError("The selected Java code action is no longer available".into()))?;
+        if path != &document.path || document.lsp_position() != *position || !self.is_document_current(path, *version, &document.text) {
+            self.code_actions = None;
+            return Err(LspError("The Java source changed; request code actions again".into()));
+        }
+        let title = action.title.clone();
+        document.apply_lsp_edits(&action.edits).map_err(LspError)?;
+        self.code_actions = None;
+        Ok(title)
+    }
+
     pub fn move_completion_selection(&mut self, direction: i32) -> Option<usize> {
         let items = &self.completion.as_ref()?.3;
         let available: Vec<_> = items
@@ -2578,6 +2710,7 @@ pub fn render(ui: &mut eframe::egui::Ui, state: &mut crate::app::AppState) {
             ("Type definition", EditorCommand::TypeDefinition),
             ("Implementation", EditorCommand::Implementation),
             ("References", EditorCommand::References),
+            ("Quick fixes", EditorCommand::CodeActions),
         ] {
             if ui.button(label).clicked() {
                 state.enqueue(AppEvent::EditorCommand(command));
@@ -2597,6 +2730,31 @@ pub fn render(ui: &mut eframe::egui::Ui, state: &mut crate::app::AppState) {
         .and_then(|index| state.editor_tabs.get(index))
         .map(|tab| tab.path.clone());
     if let Some(path) = &active_path {
+        if let Some((error_path, error_version, error)) = &state.language.code_actions_error
+            && error_path == path
+            && state.language.current(error_path, *error_version)
+        {
+            ui.colored_label(ui.visuals().warn_fg_color, error);
+        }
+        if let Some((actions_path, version, position, actions)) = &state.language.code_actions
+            && actions_path == path
+            && state.language.is_document_current(path, *version, state.active_tab.and_then(|index| state.editor_tabs.get(index)).map(|tab| tab.document.text.as_str()).unwrap_or_default())
+            && state.active_tab.and_then(|index| state.editor_tabs.get(index)).is_some_and(|tab| tab.document.lsp_position() == *position)
+        {
+            if actions.is_empty() {
+                ui.small("No direct quick fixes at the caret");
+            } else {
+                egui::CollapsingHeader::new(format!("Quick fixes ({})", actions.len())).show(ui, |ui| {
+                    egui::ScrollArea::vertical().max_height(120.0).show(ui, |ui| {
+                        for (index, action) in actions.iter().take(30).enumerate() {
+                            if ui.button(&action.title).clicked() {
+                                events.push(AppEvent::ApplyCodeAction(index));
+                            }
+                        }
+                    });
+                });
+            }
+        }
         if let Some(items) = state.language.diagnostics.get(path) {
             egui::CollapsingHeader::new(format!("Java diagnostics ({})", items.len())).show(
                 ui,

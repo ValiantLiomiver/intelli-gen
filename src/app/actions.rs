@@ -68,6 +68,9 @@ pub fn keyboard_shortcuts(ctx: &egui::Context, state: &mut AppState) {
     if ctx.input_mut(|input| input.consume_key(egui::Modifiers::SHIFT, egui::Key::F6)) {
         state.enqueue(AppEvent::RenameSymbolOpen);
     }
+    if ctx.input_mut(|input| input.consume_key(egui::Modifiers::ALT, egui::Key::Enter)) {
+        state.enqueue(AppEvent::EditorCommand(crate::java::lsp::EditorCommand::CodeActions));
+    }
     let completion_editor = state
         .active_tab
         .and_then(|index| state.editor_tabs.get(index))
@@ -752,6 +755,17 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                 {
                     match state.language.apply_completion(index, &mut tab.document) {
                         Ok(()) => tab.restore_document_cursor(),
+                        Err(error) => state.language.summary = error.to_string(),
+                    }
+                }
+            }
+            AppEvent::ApplyCodeAction(index) => {
+                if let Some(tab) = state.active_tab.and_then(|tab_index| state.editor_tabs.get_mut(tab_index)) {
+                    match state.language.apply_code_action(index, &mut tab.document) {
+                        Ok(title) => {
+                            tab.restore_document_cursor();
+                            state.language.summary = format!("Applied Java code action: {title}");
+                        }
                         Err(error) => state.language.summary = error.to_string(),
                     }
                 }

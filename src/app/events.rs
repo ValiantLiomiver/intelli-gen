@@ -54,6 +54,7 @@ pub enum AppEvent {
     RenameSymbolOpen,
     RenameSymbolConfirm(String),
     ApplyCompletion(usize),
+    ApplyCodeAction(usize),
     Language(crate::java::lsp::LanguageUpdate),
     RestartLanguage,
     ShowPanel(ActivePanel),
