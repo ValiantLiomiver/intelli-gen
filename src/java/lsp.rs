@@ -93,6 +93,7 @@ pub struct Location {
 pub struct WorkspaceFileEdits {
     pub path: PathBuf,
     pub edits: Vec<(Range, String)>,
+    pub rename_to: Option<PathBuf>,
 }
 #[derive(Clone, Debug)]
 pub struct WorkspaceSymbol {
@@ -962,6 +963,7 @@ async fn protocol(
         "rootUri": root_uri, "workspaceFolders": [{"uri": root_uri, "name": project.root.file_name().unwrap_or_default().to_string_lossy()}],
         "capabilities": {"general": {"positionEncodings": ["utf-16"]},
             "workspace": {"configuration": true, "workspaceFolders": true, "applyEdit": false,
+                "workspaceEdit": {"documentChanges": true, "resourceOperations": ["rename"]},
                 "didChangeWatchedFiles": {"dynamicRegistration": true},
                 "symbol": {"symbolKind": {"valueSet": (1..=26).collect::<Vec<_>>()}}},
                 "textDocument": {"synchronization": {"didSave": true}, "publishDiagnostics": {"versionSupport": true},
@@ -1489,7 +1491,8 @@ fn parse_rename_workspace_edits(
     if value.get("documentChanges").is_some_and(|changes| !changes.is_null() && !changes.is_array()) {
         return Err("JDT LS returned an invalid document changes list".into());
     }
-    let mut by_path: std::collections::BTreeMap<PathBuf, Vec<(Range, String)>> = std::collections::BTreeMap::new();
+    let mut by_path: std::collections::BTreeMap<PathBuf, WorkspaceFileEdits> = std::collections::BTreeMap::new();
+    let mut resource_renames = Vec::new();
     let mut total_edits = 0usize;
     let mut append = |uri_value: &Value, edits_value: &Value| -> Result<(), String> {
         let raw_uri = uri_value.as_str().ok_or("JDT LS returned an edit without a document URI")?;
@@ -1503,7 +1506,7 @@ fn parse_rename_workspace_edits(
         let edits = parse_text_edits(edits_value)?;
         total_edits = total_edits.checked_add(edits.len()).ok_or("Too many rename edits")?;
         if total_edits > 20_000 { return Err("JDT LS returned too many rename edits".into()); }
-        by_path.entry(canonical).or_default().extend(edits);
+        by_path.entry(canonical.clone()).or_insert_with(|| WorkspaceFileEdits { path: canonical, edits: Vec::new(), rename_to: None }).edits.extend(edits);
         if by_path.len() > 200 { return Err("Rename affects more than 200 files; narrow the symbol scope and try again".into()); }
         Ok(())
     };
@@ -1512,15 +1515,35 @@ fn parse_rename_workspace_edits(
     }
     if let Some(changes) = value["documentChanges"].as_array() {
         for change in changes {
-            let document = change.get("textDocument").ok_or("JDT LS returned an unsupported resource operation")?;
-            if change.get("kind").is_some() { return Err("File resource operations are unsupported in symbol rename".into()); }
-            append(&document["uri"], &change["edits"])?;
+            if change.get("kind").is_some() {
+                if change["kind"].as_str() != Some("rename") { return Err("JDT LS returned an unsupported resource operation".into()); }
+                let old_uri = change["oldUri"].as_str().ok_or("JDT LS returned a rename without oldUri")?;
+                let new_uri = change["newUri"].as_str().ok_or("JDT LS returned a rename without newUri")?;
+                let old_path = file_path(&Value::String(old_uri.to_owned())).ok_or("JDT LS returned a non-file rename source")?.canonicalize().map_err(|error| format!("Cannot resolve rename source: {error}"))?;
+                let new_path = file_path(&Value::String(new_uri.to_owned())).ok_or("JDT LS returned a non-file rename destination")?;
+                let parent = new_path.parent().ok_or("Rename destination has no parent")?.canonicalize().map_err(|error| format!("Cannot resolve rename destination directory: {error}"))?;
+                let destination = parent.join(new_path.file_name().ok_or("Rename destination has no filename")?);
+                if !old_path.starts_with(&root) || parent != old_path.parent().unwrap_or(Path::new(""))
+                    || old_path.extension().is_none_or(|ext| ext != "java")
+                    || destination.extension().is_none_or(|ext| ext != "java")
+                    || std::fs::symlink_metadata(&destination).is_ok()
+                { return Err("Java source rename must stay in the same project directory and cannot overwrite a file".into()); }
+                resource_renames.push((old_path, destination));
+            } else {
+                let document = change.get("textDocument").ok_or("JDT LS returned an invalid document change")?;
+                append(&document["uri"], &change["edits"])?;
+            }
         }
     }
     if value.get("changes").is_none() && value.get("documentChanges").is_none() {
         return Err("JDT LS returned an invalid workspace edit".into());
     }
-    Ok(by_path.into_iter().map(|(path, edits)| WorkspaceFileEdits { path, edits }).collect())
+    drop(append);
+    for (old_path, destination) in resource_renames {
+        let entry = by_path.entry(old_path.clone()).or_insert_with(|| WorkspaceFileEdits { path: old_path, edits: Vec::new(), rename_to: None });
+        if entry.rename_to.replace(destination).is_some() { return Err("JDT LS returned multiple file renames for one source".into()); }
+    }
+    Ok(by_path.into_values().collect())
 }
 
 fn signature_parameter_label(signature_label: &str, parameter_label: &Value) -> Option<String> {

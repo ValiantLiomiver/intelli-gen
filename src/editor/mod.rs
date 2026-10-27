@@ -18,7 +18,7 @@ pub const MAX_WORKSPACE_EDIT_BYTES: usize = 128 * 1024 * 1024;
 enum IoCommand {
     Load(PathBuf),
     LoadMany { request: u64, paths: Vec<PathBuf> },
-    Save(Document),
+    Save { document: Document, destination: Option<PathBuf> },
     CreateJavaClass { root: PathBuf, directory: PathBuf, name: String, package: String },
 }
 
@@ -31,6 +31,7 @@ pub enum EditorCompletion {
     LoadedMany { request: u64, result: Result<Vec<Document>, String> },
     Saved {
         path: PathBuf,
+        saved_path: PathBuf,
         snapshot: String,
         result: Result<(), String>,
     },
@@ -83,10 +84,14 @@ impl EditorIo {
                         })();
                         EditorCompletion::LoadedMany { request, result }
                     }
-                    IoCommand::Save(mut document) => {
-                        let result = document.save().map_err(|error| error.to_string());
+                    IoCommand::Save { mut document, destination } => {
+                        let old_path = document.path.clone();
+                        let result = if let Some(destination) = destination.as_deref() {
+                            document.save_as(destination)
+                        } else { document.save() }.map_err(|error| error.to_string());
                         EditorCompletion::Saved {
-                            path: document.path,
+                            path: old_path,
+                            saved_path: if result.is_ok() { document.path } else { destination.unwrap_or(document.path) },
                             snapshot: document.text,
                             result,
                         }
@@ -130,8 +135,8 @@ impl EditorIo {
         self.submit(IoCommand::LoadMany { request, paths })
     }
 
-    pub fn save(&self, document: Document) -> Result<(), String> {
-        self.submit(IoCommand::Save(document))
+    pub fn save(&self, document: Document, destination: Option<PathBuf>) -> Result<(), String> {
+        self.submit(IoCommand::Save { document, destination })
     }
 
     pub fn create_java_class(&self, root: PathBuf, directory: PathBuf, name: String, package: String) -> Result<(), String> {

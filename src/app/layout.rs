@@ -233,6 +233,10 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
                 ));
                 ui.separator();
                 ui.label(tab.path.display().to_string());
+                if let Some(destination) = &tab.pending_rename_to {
+                    ui.separator();
+                    ui.colored_label(ui.visuals().warn_fg_color, format!("Rename on save → {}", destination.file_name().unwrap_or_default().to_string_lossy()));
+                }
             });
         }
         if state.project_opening {

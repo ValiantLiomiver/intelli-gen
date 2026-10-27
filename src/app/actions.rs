@@ -670,7 +670,7 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                     .iter()
                     // The pending snapshot can differ even after edits return to
                     // the old baseline; queue another save for those tabs too.
-                    .filter(|tab| tab.document.is_dirty() || tab.saving)
+                    .filter(|tab| tab.document.is_dirty() || tab.saving || tab.pending_rename_to.is_some())
                     .map(|tab| tab.path.clone())
                     .collect();
                 for path in paths {
@@ -1644,13 +1644,13 @@ fn save_file(state: &mut AppState, path: &std::path::Path) {
         tab.save_again = true;
         return;
     }
-    if !tab.document.is_dirty() {
+    if !tab.document.is_dirty() && tab.pending_rename_to.is_none() {
         if tab.close_after_save {
             remove_tab(state, path);
         }
         return;
     }
-    match state.editor_io.save(tab.document.clone()) {
+    match state.editor_io.save(tab.document.clone(), tab.pending_rename_to.clone()) {
         Ok(()) => {
             tab.saving = true;
             state.status = format!("Saving {}…", path.display());
@@ -1719,7 +1719,7 @@ fn begin_workspace_rename(
     let files = match result {
         Ok(files) => files,
         Err(error) => { state.last_error = Some(format!("Rename failed: {error}")); return; }
-    }.into_iter().filter(|file| !file.edits.is_empty()).collect::<Vec<_>>();
+    }.into_iter().filter(|file| !file.edits.is_empty() || file.rename_to.is_some()).collect::<Vec<_>>();
     if files.is_empty() {
         state.language.summary = "Rename made no changes".into();
         return;
@@ -1857,19 +1857,32 @@ fn finish_workspace_rename(
                 return;
             }
         };
-        staged.push((file.path, document));
+        if let Some(destination) = &file.rename_to {
+            if !destination.starts_with(&pending.root) || destination.exists() {
+                state.last_error = Some(format!("Rename destination is unavailable: {}", destination.display()));
+                return;
+            }
+            if document.path.parent() != destination.parent() {
+                state.last_error = Some("Java file rename must stay in the same directory".into());
+                return;
+            }
+        }
+        staged.push((file.path, document, file.rename_to));
     }
     if !loaded.is_empty() {
         state.last_error = Some("The rename response changed while target files were loading".into());
         return;
     }
     let changed = staged.len();
-    for (path, document) in staged {
+    for (path, document, rename_to) in staged {
         if let Some(tab) = state.editor_tabs.iter_mut().find(|tab| tab.path == path) {
             tab.document = document;
+            tab.pending_rename_to = rename_to;
             tab.refresh_after_workspace_edit();
         } else {
-            state.editor_tabs.push(EditorTab::new(document));
+            let mut tab = EditorTab::new(document);
+            tab.pending_rename_to = rename_to;
+            state.editor_tabs.push(tab);
         }
     }
     state.active_tab = state.editor_tabs.iter().position(|tab| tab.path == pending.source_path);
@@ -1915,6 +1928,7 @@ fn editor_completed(state: &mut AppState, completion: EditorCompletion) {
         }
         EditorCompletion::Saved {
             path,
+            saved_path,
             snapshot,
             result,
         } => {
@@ -1924,6 +1938,7 @@ fn editor_completed(state: &mut AppState, completion: EditorCompletion) {
             let Some(index) = state.editor_tabs.iter().position(|tab| tab.path == path) else {
                 return;
             };
+            let mut refresh_directory = None;
             let tab = &mut state.editor_tabs[index];
             tab.saving = false;
             let save_again = std::mem::take(&mut tab.save_again);
@@ -1931,6 +1946,17 @@ fn editor_completed(state: &mut AppState, completion: EditorCompletion) {
                 Ok(()) => {
                     // Only the exact snapshot written to disk becomes the clean baseline.
                     tab.document.saved_text = snapshot;
+                    let mut current_path = path.clone();
+                    if saved_path != path {
+                        tab.path = saved_path.clone();
+                        tab.document.path = saved_path.clone();
+                        tab.pending_rename_to = None;
+                        current_path = saved_path.clone();
+                        if state.pending_close.as_deref() == Some(path.as_path()) {
+                            state.pending_close = Some(saved_path.clone());
+                        }
+                        refresh_directory = saved_path.parent().map(std::path::Path::to_path_buf);
+                    }
                     let dirty = tab.document.is_dirty();
                     let close = tab.close_after_save && !dirty;
                     state.status = format!(
@@ -1943,17 +1969,20 @@ fn editor_completed(state: &mut AppState, completion: EditorCompletion) {
                         }
                     );
                     if close {
-                        remove_tab(state, &path);
+                        remove_tab(state, &current_path);
                     } else if save_again && dirty {
-                        save_file(state, &path);
-                    } else if state.pending_close.as_deref() == Some(path.as_path()) && !dirty {
-                        remove_tab(state, &path);
+                        save_file(state, &current_path);
+                    } else if state.pending_close.as_deref() == Some(current_path.as_path()) && !dirty {
+                        remove_tab(state, &current_path);
                     }
                 }
                 Err(error) => {
                     tab.close_after_save = false;
                     state.last_error = Some(error);
                 }
+            }
+            if let Some(directory) = refresh_directory {
+                state.enqueue(AppEvent::RefreshProjectTree(directory));
             }
         }
         EditorCompletion::JavaClassCreated { root, directory, result } => {
