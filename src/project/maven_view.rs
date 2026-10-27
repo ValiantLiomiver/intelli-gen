@@ -58,6 +58,8 @@ pub struct MavenViewRequest {
     pub executable: Option<PathBuf>,
     pub jdk: JdkInstallation,
     pub profiles: Vec<String>,
+    /// When false, profiles marked activeByDefault are selected for the first load.
+    pub profiles_user_modified: bool,
     pub generation: u64,
 }
 
@@ -335,6 +337,7 @@ struct Context {
 fn load(request: MavenViewRequest, cancellation: Arc<AtomicBool>) -> Result<MavenView, String> {
     check_cancel(&cancellation)?;
     let root = request.project.root.clone();
+    let profiles_user_modified = request.profiles_user_modified;
     for profile in &request.profiles {
         if !valid_profile_id(profile) {
             return Err(format!(
@@ -378,6 +381,15 @@ fn load(request: MavenViewRequest, cancellation: Arc<AtomicBool>) -> Result<Mave
         if module.root.join("pom.xml").is_file() {
             context.read_profiles(&module.root)?;
         }
+    }
+    if !profiles_user_modified {
+        context.profiles.extend(
+            context
+                .profile_ids
+                .iter()
+                .filter(|(_, active_by_default)| **active_by_default)
+                .map(|(id, _)| id.clone()),
+        );
     }
     if context.profile_ids.contains_key("local")
         && !context.profiles.iter().any(|profile| profile == "local")

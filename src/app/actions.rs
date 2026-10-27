@@ -312,6 +312,7 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                     .filter(|model| model.kind == ProjectKind::Maven)
                     .map(|model| model.root.clone());
                 state.maven_profiles.clear();
+                state.maven_profiles_user_modified = false;
                 state.maven_selected_module = None;
                 state.maven_loading = false;
                 state.maven_cache_loading = false;
@@ -839,6 +840,7 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                     {
                         continue;
                     }
+                    state.maven_profiles_user_modified = true;
                     if !state.maven_profiles.remove(&profile) {
                         state.maven_profiles.insert(profile);
                     }
@@ -1026,11 +1028,7 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                 state.maven_cache_error = cache_error;
                 match result {
                     Ok(view) => {
-                        if view.profiles.iter().any(|profile| profile.id == "local") {
-                            state.maven_profiles.insert("local".into());
-                        } else {
-                            state.maven_profiles.remove("local");
-                        }
+                        sync_maven_profiles(state, &view);
                         if find_maven_module(
                             &view.root_module,
                             state.maven_selected_module.as_deref(),
@@ -1063,12 +1061,8 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                             state.maven_view = Some(cached.view);
                             state.maven_error = None;
                         }
-                        if let Some(view) = &state.maven_view {
-                            if view.profiles.iter().any(|profile| profile.id == "local") {
-                                state.maven_profiles.insert("local".into());
-                            } else {
-                                state.maven_profiles.remove("local");
-                            }
+                        if let Some(view) = state.maven_view.clone() {
+                            sync_maven_profiles(state, &view);
                         }
                         match current_pom_fingerprint {
                             Ok(current)
@@ -1121,6 +1115,8 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                         retire_maven_watcher(state);
                         state.maven_view_root = None;
                         state.maven_view = None;
+                        state.maven_profiles.clear();
+                        state.maven_profiles_user_modified = false;
                         state.maven_loading = false;
                         state.maven_view_loader.cancel();
                         state.maven_generation = state.maven_generation.wrapping_add(1);
@@ -1358,6 +1354,27 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
     advance_quit(state);
 }
 
+fn sync_maven_profiles(state: &mut AppState, view: &crate::project::maven_view::MavenView) {
+    if !state.maven_profiles_user_modified {
+        state.maven_profiles = view
+            .profiles
+            .iter()
+            .filter(|profile| profile.id == "local" || profile.active_by_default)
+            .map(|profile| profile.id.clone())
+            .collect();
+        return;
+    }
+
+    let available: std::collections::HashSet<_> =
+        view.profiles.iter().map(|profile| profile.id.as_str()).collect();
+    state
+        .maven_profiles
+        .retain(|profile| available.contains(profile.as_str()));
+    if available.contains("local") {
+        state.maven_profiles.insert("local".into());
+    }
+}
+
 fn reload_maven_view(state: &mut AppState) {
     state.maven_generation = state.maven_generation.wrapping_add(1);
     state.maven_loading = false;
@@ -1386,6 +1403,7 @@ fn reload_maven_view(state: &mut AppState) {
             executable: state.settings.maven_executable.clone(),
             jdk,
             profiles,
+            profiles_user_modified: state.maven_profiles_user_modified,
             generation: state.maven_generation,
         })
     })();
