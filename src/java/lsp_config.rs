@@ -240,6 +240,8 @@ fn find_project_lombok(root: &Path) -> Option<PathBuf> {
                 if let Ok(text) = std::fs::read_to_string(path) { descriptors.push(text); }
             } else if name == "libs.versions.toml" {
                 if let Ok(text) = std::fs::read_to_string(path) { catalogs.push(text); }
+            } else if name == "gradle.properties" {
+                if let Ok(text) = std::fs::read_to_string(path) { descriptors.push(text); }
             }
         }
     }
@@ -292,11 +294,15 @@ fn find_project_lombok(root: &Path) -> Option<PathBuf> {
         let start = block.find("<version>")? + "<version>".len();
         let end = block[start..].find("</version>")? + start;
         Some(block[start..end].trim().to_owned())
-    })).or_else(|| descriptors.iter().find_map(|text| {
-        let start = text.find("projectlombok:lombok:")? + "projectlombok:lombok:".len();
-        let version: String = text[start..].chars().take_while(|ch| ch.is_ascii_digit() || *ch == '.').collect();
-        (!version.is_empty()).then_some(version)
-    })).or(catalog_version);
+    })).or_else(|| {
+        descriptors.iter().find_map(|text| {
+            let start = text.find("projectlombok:lombok:")? + "projectlombok:lombok:".len();
+            let notation: String = text[start..].chars()
+                .take_while(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-' | '$' | '{' | '}'))
+                .collect();
+            resolve_gradle_version(&notation, &descriptors)
+        })
+    }).or(catalog_version);
     let version = version.map(|version| {
         if version.starts_with("${") && version.ends_with('}') {
             let property = &version[2..version.len() - 1];
@@ -328,6 +334,26 @@ fn find_project_lombok(root: &Path) -> Option<PathBuf> {
         }
     }
     candidates.into_iter().find(|path| path.is_file())
+}
+
+fn resolve_gradle_version(notation: &str, descriptors: &[String]) -> Option<String> {
+    let is_version = |value: &str| {
+        !value.is_empty() && value.chars().all(|character| character.is_ascii_digit() || character == '.')
+    };
+    if is_version(notation) { return Some(notation.to_owned()); }
+    let property = notation.strip_prefix("${").and_then(|value| value.strip_suffix('}'))
+        .or_else(|| notation.strip_prefix('$'))?;
+    descriptors.iter().find_map(|text| {
+        text.lines().find_map(|line| {
+            let line = line.split("//").next()?.trim().trim_end_matches(';');
+            let (name, value) = line.split_once('=')?;
+            let name = name.trim().trim_start_matches("def ").trim_start_matches("val ")
+                .trim_start_matches("var ").trim_start_matches("ext.").trim();
+            if name != property { return None; }
+            let value = value.trim().trim_end_matches(';').trim_matches(['\'', '"']).trim();
+            is_version(value).then(|| value.to_owned())
+        })
+    })
 }
 
 fn maven_local_repository(home: &Path) -> PathBuf {
