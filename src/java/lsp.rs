@@ -1429,7 +1429,7 @@ async fn deliver_response(request: Pending, result: &Value, events: &LanguageEve
             locations: locations(result),
         },
         EditorCommand::CodeActions => {
-            let result = parse_code_actions(&path, result);
+            let result = parse_code_actions(&path, version, result);
             LanguageEvent::CodeActions { path, version, position, result }
         }
         EditorCommand::DocumentSymbols => LanguageEvent::DocumentSymbols {
@@ -1471,7 +1471,7 @@ fn parse_text_edits(value: &Value) -> Result<Vec<(Range, String)>, String> {
     }).collect()
 }
 
-fn parse_code_actions(path: &Path, value: &Value) -> Result<Vec<CodeActionItem>, String> {
+fn parse_code_actions(path: &Path, version: i64, value: &Value) -> Result<Vec<CodeActionItem>, String> {
     if value.is_null() { return Ok(Vec::new()); }
     let actions = value.as_array().ok_or("JDT LS returned an invalid code action list")?;
     let mut result = Vec::new();
@@ -1501,6 +1501,11 @@ fn parse_code_actions(path: &Path, value: &Value) -> Result<Vec<CodeActionItem>,
                 for change in changes {
                     if change.get("kind").is_some() { valid = false; break; }
                     let Some(document_uri) = change["textDocument"]["uri"].as_str() else { valid = false; break; };
+                    let document_version = &change["textDocument"]["version"];
+                    if !document_version.is_null() && document_version.as_i64() != Some(version) {
+                        valid = false;
+                        break;
+                    }
                     let Some(target) = file_path(&Value::String(document_uri.to_owned())) else { valid = false; break; };
                     if !same_document_path(&target, path) { valid = false; break; }
                     let Ok(parsed) = parse_text_edits(&change["edits"]) else { valid = false; break; };
