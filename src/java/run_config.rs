@@ -459,8 +459,8 @@ pub struct ConfigurationEditor {
 }
 impl ConfigurationEditor {
     fn new(config: RunConfiguration) -> Self {
-        Self { program_args: serde_json::to_string(&config.program_args).unwrap_or_default(),
-            vm_args: serde_json::to_string(&config.vm_args).unwrap_or_default(),
+        Self { program_args: serde_json::to_string_pretty(&config.program_args).unwrap_or_default(),
+            vm_args: serde_json::to_string_pretty(&config.vm_args).unwrap_or_default(),
             environment: config.environment.iter().map(|(key, value)| format!("{key}={value}")).collect::<Vec<_>>().join("\n"),
             cwd: config.working_directory.to_string_lossy().into_owned(), cwd_edited: false,
             module: config.module.clone().unwrap_or_default(), config }
@@ -649,8 +649,12 @@ pub fn render(ui: &mut eframe::egui::Ui, state: &mut crate::app::AppState) {
                     });
                     ui.end_row();
                     ui.label("Java module (JPMS, optional)"); ui.text_edit_singleline(&mut editor.module); ui.end_row();
-                    ui.label("Program arguments (JSON)"); ui.text_edit_singleline(&mut editor.program_args); ui.end_row();
-                    ui.label("VM arguments (JSON)"); ui.text_edit_singleline(&mut editor.vm_args); ui.end_row();
+                    ui.label("Program arguments (JSON)");
+                    ui.add(egui::TextEdit::multiline(&mut editor.program_args).desired_rows(2).desired_width(f32::INFINITY));
+                    ui.end_row();
+                    ui.label("VM arguments (JSON)");
+                    ui.add(egui::TextEdit::multiline(&mut editor.vm_args).desired_rows(2).desired_width(f32::INFINITY));
+                    ui.end_row();
                     ui.label("Working directory");
                     ui.horizontal(|ui| {
                         if ui.text_edit_singleline(&mut editor.cwd).changed() { editor.cwd_edited = true; }
