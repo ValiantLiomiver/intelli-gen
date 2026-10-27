@@ -300,9 +300,33 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
                         .file_name()
                         .unwrap_or(tab.path.as_os_str())
                         .to_string_lossy();
+                    let duplicate_name = state
+                        .editor_tabs
+                        .iter()
+                        .enumerate()
+                        .any(|(other_index, other)| {
+                            other_index != index
+                                && other.path.file_name() == tab.path.file_name()
+                        });
+                    let display_name = if duplicate_name {
+                        let location = state
+                            .project
+                            .as_ref()
+                            .and_then(|project| tab.path.strip_prefix(&project.root).ok())
+                            .unwrap_or(&tab.path);
+                        let parent = location
+                            .parent()
+                            .filter(|parent| !parent.as_os_str().is_empty());
+                        parent.map_or_else(
+                            || name.to_string(),
+                            |parent| format!("{name} — {}", parent.display()),
+                        )
+                    } else {
+                        name.to_string()
+                    };
                     let label = format!(
                         "{}{}{}",
-                        name,
+                        display_name,
                         if tab.document.is_dirty() { " •" } else { "" },
                         if tab.saving { " (saving…)" } else { "" }
                     );
