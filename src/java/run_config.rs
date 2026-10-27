@@ -370,10 +370,53 @@ async fn launch(config: RunConfiguration, project: ProjectModel, executable: Pat
 }
 async fn capture(mut pipe: impl AsyncRead + Unpin, stderr: bool, events: mpsc::Sender<RunEvent>) {
     let mut buffer = [0; 4096];
+    let mut pending = Vec::with_capacity(4);
     loop {
         match pipe.read(&mut buffer).await {
-            Ok(0) | Err(_) => break,
-            Ok(count) => if events.send(RunEvent::Output { stderr, text: String::from_utf8_lossy(&buffer[..count]).into_owned() }).await.is_err() { break; },
+            Ok(0) => {
+                let _ = emit_utf8(&mut pending, stderr, &events, true).await;
+                break;
+            }
+            Err(_) => {
+                let _ = emit_utf8(&mut pending, stderr, &events, true).await;
+                break;
+            }
+            Ok(count) => {
+                pending.extend_from_slice(&buffer[..count]);
+                if !emit_utf8(&mut pending, stderr, &events, false).await { break; }
+            }
+        }
+    }
+}
+async fn emit_utf8(pending: &mut Vec<u8>, stderr: bool, events: &mpsc::Sender<RunEvent>, final_chunk: bool) -> bool {
+    loop {
+        match std::str::from_utf8(pending) {
+            Ok(text) => {
+                if text.is_empty() { return true; }
+                let text = text.to_owned();
+                pending.clear();
+                return events.send(RunEvent::Output { stderr, text }).await.is_ok();
+            }
+            Err(error) => {
+                let valid = error.valid_up_to();
+                if valid > 0 {
+                    let text = std::str::from_utf8(&pending[..valid]).unwrap_or_default().to_owned();
+                    pending.drain(..valid);
+                    if events.send(RunEvent::Output { stderr, text }).await.is_err() { return false; }
+                    continue;
+                }
+                if let Some(invalid) = error.error_len() {
+                    pending.drain(..invalid);
+                    if events.send(RunEvent::Output { stderr, text: "�".into() }).await.is_err() { return false; }
+                    continue;
+                }
+                if final_chunk && !pending.is_empty() {
+                    let text = String::from_utf8_lossy(pending).into_owned();
+                    pending.clear();
+                    return events.send(RunEvent::Output { stderr, text }).await.is_ok();
+                }
+                return true;
+            }
         }
     }
 }
