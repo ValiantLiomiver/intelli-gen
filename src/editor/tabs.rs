@@ -81,9 +81,6 @@ impl EditorTab {
             );
         }
         self.page_end = 0;
-        if self.document.text.len() > super::highlighter::MAX_HIGHLIGHT_BYTES {
-            ui.small("Syntax highlighting is disabled above 64 KiB; editing and saving remain available.");
-        }
         let mut toggled = None;
         let editor_id = egui::Id::new(("source_editor", &self.path));
         if let Some((start, end)) = self.pending_selection.take() {
