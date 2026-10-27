@@ -371,6 +371,29 @@ pub struct Breakpoints {
     event_sequence: u64,
 }
 impl Breakpoints {
+    pub fn rename_source(&mut self, old: &Path, new: PathBuf) -> bool {
+        if old == new { return false; }
+        let Some(points) = self.sources.remove(old) else { return false; };
+        self.status.retain(|(source, _), _| source != old && source != &new);
+        self.modified.remove(old);
+        self.modified.remove(&new);
+        self.in_flight.remove(old);
+        self.in_flight.remove(&new);
+        let entries = self.sources.entry(new.clone()).or_default();
+        for mut point in points {
+            point.source = new.clone();
+            if !entries.iter().any(|existing| existing.line == point.line) {
+                entries.push(point);
+            }
+        }
+        entries.sort_by_key(|point| point.line);
+        self.revision = self.revision.wrapping_add(1);
+        self.revisions.remove(old);
+        self.revisions.insert(new.clone(), self.revision);
+        self.modified.insert(new);
+        true
+    }
+
     pub fn snapshot(&self) -> Vec<Breakpoint> {
         self.sources.values().flatten().cloned().collect()
     }

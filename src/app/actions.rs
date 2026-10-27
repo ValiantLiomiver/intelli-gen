@@ -1948,6 +1948,7 @@ fn editor_completed(state: &mut AppState, completion: EditorCompletion) {
                     tab.document.saved_text = snapshot;
                     let mut current_path = path.clone();
                     if saved_path != path {
+                        state.debugger.rename_breakpoint_source(&path, saved_path.clone());
                         tab.path = saved_path.clone();
                         tab.document.path = saved_path.clone();
                         tab.pending_rename_to = None;
