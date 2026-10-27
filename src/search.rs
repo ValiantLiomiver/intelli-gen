@@ -9,6 +9,7 @@ use std::sync::{
 
 use eframe::egui;
 use globset::{Glob, GlobSetBuilder};
+use crate::project::tree::EXCLUDED;
 
 #[derive(Clone, Debug, Default)]
 pub struct SearchQuery {
@@ -160,7 +161,10 @@ fn search(
         .hidden(false)
         .require_git(false)
         .follow_links(false)
-        .filter_entry(|entry| entry.file_name() != ".git");
+        .filter_entry(|entry| {
+            if entry.depth() == 0 { return true; }
+            !EXCLUDED.iter().any(|excluded| entry.file_name() == *excluded)
+        });
     const MAX_FILE: u64 = 16 * 1024 * 1024;
     for entry in walker.build() {
         if cancelled() {

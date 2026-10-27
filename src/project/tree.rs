@@ -7,7 +7,7 @@ use eframe::egui;
 
 use super::ProjectError;
 
-const EXCLUDED: [&str; 4] = [".git", "target", "build", ".gradle"];
+pub(crate) const EXCLUDED: [&str; 4] = [".git", "target", "build", ".gradle"];
 static NEXT_TREE_REQUEST: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Debug)]
