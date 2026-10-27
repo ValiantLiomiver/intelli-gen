@@ -1,0 +1,2083 @@
+use eframe::egui;
+use std::path::{Path, PathBuf};
+
+use super::events::{AppEvent, MavenAction};
+use super::{AppState, EditorTab};
+use crate::editor::EditorCompletion;
+use crate::project::{
+    ProjectKind,
+    maven_view::{MavenModuleView, MavenViewRequest},
+};
+
+fn navigate_tab_to_position(tab: &mut EditorTab, position: crate::java::lsp::Position) {
+    if position.character == 0 {
+        tab.navigate_to_line(position.line as usize + 1);
+    } else {
+        let character_index = tab
+            .document
+            .character_index_at_lsp_position(position);
+        tab.navigate_to_character_index(character_index);
+    }
+}
+
+fn open_file_at_position(
+    state: &mut AppState,
+    path: PathBuf,
+    position: crate::java::lsp::Position,
+) {
+    if let Some(index) = state.editor_tabs.iter().position(|tab| tab.path == path) {
+        state.active_tab = Some(index);
+        navigate_tab_to_position(&mut state.editor_tabs[index], position);
+    } else {
+        state.pending_navigation.insert(path.clone(), position);
+        state.enqueue(AppEvent::OpenFile(path));
+    }
+}
+
+pub fn open_project_dialog(state: &mut AppState) {
+    if state.quit_approved {
+        return;
+    }
+    let mut dialog = rfd::FileDialog::new().set_title("Open Java project");
+    if let Some(project) = &state.project {
+        dialog = dialog.set_directory(&project.root);
+    }
+    if let Some(path) = dialog.pick_folder() {
+        state.enqueue(AppEvent::OpenProject(path));
+    }
+}
+
+pub fn open_file_dialog(state: &mut AppState) {
+    if state.quit_approved {
+        return;
+    }
+    let mut dialog = rfd::FileDialog::new().set_title("Open file");
+    if let Some(project) = &state.project {
+        dialog = dialog.set_directory(&project.root);
+    }
+    if let Some(path) = dialog.pick_file() {
+        state.enqueue(AppEvent::OpenFile(path));
+    }
+}
+
+pub fn keyboard_shortcuts(ctx: &egui::Context, state: &mut AppState) {
+    if state.quit_approved {
+        return;
+    }
+    if ctx.input_mut(|input| {
+        input.consume_key(
+            egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
+            egui::Key::S,
+        )
+    }) {
+        state.enqueue(AppEvent::SaveAllFiles);
+    } else if ctx.input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, egui::Key::S)) {
+        state.enqueue(AppEvent::SaveActiveFile);
+    }
+    if ctx.input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, egui::Key::W)) {
+        state.enqueue(AppEvent::CloseActiveFile);
+    }
+    if ctx.input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, egui::Key::P)) {
+        state.enqueue(AppEvent::QuickOpenOpen);
+    }
+    if ctx.input_mut(|input| {
+        input.consume_key(
+            egui::Modifiers::CTRL | egui::Modifiers::ALT,
+            egui::Key::O,
+        )
+    }) {
+        state.enqueue(AppEvent::EditorCommand(
+            crate::java::lsp::EditorCommand::OrganizeImports,
+        ));
+    }
+    if ctx.input_mut(|input| {
+        input.consume_key(
+            egui::Modifiers::COMMAND | egui::Modifiers::ALT,
+            egui::Key::O,
+        )
+    }) {
+        state.enqueue(AppEvent::SymbolSearchOpen);
+    }
+    if ctx.input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, egui::Key::F12)) {
+        state.enqueue(AppEvent::FileStructureOpen);
+    }
+    if ctx.input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, egui::Key::L)) {
+        state.enqueue(AppEvent::GoToLineOpen);
+    }
+    if ctx.input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, egui::Key::F)) {
+        state.enqueue(AppEvent::Find(
+            crate::editor::find_replace::FindAction::Open { replace: false },
+        ));
+    }
+    if ctx.input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, egui::Key::R)) {
+        state.enqueue(AppEvent::Find(
+            crate::editor::find_replace::FindAction::Open { replace: true },
+        ));
+    }
+    if ctx.input_mut(|input| {
+        input.consume_key(
+            egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
+            egui::Key::F,
+        )
+    }) {
+        state.enqueue(AppEvent::Search(super::events::SearchAction::Open));
+    }
+    if ctx.input_mut(|input| {
+        input.consume_key(
+            egui::Modifiers::COMMAND | egui::Modifiers::ALT,
+            egui::Key::L,
+        )
+    }) {
+        state.enqueue(AppEvent::EditorCommand(
+            crate::java::lsp::EditorCommand::Format,
+        ));
+    }
+    if ctx.input_mut(|input| {
+        input.consume_key(
+            egui::Modifiers::COMMAND | egui::Modifiers::ALT,
+            egui::Key::B,
+        )
+    }) {
+        state.enqueue(AppEvent::EditorCommand(
+            crate::java::lsp::EditorCommand::Implementation,
+        ));
+    }
+    if ctx.input_mut(|input| {
+        input.consume_key(
+            egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
+            egui::Key::B,
+        )
+    }) {
+        state.enqueue(AppEvent::EditorCommand(
+            crate::java::lsp::EditorCommand::TypeDefinition,
+        ));
+    }
+    for (modifiers, key, command) in [
+        (
+            egui::Modifiers::CTRL,
+            egui::Key::Space,
+            crate::java::lsp::EditorCommand::Completion,
+        ),
+        (
+            egui::Modifiers::CTRL | egui::Modifiers::SHIFT,
+            egui::Key::Space,
+            crate::java::lsp::EditorCommand::SignatureHelp,
+        ),
+        (
+            egui::Modifiers::NONE,
+            egui::Key::F1,
+            crate::java::lsp::EditorCommand::Hover,
+        ),
+        (
+            egui::Modifiers::SHIFT,
+            egui::Key::F12,
+            crate::java::lsp::EditorCommand::References,
+        ),
+        (
+            egui::Modifiers::NONE,
+            egui::Key::F12,
+            crate::java::lsp::EditorCommand::Definition,
+        ),
+    ] {
+        if ctx.input_mut(|input| input.consume_key(modifiers, key)) {
+            state.enqueue(AppEvent::EditorCommand(command));
+        }
+    }
+    let open_project = ctx.input_mut(|input| {
+        input.consume_key(
+            egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
+            egui::Key::O,
+        )
+    });
+    let open_file =
+        ctx.input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, egui::Key::O));
+    if open_project {
+        open_project_dialog(state);
+    } else if open_file {
+        open_file_dialog(state);
+    }
+}
+
+/// The sole shell reducer. Later tasks dispatch service commands here and return
+/// completions as AppEvents; no file contents are read in the rendering pass.
+pub fn process_events(context: &egui::Context, state: &mut AppState) {
+    for event in std::mem::take(&mut state.events) {
+        // Approval is based on the current buffers and completed disk writes.
+        // Cleanup can span frames; queued/new UI intents cannot mutate that
+        // approved snapshot or start more work while the viewport stays open.
+        if state.quit_approved
+            && !matches!(
+                &event,
+                AppEvent::EditorCompleted(_)
+                    | AppEvent::Language(_)
+                    | AppEvent::RequestQuit
+                    | AppEvent::Status(_)
+                    | AppEvent::Error(_)
+                    | AppEvent::SettingsSaved { .. }
+                    | AppEvent::FinderRevealed(_)
+            )
+        {
+            continue;
+        }
+        match event {
+            AppEvent::OpenProject(path) => {
+                state.quick_open.cancel();
+                state.symbol_search.close();
+                state.new_java_class = None;
+                state.new_java_project = None;
+                state.project_open_generation = state.project_open_generation.wrapping_add(1);
+                state.project_opening = true;
+                state.status = format!("Opening {}…", path.display());
+                if let Err(error) = state
+                    .project_open_loader
+                    .start(path, state.project_open_generation)
+                {
+                    state.project_opening = false;
+                    state.last_error = Some(error);
+                }
+            }
+            AppEvent::ProjectOpenCompleted(event) => {
+                if event.generation != state.project_open_generation {
+                    continue;
+                }
+                state.project_opening = false;
+                let opened = match event.result {
+                    Ok(opened) => opened,
+                    Err(error) => {
+                        state.last_error = Some(error);
+                        state.status = "Project open failed".into();
+                        continue;
+                    }
+                };
+                let startup_file = opened.open_file;
+                let root = opened.root;
+                let project = opened.project;
+                state.quick_open.set_project(Some(root.clone()));
+                if state.project.as_ref().map(|project| &project.root) != Some(&root) {
+                    state.build.reset();
+                }
+                state.run.begin_project_load();
+                state.run_configuration_generation =
+                    state.run_configuration_generation.wrapping_add(1);
+                if let Err(error) = state
+                    .run_configuration_loader
+                    .start(root.clone(), state.run_configuration_generation)
+                {
+                    state.run.finish_project_load(Err(error));
+                }
+                state.debugger.open_project(root.clone());
+                state.search.reset();
+                state.terminal.close();
+                state.git.reset();
+                state
+                    .git
+                    .dispatch(root.clone(), super::events::GitAction::Refresh);
+                state.last_error = project.discovery_error.clone();
+                state.status = if let Some(model) = &project.model {
+                    if model.kind == crate::project::ProjectKind::Unknown {
+                        format!(
+                            "Opened {} — no Maven or Gradle project found",
+                            root.display()
+                        )
+                    } else {
+                        format!(
+                            "Opened {} — {} build at {} ({} modules)",
+                            root.display(),
+                            model.kind,
+                            model.root.display(),
+                            model.modules.len()
+                        )
+                    }
+                } else {
+                    format!("Opened {} — build discovery failed", root.display())
+                };
+                state.maven_view_loader.cancel();
+                state.maven_cache_loader.cancel();
+                state.gradle_task_loader.cancel();
+                retire_maven_watcher(state);
+                state.maven_project_generation = state.maven_project_generation.wrapping_add(1);
+                state.project_tree_generation = state.project_tree_generation.wrapping_add(1);
+                state.project_tree_loading = false;
+                state.project = Some(project);
+                if let Some(path) = startup_file {
+                    state.enqueue(AppEvent::OpenFile(path));
+                }
+                state.maven_generation = state.maven_generation.wrapping_add(1);
+                state.maven_cache_generation = state.maven_cache_generation.wrapping_add(1);
+                state.maven_view = None;
+                state.maven_view_root = state
+                    .project
+                    .as_ref()
+                    .and_then(|project| project.model.as_ref())
+                    .filter(|model| model.kind == ProjectKind::Maven)
+                    .map(|model| model.root.clone());
+                state.maven_profiles.clear();
+                state.maven_selected_module = None;
+                state.maven_loading = false;
+                state.maven_cache_loading = false;
+                state.maven_error = None;
+                state.maven_cache_error = None;
+                state.gradle_task_generation = state.gradle_task_generation.wrapping_add(1);
+                state.gradle_task_root = state
+                    .project
+                    .as_ref()
+                    .and_then(|project| project.model.as_ref())
+                    .filter(|model| model.kind == ProjectKind::Gradle)
+                    .map(|model| model.root.clone());
+                state.gradle_selected_project = None;
+                state.gradle_tasks.clear();
+                state.gradle_task_filter.clear();
+                state.gradle_task_loading = false;
+                state.gradle_task_loaded = false;
+                state.gradle_task_error = None;
+                if let Some(cache_root) = state.maven_view_root.clone() {
+                    state.maven_cache_loading = true;
+                    if let Err(error) = state
+                        .maven_cache_loader
+                        .start(cache_root, state.maven_cache_generation)
+                    {
+                        state.maven_cache_loading = false;
+                        state.maven_cache_error = Some(error);
+                    }
+                }
+                if let Some(model) = state
+                    .project
+                    .as_ref()
+                    .and_then(|project| project.model.as_ref())
+                    .filter(|model| model.kind == ProjectKind::Maven)
+                    .cloned()
+                {
+                    match crate::project::maven_watch::MavenPomWatcher::start(
+                        model.root.clone(),
+                        crate::project::maven_watch::project_pom_paths(&model),
+                        state.maven_project_generation,
+                    ) {
+                        Ok(watcher) => state.maven_pom_watcher = Some(watcher),
+                        Err(error) => state.maven_error = Some(error),
+                    }
+                }
+                restart_language(state);
+                match opened.tree {
+                    Ok(tree) => {
+                        state.project_tree = Some(tree);
+                        state.project_tree_error = None;
+                    }
+                    Err(error) => {
+                        state.project_tree = None;
+                        state.project_tree_error = Some(error);
+                    }
+                }
+                state.settings.remember_project(root);
+                save_settings(state);
+            }
+            AppEvent::RefreshProjectTree(path) => {
+                let Some(project) = &state.project else {
+                    continue;
+                };
+                if path == project.root {
+                    state.project_tree_generation = state.project_tree_generation.wrapping_add(1);
+                    state.project_tree_loading = true;
+                    if let Err(error) = state
+                        .project_tree_loader
+                        .start(path, state.project_tree_generation)
+                    {
+                        state.project_tree_loading = false;
+                        state.project_tree_error = Some(error);
+                    }
+                } else if let Some(tree) = &mut state.project_tree {
+                    if let Err(error) = tree.refresh(&path) {
+                        state.project_tree_error = Some(error.to_string());
+                    }
+                }
+            }
+            AppEvent::ProjectTreeRefreshed(event) => {
+                if event.generation != state.project_tree_generation
+                    || state
+                        .project
+                        .as_ref()
+                        .is_none_or(|project| project.root != event.root)
+                {
+                    continue;
+                }
+                state.project_tree_loading = false;
+                match event.result {
+                    Ok(tree) => {
+                        state.project_tree = Some(tree);
+                        state.project_tree_error = None;
+                    }
+                    Err(error) => state.project_tree_error = Some(error),
+                }
+            }
+            AppEvent::LoadProjectTreeChildren { path, request } => {
+                if let Some(root) = state.project.as_ref().map(|project| project.root.clone()) {
+                    if let Err(error) =
+                        state
+                            .project_tree_loader
+                            .start_children(root, path.clone(), request)
+                    {
+                        if let Some(tree) = &mut state.project_tree {
+                            tree.apply_children(&path, request, Err(error));
+                        }
+                    }
+                }
+            }
+            AppEvent::ProjectTreeRootValidated(event) => {
+                if state
+                    .project
+                    .as_ref()
+                    .is_some_and(|project| project.root == event.root)
+                {
+                    if let Some(tree) = &mut state.project_tree {
+                        tree.apply_root_validation(event.request, event.result);
+                    }
+                }
+            }
+            AppEvent::ProjectTreeChildrenLoaded(event) => {
+                if state
+                    .project
+                    .as_ref()
+                    .is_some_and(|project| project.root == event.root)
+                {
+                    if let Some(tree) = &mut state.project_tree {
+                        tree.apply_children(&event.parent, event.request, event.result);
+                    }
+                }
+            }
+            AppEvent::ValidateProjectTreeRoot { request } => {
+                if let Some(root) = state.project.as_ref().map(|project| project.root.clone()) {
+                    if let Err(error) = state
+                        .project_tree_loader
+                        .start_root_validation(root, request)
+                    {
+                        if let Some(tree) = &mut state.project_tree {
+                            tree.apply_root_validation(request, Err(error));
+                        }
+                    }
+                }
+            }
+            AppEvent::RevealInFinder(path) => {
+                if let Err(error) = state.finder_reveal.start(path) {
+                    state.last_error = Some(error);
+                }
+            }
+            AppEvent::FinderRevealed(result) => {
+                if let Err(error) = result {
+                    state.last_error = Some(error);
+                }
+            }
+            AppEvent::OpenFile(path) => {
+                if let Some(index) = state.editor_tabs.iter().position(|tab| tab.path == path) {
+                    state.active_tab = Some(index);
+                } else if !state.quit_requested && state.loading_files.insert(path.clone()) {
+                    match state.editor_io.load(path.clone()) {
+                        Ok(()) => state.status = format!("Opening {}…", path.display()),
+                        Err(error) => {
+                            state.loading_files.remove(&path);
+                            state.last_error = Some(error);
+                        }
+                    }
+                }
+            }
+            AppEvent::NewJavaClass(directory) => {
+                if !state.quit_requested && state.project.is_some() {
+                    state.new_java_class = Some(super::NewJavaClassDialog {
+                        directory,
+                        name: String::new(),
+                        package: String::new(),
+                    });
+                }
+            }
+            AppEvent::NewJavaProjectOpen => {
+                if !state.quit_requested {
+                    let parent = state.project.as_ref()
+                        .and_then(|project| project.root.parent().map(Path::to_path_buf))
+                        .or_else(|| directories::UserDirs::new().map(|user_dirs| user_dirs.home_dir().to_path_buf()))
+                        .unwrap_or_else(|| PathBuf::from("."));
+                    state.new_java_project = Some(super::NewJavaProjectDialog {
+                        parent,
+                        name: "JavaProject".into(),
+                        package: "com.example".into(),
+                        kind: ProjectKind::Maven,
+                    });
+                }
+            }
+            AppEvent::CreateJavaProject { parent, name, package, kind } => {
+                if state.quit_requested { continue; }
+                state.project_open_generation = state.project_open_generation.wrapping_add(1);
+                state.project_opening = true;
+                state.status = format!("Creating {kind} project {name}…");
+                let request = crate::project::workspace::NewProjectRequest { parent, name, package, kind };
+                if let Err(error) = state.project_open_loader.start_new(request, state.project_open_generation) {
+                    state.project_opening = false;
+                    state.last_error = Some(error);
+                }
+            }
+            AppEvent::CreateJavaClass { directory, name, package } => {
+                let Some(root) = state.project.as_ref().map(|project| project.root.clone()) else { continue; };
+                match state.editor_io.create_java_class(root, directory, name, package) {
+                    Ok(()) => state.status = "Creating Java class…".into(),
+                    Err(error) => state.last_error = Some(error),
+                }
+            }
+            AppEvent::QuickOpenOpen => {
+                if !state.quit_requested {
+                    state.quick_open.open();
+                }
+            }
+            AppEvent::SymbolSearchOpen => {
+                if !state.quit_requested {
+                    state.symbol_search.open();
+                }
+            }
+            AppEvent::FileStructureOpen => {
+                if !state.quit_requested {
+                    state.language.sync_documents(&state.editor_tabs);
+                    if let Some(tab) = state
+                        .active_tab
+                        .and_then(|index| state.editor_tabs.get(index))
+                    {
+                        if tab
+                            .path
+                            .extension()
+                            .is_some_and(|extension| extension == "java")
+                        {
+                            state.file_structure.open(tab.path.clone());
+                            state.language.request_document_symbols(&tab.document);
+                        } else {
+                            state.status =
+                                "File Structure is available for Java source files".into();
+                        }
+                    } else {
+                        state.status = "Open a Java file to view its structure".into();
+                    }
+                }
+            }
+            AppEvent::GoToLineOpen => {
+                if !state.quit_requested {
+                    if state.active_tab.is_some() {
+                        state.go_to_line.open();
+                    } else {
+                        state.status = "Open a file before navigating to a line".into();
+                    }
+                }
+            }
+            AppEvent::SearchWorkspaceSymbols(query) => {
+                if !state.quit_requested {
+                    state.language.search_workspace_symbols(query);
+                }
+            }
+            AppEvent::Find(action) => {
+                let tab = state
+                    .active_tab
+                    .and_then(|index| state.editor_tabs.get_mut(index));
+                state.find_replace.apply(action, tab);
+            }
+            AppEvent::OpenFileAtLine(path, line) => {
+                open_file_at_position(
+                    state,
+                    path,
+                    crate::java::lsp::Position {
+                        line: line.saturating_sub(1).min(u32::MAX as usize) as u32,
+                        character: 0,
+                    },
+                );
+            }
+            AppEvent::OpenFileAtPosition(path, position) => {
+                open_file_at_position(state, path, position);
+            }
+            AppEvent::Search(action) => match action {
+                super::events::SearchAction::Open => {
+                    state.active_panel = super::ActivePanel::Search;
+                    let show_window_changed = !state.settings.show_tool_window;
+                    state.settings.show_tool_window = true;
+                    state.search.focus_requested = true;
+                    if show_window_changed {
+                        save_settings(state);
+                    }
+                }
+                super::events::SearchAction::Run(query) => {
+                    if let Some(project) = &state.project {
+                        state.search.start(project.root.clone(), query);
+                    }
+                }
+                super::events::SearchAction::Cancel => state.search.cancel(),
+            },
+            AppEvent::Terminal(action) => match action {
+                super::events::TerminalAction::Open => {
+                    if let Some(project) = &state.project {
+                        state.terminal.open(project.root.clone(), context.clone());
+                    }
+                }
+                super::events::TerminalAction::Close => state.terminal.close(),
+                super::events::TerminalAction::Input(input) => {
+                    state.terminal.send(input.into_bytes())
+                }
+            },
+            AppEvent::Git(action) => {
+                if let Some(project) = &state.project {
+                    state.git.dispatch(project.root.clone(), action);
+                }
+            }
+            AppEvent::SaveActiveFile => {
+                if let Some(path) = active_path(state) {
+                    save_file(state, &path);
+                }
+            }
+            AppEvent::SaveAllFiles => {
+                let paths: Vec<_> = state
+                    .editor_tabs
+                    .iter()
+                    // The pending snapshot can differ even after edits return to
+                    // the old baseline; queue another save for those tabs too.
+                    .filter(|tab| tab.document.is_dirty() || tab.saving)
+                    .map(|tab| tab.path.clone())
+                    .collect();
+                for path in paths {
+                    save_file(state, &path);
+                }
+            }
+            AppEvent::SaveFile(path) => save_file(state, &path),
+            AppEvent::CloseActiveFile => {
+                if let Some(path) = active_path(state) {
+                    close_file(state, &path);
+                }
+            }
+            AppEvent::CloseFile(path) => close_file(state, &path),
+            AppEvent::SaveAndClose(path) => {
+                if let Some(tab) = state.editor_tabs.iter_mut().find(|tab| tab.path == path) {
+                    tab.close_after_save = true;
+                    save_file(state, &path);
+                }
+            }
+            AppEvent::DiscardAndClose(path) => {
+                // A pending write must finish before a document can be discarded.
+                if state
+                    .editor_tabs
+                    .iter()
+                    .any(|tab| tab.path == path && !tab.saving)
+                {
+                    remove_tab(state, &path);
+                }
+            }
+            AppEvent::CancelClose => {
+                state.pending_close = None;
+                state.quit_requested = false;
+            }
+            AppEvent::RequestQuit => state.quit_requested = true,
+            AppEvent::EditorCompleted(completion) => editor_completed(state, completion),
+            AppEvent::EditorCommand(command) => {
+                state.language.sync_documents(&state.editor_tabs);
+                if let Some(tab) = state
+                    .active_tab
+                    .and_then(|index| state.editor_tabs.get(index))
+                {
+                    state.language.request(command, &tab.document);
+                }
+            }
+            AppEvent::ApplyCompletion(index) => {
+                if let Some(tab) = state
+                    .active_tab
+                    .and_then(|index| state.editor_tabs.get_mut(index))
+                {
+                    match state.language.apply_completion(index, &mut tab.document) {
+                        Ok(()) => tab.restore_document_cursor(),
+                        Err(error) => state.language.summary = error.to_string(),
+                    }
+                }
+            }
+            AppEvent::Language(update) => {
+                let generation = update.generation;
+                let document_edits = match &update.event {
+                    crate::java::lsp::LanguageEvent::DocumentEdits { path, version, kind, result } => {
+                        Some((path.clone(), *version, *kind, result.clone()))
+                    }
+                    _ => None,
+                };
+                let accepted = state.language.accepts_generation(generation);
+                state.language.receive(update);
+                if accepted {
+                    if let Some((path, version, kind, result)) = document_edits {
+                        if let Some(tab) = state.editor_tabs.iter_mut().find(|tab| tab.path == path) {
+                            if state.language.is_document_current(&path, version, &tab.document.text) {
+                                match result {
+                                    Ok(edits) if !edits.is_empty() => {
+                                        match tab.document.apply_lsp_edits(&edits) {
+                                            Ok(()) => {
+                                                tab.restore_document_cursor();
+                                                state.language.summary = match kind {
+                                                    crate::java::lsp::DocumentEditKind::Format => "Java file formatted".into(),
+                                                    crate::java::lsp::DocumentEditKind::OrganizeImports => "Java imports organized".into(),
+                                                };
+                                            }
+                                            Err(error) => state.language.summary = format!("Cannot apply Java edits: {error}"),
+                                        }
+                                    }
+                                    Ok(_) => state.language.summary = match kind {
+                                        crate::java::lsp::DocumentEditKind::Format => "Java file is already formatted".into(),
+                                        crate::java::lsp::DocumentEditKind::OrganizeImports => "Java imports are already organized".into(),
+                                    },
+                                    Err(_) => {}
+                                }
+                            } else {
+                                state.language.summary = "Discarded stale Java formatting result".into();
+                            }
+                        }
+                    }
+                }
+            }
+            AppEvent::RestartLanguage => restart_language(state),
+            AppEvent::ShowPanel(panel) => {
+                state.active_panel = panel;
+                if !state.settings.show_tool_window {
+                    state.settings.show_tool_window = true;
+                    save_settings(state);
+                }
+            }
+            AppEvent::SettingsChanged => {
+                state.language.refresh_tooling(&state.settings);
+                if !state.settings.show_tool_window {
+                    state.terminal.close();
+                }
+                save_settings(state);
+            }
+            AppEvent::SettingsSaved { generation, result } => {
+                if generation == state.settings_save_generation {
+                    state.settings_save_pending = false;
+                    state.settings_save_error = result
+                        .err()
+                        .map(|error| format!("Preferences have not been saved: {error}"));
+                }
+            }
+            AppEvent::DiscoverJdks => {
+                if let Err(error) = state
+                    .jdk_discovery
+                    .start_catalog(state.settings.jdks.clone())
+                {
+                    state.last_error = Some(error);
+                } else {
+                    state.status = "Discovering installed JDKs…".into();
+                }
+            }
+            AppEvent::AddJdkPath { path, target } => {
+                let minimum_jdt_ls_major = if matches!(
+                    &target,
+                    crate::java::jdk::JdkSelectionTarget::JdtLs
+                ) {
+                    state.settings.jdt_ls_minimum_major()
+                } else {
+                    0
+                };
+                if let Err(error) =
+                    state
+                        .jdk_discovery
+                        .start_add(
+                            path,
+                            state.settings.jdks.clone(),
+                            target,
+                            minimum_jdt_ls_major,
+                        )
+                {
+                    state.last_error = Some(error);
+                } else {
+                    state.status = "Validating JDK path…".into();
+                }
+            }
+            AppEvent::JdksDiscovered(result) => {
+                state.settings.jdks = result.catalog;
+                if state.project.as_ref().is_some_and(|project| project.model.is_some()) {
+                    // JDT LS receives the available JDK catalog and selected
+                    // project runtime at startup; refresh it after catalog changes.
+                    state.pending_language_restart = true;
+                }
+                if let Some(id) = result.selected_id {
+                    match result.target {
+                        crate::java::jdk::JdkSelectionTarget::Catalog => {}
+                        crate::java::jdk::JdkSelectionTarget::Global => {
+                            state.settings.default_jdk_id = Some(id);
+                            state.pending_language_restart = true;
+                        }
+                        crate::java::jdk::JdkSelectionTarget::JdtLs => {
+                            let minimum = state.settings.jdt_ls_minimum_major();
+                            if state.settings.jdks.iter().find(|jdk| jdk.id == id).is_some_and(|jdk| jdk.version.major >= minimum) {
+                                state.settings.jdt_ls_jdk_id = Some(id);
+                                state.pending_language_restart = true;
+                            } else {
+                                state.last_error = Some(format!("{} JDT LS requires Java {minimum} or newer", if state.settings.jdt_ls_executable.is_some() { "Custom" } else { "Bundled" }));
+                            }
+                        }
+                        crate::java::jdk::JdkSelectionTarget::Project(root) => {
+                            state.settings.set_project_jdk(root, Some(id));
+                            state.pending_language_restart = true;
+                        }
+                    }
+                }
+                if let Some(error) = result.error {
+                    state.last_error = Some(error);
+                }
+                state.language.refresh_tooling(&state.settings);
+                state.status = format!(
+                    "JDK catalog updated: {} installation(s)",
+                    state.settings.jdks.len()
+                );
+                save_settings(state);
+            }
+            AppEvent::Maven(action) => match action {
+                MavenAction::ToggleCollapsed => state.maven_collapsed = !state.maven_collapsed,
+                MavenAction::Reload { root } => {
+                    if !state.quit_requested && state.maven_view_root.as_ref() == Some(&root) {
+                        reload_maven_view(state);
+                    }
+                }
+                MavenAction::ToggleProfile { root, profile } => {
+                    if state.quit_requested
+                        || state.maven_view_root.as_ref() != Some(&root)
+                        || profile == "local"
+                        || !state
+                            .maven_view
+                            .as_ref()
+                            .is_some_and(|view| view.profiles.iter().any(|item| item.id == profile))
+                    {
+                        continue;
+                    }
+                    if !state.maven_profiles.remove(&profile) {
+                        state.maven_profiles.insert(profile);
+                    }
+                    reload_maven_view(state);
+                }
+                MavenAction::SelectModule { root, module } => {
+                    if state.maven_view_root.as_ref() == Some(&root)
+                        && state.maven_view.as_ref().is_some_and(|view| {
+                            find_maven_module(&view.root_module, module.as_deref()).is_some()
+                        })
+                    {
+                        state.maven_selected_module = module;
+                    }
+                }
+                MavenAction::RunTask {
+                    root,
+                    generation,
+                    module,
+                    goal,
+                } => {
+                    if state.quit_requested
+                        || state.maven_view_root.as_ref() != Some(&root)
+                        || generation != state.maven_generation
+                        || state.maven_loading
+                        || state.maven_error.is_some()
+                    {
+                        continue;
+                    }
+                    let valid_task = state
+                        .maven_view
+                        .as_ref()
+                        .and_then(|view| find_maven_module(&view.root_module, module.as_deref()))
+                        .is_some_and(|owner| {
+                            owner.lifecycle.iter().any(|task| task.goal == goal)
+                                || owner
+                                    .plugins
+                                    .iter()
+                                    .any(|plugin| plugin.tasks.iter().any(|task| task.goal == goal))
+                        });
+                    if !valid_task {
+                        continue;
+                    }
+                    state.maven_selected_module = module.clone();
+                    let request = (|| -> Result<_, String> {
+                        let project = state.project.as_ref().ok_or("Open a Maven project first")?;
+                        let model = project
+                            .model
+                            .as_ref()
+                            .filter(|model| model.kind == ProjectKind::Maven && model.root == root)
+                            .ok_or("The Maven project has changed")?
+                            .clone();
+                        let jdk = configured_maven_jdk(state, &project.root)?;
+                        let mut profiles: Vec<_> = state.maven_profiles.iter().cloned().collect();
+                        profiles.sort();
+                        let mut disabled_profiles: Vec<_> = state
+                            .maven_view
+                            .as_ref()
+                            .into_iter()
+                            .flat_map(|view| &view.profiles)
+                            .filter(|profile| {
+                                profile.id != "local" && !state.maven_profiles.contains(&profile.id)
+                            })
+                            .map(|profile| profile.id.clone())
+                            .collect();
+                        disabled_profiles.sort();
+                        Ok(crate::java::build::MavenTaskRequest {
+                            project: model,
+                            goal,
+                            module,
+                            profiles,
+                            disabled_profiles,
+                            jdk,
+                        })
+                    })();
+                    match request {
+                        Ok(request) => match state
+                            .build
+                            .start_maven_task(request, state.settings.maven_executable.as_deref())
+                        {
+                            Ok(()) => {
+                                state.status = state.build.summary.clone();
+                                state.enqueue(AppEvent::ShowPanel(super::ActivePanel::Build));
+                            }
+                            Err(error) => state.last_error = Some(error.to_string()),
+                        },
+                        Err(error) => state.last_error = Some(error),
+                    }
+                }
+            },
+            AppEvent::Gradle(action) => match action {
+                super::events::GradleAction::ToggleCollapsed => {
+                    state.gradle_collapsed = !state.gradle_collapsed;
+                }
+                super::events::GradleAction::Reload { root } => {
+                    if !state.quit_requested && state.gradle_task_root.as_ref() == Some(&root) {
+                        reload_gradle_tasks(state);
+                    }
+                }
+                super::events::GradleAction::Cancel { root } => {
+                    if state.gradle_task_root.as_ref() == Some(&root) && state.gradle_task_loading {
+                        state.gradle_task_loader.cancel();
+                        state.gradle_task_generation = state.gradle_task_generation.wrapping_add(1);
+                        state.gradle_task_loading = false;
+                        state.gradle_task_loaded = false;
+                        state.gradle_tasks.clear();
+                        state.gradle_task_error = None;
+                    }
+                }
+                super::events::GradleAction::SelectProject { root, project_path } => {
+                    if state.quit_requested || state.gradle_task_root.as_ref() != Some(&root) {
+                        continue;
+                    }
+                    let valid = state.project.as_ref().and_then(|project| project.model.as_ref())
+                        .is_some_and(|model| model.kind == ProjectKind::Gradle && model.root == root
+                            && project_path.as_ref().is_none_or(|path| model.modules.iter().any(|module| &module.root == path)));
+                    if valid {
+                        state.gradle_selected_project = project_path;
+                        reload_gradle_tasks(state);
+                    }
+                }
+                super::events::GradleAction::RunTask { root, generation, project_path, task_path } => {
+                    if state.quit_requested || state.gradle_task_root.as_ref() != Some(&root)
+                        || generation != state.gradle_task_generation
+                        || state.gradle_selected_project != project_path
+                        || state.gradle_task_loading || state.gradle_task_error.is_some()
+                        || !state.gradle_tasks.iter().any(|task| task.path == task_path)
+                        || state.build.running()
+                    {
+                        continue;
+                    }
+                    let request = (|| -> Result<_, String> {
+                        let project = state.project.as_ref().ok_or("Open a Gradle project first")?;
+                        let model = project.model.as_ref()
+                            .filter(|model| model.kind == ProjectKind::Gradle && model.root == root)
+                            .ok_or("The Gradle project has changed")?.clone();
+                        let jdk = state.settings.selected_jdk(&project.root, None)?.clone();
+                        Ok(crate::java::build::GradleTaskRequest { project: model, task_path, jdk })
+                    })();
+                    match request {
+                        Ok(request) => match state.build.start_gradle_task(request, state.settings.gradle_executable.as_deref()) {
+                            Ok(()) => {
+                                state.status = state.build.summary.clone();
+                                state.enqueue(AppEvent::ShowPanel(super::ActivePanel::Build));
+                            }
+                            Err(error) => state.last_error = Some(error.to_string()),
+                        },
+                        Err(error) => state.last_error = Some(error),
+                    }
+                }
+            },
+            AppEvent::GradleTasksCompleted(event) => {
+                if state.gradle_task_root.as_ref() != Some(&event.root)
+                    || state.gradle_selected_project != event.project_path
+                    || state.gradle_task_generation != event.generation
+                {
+                    continue;
+                }
+                state.gradle_task_loading = false;
+                match event.result {
+                    Ok(tasks) => {
+                        state.gradle_tasks = tasks;
+                        state.gradle_task_loaded = true;
+                        state.gradle_task_error = None;
+                    }
+                    Err(error) if error == "Gradle task report cancelled" => {}
+                    Err(error) => {
+                        state.gradle_tasks.clear();
+                        state.gradle_task_loaded = true;
+                        state.gradle_task_error = Some(error);
+                    }
+                }
+            }
+            AppEvent::MavenViewCompleted {
+                root,
+                generation,
+                result,
+                cache_error,
+            } => {
+                if state.maven_view_root.as_ref() != Some(&root)
+                    || generation != state.maven_generation
+                {
+                    continue;
+                }
+                state.maven_loading = false;
+                state.maven_cache_error = cache_error;
+                match result {
+                    Ok(view) => {
+                        if view.profiles.iter().any(|profile| profile.id == "local") {
+                            state.maven_profiles.insert("local".into());
+                        } else {
+                            state.maven_profiles.remove("local");
+                        }
+                        if find_maven_module(
+                            &view.root_module,
+                            state.maven_selected_module.as_deref(),
+                        )
+                        .is_none()
+                        {
+                            state.maven_selected_module = None;
+                        }
+                        state.maven_view = Some(view);
+                        state.maven_error = None;
+                    }
+                    Err(error) => state.maven_error = Some(error),
+                }
+            }
+            AppEvent::MavenCacheLoaded {
+                root,
+                generation,
+                result,
+                current_pom_fingerprint,
+            } => {
+                if state.maven_view_root.as_ref() != Some(&root)
+                    || generation != state.maven_cache_generation
+                {
+                    continue;
+                }
+                state.maven_cache_loading = false;
+                match result {
+                    Ok(Some(cached)) => {
+                        if state.maven_view.is_none() {
+                            state.maven_view = Some(cached.view);
+                            state.maven_error = None;
+                        }
+                        if let Some(view) = &state.maven_view {
+                            if view.profiles.iter().any(|profile| profile.id == "local") {
+                                state.maven_profiles.insert("local".into());
+                            } else {
+                                state.maven_profiles.remove("local");
+                            }
+                        }
+                        match current_pom_fingerprint {
+                            Ok(current)
+                                if cached_maven_view_is_stale(
+                                    Some(&cached.pom_fingerprint),
+                                    Some(&current),
+                                ) =>
+                            {
+                                if !state.maven_loading {
+                                    reload_maven_view(state);
+                                }
+                            }
+                            Ok(_) => {}
+                            Err(error) => state.maven_cache_error = Some(error),
+                        }
+                    }
+                    Ok(None) => {
+                        if let Err(error) = current_pom_fingerprint {
+                            state.maven_cache_error = Some(error);
+                        }
+                    }
+                    Err(error) => state.maven_cache_error = Some(error),
+                }
+            }
+            AppEvent::MavenPomsChanged(event) => {
+                if !maven_pom_event_is_current(
+                    state.maven_view_root.as_deref(),
+                    state.maven_project_generation,
+                    &event.root,
+                    event.project_generation,
+                ) {
+                    continue;
+                }
+                match event.model {
+                    Ok(model) if model.kind == ProjectKind::Maven => {
+                        if let Some(project) = &mut state.project {
+                            project.kind = model.kind;
+                            project.model = Some(model);
+                            project.discovery_error = None;
+                        }
+                        state.maven_error = None;
+                        reload_maven_view(state);
+                    }
+                    Ok(model) => {
+                        if let Some(project) = &mut state.project {
+                            project.kind = model.kind;
+                            project.model = Some(model);
+                            project.discovery_error = None;
+                        }
+                        retire_maven_watcher(state);
+                        state.maven_view_root = None;
+                        state.maven_view = None;
+                        state.maven_loading = false;
+                        state.maven_view_loader.cancel();
+                        state.maven_generation = state.maven_generation.wrapping_add(1);
+                    }
+                    Err(error) => {
+                        if let Some(project) = &mut state.project {
+                            project.discovery_error = Some(error.clone());
+                        }
+                        state.maven_view_loader.cancel();
+                        state.maven_generation = state.maven_generation.wrapping_add(1);
+                        state.maven_loading = false;
+                        state.maven_error = Some(error);
+                    }
+                }
+            }
+            AppEvent::Status(message) => state.status = message,
+            AppEvent::Error(message) => state.last_error = Some(message),
+            AppEvent::Build(action) => {
+                use super::events::BuildAction;
+                use crate::java::build::{BuildRequest, BuildTask};
+                if matches!(action, BuildAction::Cancel) {
+                    state.build.cancel();
+                    continue;
+                }
+                if state.quit_requested {
+                    continue;
+                }
+                let request = (|| -> Result<_, String> {
+                    let project = state.project.as_ref().ok_or("Open a Java project first")?;
+                    let model = project
+                        .model
+                        .as_ref()
+                        .ok_or("Build discovery has no Maven or Gradle model")?
+                        .clone();
+                    let jdk = state.settings.selected_jdk(&project.root, None)?.clone();
+                    let executable = match model.kind {
+                        crate::project::ProjectKind::Maven => {
+                            state.settings.maven_executable.clone()
+                        }
+                        crate::project::ProjectKind::Gradle => {
+                            state.settings.gradle_executable.clone()
+                        }
+                        crate::project::ProjectKind::Unknown => None,
+                    };
+                    let task = match action {
+                        BuildAction::Build => BuildTask::Build,
+                        BuildAction::Test => BuildTask::Test,
+                        BuildAction::Clean => BuildTask::Clean,
+                        BuildAction::Cancel => unreachable!(),
+                    };
+                    Ok((
+                        BuildRequest {
+                            project: model,
+                            task,
+                            jdk,
+                        },
+                        executable,
+                    ))
+                })();
+                match request {
+                    Ok((request, executable)) => {
+                        match state.build.start(request, executable.as_deref()) {
+                            Ok(()) => {
+                                state.status = state.build.summary.clone();
+                                state.enqueue(AppEvent::ShowPanel(super::ActivePanel::Build));
+                            }
+                            Err(error) => state.last_error = Some(error.to_string()),
+                        }
+                    }
+                    Err(error) => state.last_error = Some(error),
+                }
+            }
+            AppEvent::Run(action) => {
+                use super::events::RunAction;
+                let Some(project) = &state.project else {
+                    continue;
+                };
+                match action {
+                    RunAction::Stop => state.run.cancel(),
+                    RunAction::Save(config) => {
+                        if state.run.loading || state.run.saving {
+                            continue;
+                        }
+                        let selected = config.id.clone();
+                        match state.run.configurations_after_save(config) {
+                            Ok(configurations) => {
+                                state.run_configuration_generation =
+                                    state.run_configuration_generation.wrapping_add(1);
+                                match state.run_configuration_loader.save(
+                                    project.root.clone(),
+                                    state.run_configuration_generation,
+                                    configurations,
+                                    Some(selected),
+                                ) {
+                                    Ok(()) => {
+                                        state.run.saving = true;
+                                        state.run.configuration_error = None;
+                                    }
+                                    Err(error) => state.run.configuration_error = Some(error),
+                                }
+                            }
+                            Err(error) => state.run.configuration_error = Some(error.to_string()),
+                        }
+                    }
+                    RunAction::Delete => {
+                        if state.run.loading || state.run.saving {
+                            continue;
+                        }
+                        match state.run.configurations_after_delete() {
+                            Ok(configurations) => {
+                                let selected =
+                                    configurations.first().map(|config| config.id.clone());
+                                state.run_configuration_generation =
+                                    state.run_configuration_generation.wrapping_add(1);
+                                match state.run_configuration_loader.save(
+                                    project.root.clone(),
+                                    state.run_configuration_generation,
+                                    configurations,
+                                    selected,
+                                ) {
+                                    Ok(()) => {
+                                        state.run.saving = true;
+                                        state.run.configuration_error = None;
+                                    }
+                                    Err(error) => state.run.configuration_error = Some(error),
+                                }
+                            }
+                            Err(error) => state.run.configuration_error = Some(error.to_string()),
+                        }
+                    }
+                    RunAction::Start => {
+                        state.active_panel = super::ActivePanel::Run;
+                        state.settings.show_tool_window = true;
+                        let result = (|| {
+                            let config = state
+                                .run
+                                .selected()
+                                .cloned()
+                                .ok_or_else(|| "Create a run configuration first".to_owned())?;
+                            let model = project
+                                .model
+                                .as_ref()
+                                .filter(|model| model.kind != crate::project::ProjectKind::Unknown)
+                                .ok_or_else(|| "Open a Maven or Gradle project first".to_owned())?;
+                            let jdk = state.settings.run_jdk(&project.root, &config)?;
+                            let resolver = state
+                                .language
+                                .classpath_resolver()
+                                .map_err(|error| error.to_string())?;
+                            state
+                                .run
+                                .start(
+                                    crate::java::run_config::RunService::new(resolver),
+                                    &config,
+                                    model,
+                                    jdk,
+                                )
+                                .map_err(|error| error.to_string())
+                        })();
+                        if let Err(error) = result {
+                            state.run.summary = error;
+                        }
+                    }
+                }
+            }
+            AppEvent::RunConfigurationsLoaded(event) => {
+                if event.generation == state.run_configuration_generation
+                    && state
+                        .project
+                        .as_ref()
+                        .is_some_and(|project| project.root == event.root)
+                {
+                    if event.saved {
+                        state.run.finish_save(event.result, event.selected);
+                    } else {
+                        state.run.finish_project_load(event.result);
+                    }
+                }
+            }
+            AppEvent::Debugger(action) => {
+                use super::events::DebuggerAction;
+                match action {
+                    DebuggerAction::Stop => state.debugger.cancel(),
+                    DebuggerAction::Start => {
+                        state.active_panel = super::ActivePanel::Debugger;
+                        state.settings.show_tool_window = true;
+                        let result = (|| {
+                            if state.pending_language_restart {
+                                return Err("Wait for Java intelligence to restart".to_owned());
+                            }
+                            let project = state
+                                .project
+                                .as_ref()
+                                .ok_or_else(|| "Open a Java project first".to_owned())?;
+                            let model = project
+                                .model
+                                .as_ref()
+                                .filter(|model| model.kind != crate::project::ProjectKind::Unknown)
+                                .ok_or_else(|| "Open a Maven or Gradle project first".to_owned())?;
+                            let config = state
+                                .run
+                                .selected()
+                                .cloned()
+                                .ok_or_else(|| "Create a run configuration first".to_owned())?;
+                            let jdk = state.settings.run_jdk(&project.root, &config)?;
+                            let bundle =
+                                state.language.tooling.debug_bundle.clone().ok_or_else(|| {
+                                    state.language.tooling.debug_error.clone().unwrap_or_else(
+                                        || "Java Debug Server is unavailable".into(),
+                                    )
+                                })?;
+                            let resolver = state
+                                .language
+                                .debug_adapter_resolver()
+                                .map_err(|error| error.to_string())?;
+                            state
+                                .debugger
+                                .start(
+                                    crate::debugger::DebugService::new(resolver, bundle),
+                                    &config,
+                                    model,
+                                    jdk,
+                                )
+                                .map_err(|error| error.to_string())
+                        })();
+                        if let Err(error) = result {
+                            state.debugger.summary = error;
+                        }
+                    }
+                    action => crate::debugger::handle_action(&mut state.debugger, action),
+                }
+            }
+        }
+    }
+    advance_quit(state);
+}
+
+fn reload_maven_view(state: &mut AppState) {
+    state.maven_generation = state.maven_generation.wrapping_add(1);
+    state.maven_loading = false;
+    state.maven_error = None;
+    let request = (|| -> Result<_, String> {
+        let project = state.project.as_ref().ok_or("Open a Maven project first")?;
+        let model = project
+            .model
+            .as_ref()
+            .filter(|model| model.kind == ProjectKind::Maven)
+            .ok_or("Open a Maven project first")?
+            .clone();
+        if let Err(error) = state
+            .language
+            .refresh_maven_project(crate::project::maven_watch::project_pom_paths(&model))
+        {
+            // Java-language refresh is auxiliary; it must not block the Maven
+            // view refresh requested by the user or POM watcher.
+            state.language.summary = format!("Maven language refresh unavailable: {error}");
+        }
+        let jdk = configured_maven_jdk(state, &project.root)?;
+        let mut profiles: Vec<_> = state.maven_profiles.iter().cloned().collect();
+        profiles.sort();
+        Ok(MavenViewRequest {
+            project: model,
+            executable: state.settings.maven_executable.clone(),
+            jdk,
+            profiles,
+            generation: state.maven_generation,
+        })
+    })();
+    match request {
+        Ok(request) => match state.maven_view_loader.start(request) {
+            Ok(()) => state.maven_loading = true,
+            Err(error) => state.maven_error = Some(error),
+        },
+        Err(error) => state.maven_error = Some(error),
+    }
+}
+
+fn reload_gradle_tasks(state: &mut AppState) {
+    state.gradle_task_loader.cancel();
+    state.gradle_task_generation = state.gradle_task_generation.wrapping_add(1);
+    state.gradle_task_loading = false;
+    state.gradle_task_loaded = false;
+    state.gradle_tasks.clear();
+    state.gradle_task_error = None;
+    let request = (|| -> Result<_, String> {
+        let project = state.project.as_ref().ok_or("Open a Gradle project first")?;
+        let model = project.model.as_ref()
+            .filter(|model| model.kind == ProjectKind::Gradle && Some(&model.root) == state.gradle_task_root.as_ref())
+            .ok_or("Open a Gradle project first")?.clone();
+        if let Some(module) = &state.gradle_selected_project
+            && !model.modules.iter().any(|item| &item.root == module)
+        {
+            return Err("Selected directory is not a discovered Gradle project".into());
+        }
+        let jdk = state.settings.selected_jdk(&project.root, None)?.clone();
+        Ok((model, state.gradle_selected_project.clone(), state.settings.gradle_executable.clone(), jdk))
+    })();
+    match request {
+        Ok((model, module, executable, jdk)) => match state.gradle_task_loader.start(
+            model, module, executable, jdk, state.gradle_task_generation,
+        ) {
+            Ok(()) => state.gradle_task_loading = true,
+            Err(error) => state.gradle_task_error = Some(error),
+        },
+        Err(error) => state.gradle_task_error = Some(error),
+    }
+}
+
+fn retire_maven_watcher(state: &mut AppState) {
+    if let Some(mut watcher) = state.maven_pom_watcher.take() {
+        watcher.request_cancel();
+        state.retiring_maven_watchers.push(watcher);
+    }
+}
+
+fn cached_maven_view_is_stale(cached: Option<&str>, current: Option<&str>) -> bool {
+    matches!((cached, current), (Some(cached), Some(current)) if cached != current)
+}
+
+fn maven_pom_event_is_current(
+    current_root: Option<&std::path::Path>,
+    current_generation: u64,
+    event_root: &std::path::Path,
+    event_generation: u64,
+) -> bool {
+    current_root == Some(event_root) && current_generation == event_generation
+}
+
+fn find_maven_module<'a>(
+    module: &'a MavenModuleView,
+    path: Option<&std::path::Path>,
+) -> Option<&'a MavenModuleView> {
+    if module.relative_path.as_deref() == path {
+        return Some(module);
+    }
+    module
+        .modules
+        .iter()
+        .find_map(|child| find_maven_module(child, path))
+}
+
+fn configured_maven_jdk(
+    state: &AppState,
+    root: &std::path::Path,
+) -> Result<crate::java::jdk::JdkInstallation, String> {
+    let id = state
+        .settings
+        .project_jdk_id(root)
+        .or(state.settings.default_jdk_id.as_deref())
+        .ok_or("Choose a JDK in Settings or Project Structure")?;
+    state
+        .settings
+        .jdks
+        .iter()
+        .find(|jdk| jdk.id == id)
+        .cloned()
+        .ok_or_else(|| format!("Selected JDK {id} is no longer registered; select a replacement"))
+}
+
+#[cfg(test)]
+mod maven_cache_tests {
+    use super::{cached_maven_view_is_stale, maven_pom_event_is_current};
+    use std::path::Path;
+
+    #[test]
+    fn no_cache_does_not_trigger_automatic_maven_resolution() {
+        assert!(!cached_maven_view_is_stale(None, Some("current")));
+    }
+
+    #[test]
+    fn unchanged_cache_does_not_trigger_automatic_maven_resolution() {
+        assert!(!cached_maven_view_is_stale(Some("same"), Some("same")));
+    }
+
+    #[test]
+    fn changed_pom_fingerprint_triggers_automatic_maven_resolution() {
+        assert!(cached_maven_view_is_stale(Some("old"), Some("new")));
+    }
+
+    #[test]
+    fn stale_watcher_events_are_ignored_after_project_switch() {
+        assert!(!maven_pom_event_is_current(
+            Some(Path::new("/current")),
+            3,
+            Path::new("/old"),
+            2
+        ));
+        assert!(!maven_pom_event_is_current(
+            Some(Path::new("/same")),
+            4,
+            Path::new("/same"),
+            3
+        ));
+        assert!(maven_pom_event_is_current(
+            Some(Path::new("/same")),
+            4,
+            Path::new("/same"),
+            4
+        ));
+    }
+}
+
+fn active_path(state: &AppState) -> Option<std::path::PathBuf> {
+    state
+        .active_tab
+        .and_then(|index| state.editor_tabs.get(index))
+        .map(|tab| tab.path.clone())
+}
+
+fn save_file(state: &mut AppState, path: &std::path::Path) {
+    let Some(index) = state.editor_tabs.iter().position(|tab| tab.path == path) else {
+        return;
+    };
+    let tab = &mut state.editor_tabs[index];
+    if tab.saving {
+        tab.save_again = true;
+        return;
+    }
+    if !tab.document.is_dirty() {
+        if tab.close_after_save {
+            remove_tab(state, path);
+        }
+        return;
+    }
+    match state.editor_io.save(tab.document.clone()) {
+        Ok(()) => {
+            tab.saving = true;
+            state.status = format!("Saving {}…", path.display());
+        }
+        Err(error) => {
+            tab.close_after_save = false;
+            state.last_error = Some(error);
+        }
+    }
+}
+
+fn close_file(state: &mut AppState, path: &std::path::Path) {
+    if state.pending_close.is_some() {
+        return;
+    }
+    let Some(index) = state.editor_tabs.iter().position(|tab| tab.path == path) else {
+        return;
+    };
+    let tab = &state.editor_tabs[index];
+    if tab.document.is_dirty() || tab.saving {
+        state.pending_close = Some(tab.path.clone());
+        state.active_tab = Some(index);
+    } else {
+        remove_tab(state, path);
+    }
+}
+
+fn remove_tab(state: &mut AppState, path: &std::path::Path) {
+    let Some(index) = state.editor_tabs.iter().position(|tab| tab.path == path) else {
+        return;
+    };
+    state.editor_tabs.remove(index);
+    state.active_tab = match state.active_tab {
+        _ if state.editor_tabs.is_empty() => None,
+        Some(active) if active > index => Some(active - 1),
+        Some(active) => Some(active.min(state.editor_tabs.len() - 1)),
+        None => Some(0),
+    };
+    if state.pending_close.as_deref() == Some(path) {
+        state.pending_close = None;
+    }
+}
+
+fn editor_completed(state: &mut AppState, completion: EditorCompletion) {
+    match completion {
+        EditorCompletion::Loaded {
+            requested_path,
+            result,
+        } => {
+            state.loading_files.remove(&requested_path);
+            match result {
+                Ok(document) if !state.quit_requested => {
+                    let index = if let Some(index) = state
+                        .editor_tabs
+                        .iter()
+                        .position(|tab| tab.path == document.path)
+                    {
+                        index
+                    } else {
+                        state.editor_tabs.push(EditorTab::new(document));
+                        state.editor_tabs.len() - 1
+                    };
+                    state.active_tab = Some(index);
+                    if let Some(position) = state.pending_navigation.remove(&requested_path) {
+                        navigate_tab_to_position(&mut state.editor_tabs[index], position);
+                    }
+                    state.status = format!("Opened {}", state.editor_tabs[index].path.display());
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    state.pending_navigation.remove(&requested_path);
+                    state.last_error = Some(error);
+                }
+            }
+        }
+        EditorCompletion::Saved {
+            path,
+            snapshot,
+            result,
+        } => {
+            if result.is_ok() {
+                state.language.did_save(path.clone());
+            }
+            let Some(index) = state.editor_tabs.iter().position(|tab| tab.path == path) else {
+                return;
+            };
+            let tab = &mut state.editor_tabs[index];
+            tab.saving = false;
+            let save_again = std::mem::take(&mut tab.save_again);
+            match result {
+                Ok(()) => {
+                    // Only the exact snapshot written to disk becomes the clean baseline.
+                    tab.document.saved_text = snapshot;
+                    let dirty = tab.document.is_dirty();
+                    let close = tab.close_after_save && !dirty;
+                    state.status = format!(
+                        "Saved {}{}",
+                        path.display(),
+                        if dirty {
+                            " — newer edits remain unsaved"
+                        } else {
+                            ""
+                        }
+                    );
+                    if close {
+                        remove_tab(state, &path);
+                    } else if save_again && dirty {
+                        save_file(state, &path);
+                    } else if state.pending_close.as_deref() == Some(path.as_path()) && !dirty {
+                        remove_tab(state, &path);
+                    }
+                }
+                Err(error) => {
+                    tab.close_after_save = false;
+                    state.last_error = Some(error);
+                }
+            }
+        }
+        EditorCompletion::JavaClassCreated { root, directory, result } => {
+            if state.project.as_ref().is_none_or(|project| project.root != root) { return; }
+            match result {
+                Ok(path) => {
+                    state.status = format!("Created {}", path.display());
+                    state.enqueue(AppEvent::RefreshProjectTree(directory));
+                    if !state.quit_requested { state.enqueue(AppEvent::OpenFile(path)); }
+                }
+                Err(error) => state.last_error = Some(error),
+            }
+        }
+    }
+}
+
+fn advance_quit(state: &mut AppState) {
+    if !state.quit_requested || state.pending_close.is_some() {
+        return;
+    }
+    if let Some(path) = state
+        .editor_tabs
+        .iter()
+        .find(|tab| tab.document.is_dirty() || tab.saving)
+        .map(|tab| tab.path.clone())
+    {
+        close_file(state, &path);
+    } else {
+        state.quit_approved = true;
+    }
+}
+
+fn save_settings(state: &mut AppState) {
+    if state.settings_writable {
+        match state.settings_saver.start(state.settings.clone()) {
+            Ok(generation) => {
+                state.settings_save_generation = generation;
+                state.settings_save_pending = true;
+                state.settings_save_error = None;
+            }
+            Err(error) => {
+                state.settings_save_pending = false;
+                state.settings_save_error =
+                    Some(format!("Preferences have not been saved: {error}"));
+            }
+        }
+    }
+}
+
+/// Shared selector for settings, project defaults and run configurations.
+fn browse_for_jdk(
+    events: &mut Vec<AppEvent>,
+    target: crate::java::jdk::JdkSelectionTarget,
+) -> bool {
+    let Some(path) = rfd::FileDialog::new()
+        .set_title("Select JDK home or .jdk bundle")
+        .pick_folder()
+    else {
+        return false;
+    };
+    events.push(AppEvent::AddJdkPath { path, target });
+    true
+}
+
+pub fn jdk_selector(
+    ui: &mut egui::Ui,
+    salt: &str,
+    selected: &mut Option<String>,
+    jdks: &mut Vec<crate::java::jdk::JdkInstallation>,
+    inherited_label: &str,
+    empty_label: &str,
+    browse_label: &str,
+    minimum_major: u32,
+    target: crate::java::jdk::JdkSelectionTarget,
+    events: &mut Vec<AppEvent>,
+    busy: bool,
+) -> bool {
+    let before = selected.clone();
+    let label = selected
+        .as_deref()
+        .map(|id| {
+            jdks.iter()
+                .find(|jdk| jdk.id == id)
+                .map(|jdk| jdk.label())
+                .unwrap_or_else(|| format!("Missing JDK ({id})"))
+        })
+        .unwrap_or_else(|| empty_label.to_owned());
+    ui.horizontal(|ui| {
+        egui::ComboBox::from_id_salt(salt)
+            .selected_text(label)
+            .show_ui(ui, |ui| {
+                ui.selectable_value(selected, None, inherited_label);
+                for jdk in jdks.iter() {
+                    ui.add_enabled_ui(jdk.valid && jdk.version.major >= minimum_major, |ui| {
+                        ui.selectable_value(selected, Some(jdk.id.clone()), jdk.label())
+                            .on_hover_text(jdk.home.display().to_string());
+                    });
+                }
+            });
+        if ui
+            .add_enabled(!busy, egui::Button::new(browse_label))
+            .clicked()
+        {
+            let _ = browse_for_jdk(events, target.clone());
+        }
+    });
+    before != *selected
+}
+
+fn jdk_catalog_controls(ui: &mut egui::Ui, state: &mut AppState) {
+    ui.horizontal(|ui| {
+        let label = if state.jdk_discovery.has_worker() {
+            "Discovering JDKs…"
+        } else {
+            "Discover / refresh JDKs"
+        };
+        if ui
+            .add_enabled(!state.jdk_discovery.has_worker(), egui::Button::new(label))
+            .clicked()
+        {
+            state.enqueue(AppEvent::DiscoverJdks);
+        }
+        if ui.button("Browse…").clicked() {
+            if let Some(path) = rfd::FileDialog::new()
+                .set_title("Select JDK home or .jdk bundle")
+                .pick_folder()
+            {
+                state.jdk_path_input = path.display().to_string();
+            }
+        }
+    });
+    if state.jdk_discovery.has_worker() {
+        ui.spinner();
+    }
+    ui.horizontal(|ui| {
+        ui.add(
+            egui::TextEdit::singleline(&mut state.jdk_path_input)
+                .hint_text("JDK home or .jdk bundle path"),
+        );
+        if ui
+            .add_enabled(
+                !state.jdk_path_input.trim().is_empty() && !state.jdk_discovery.has_worker(),
+                egui::Button::new("Add JDK"),
+            )
+            .clicked()
+        {
+            let path = std::path::PathBuf::from(state.jdk_path_input.trim());
+            state.enqueue(AppEvent::AddJdkPath {
+                path,
+                target: crate::java::jdk::JdkSelectionTarget::Catalog,
+            });
+            state.jdk_path_input.clear();
+        }
+    });
+}
+
+pub fn jdk_settings_ui(ui: &mut egui::Ui, state: &mut AppState) {
+    ui.heading("Java installations");
+    jdk_catalog_controls(ui, state);
+    let mut changed = false;
+    let mut remove = None;
+    egui::ScrollArea::vertical()
+        .max_height(220.0)
+        .show(ui, |ui| {
+            for jdk in &state.settings.jdks {
+                ui.horizontal(|ui| {
+                    if jdk.valid {
+                        ui.label(jdk.label());
+                    } else {
+                        ui.colored_label(ui.visuals().error_fg_color, jdk.label());
+                    }
+                    if ui.small_button("Remove").clicked() {
+                        remove = Some(jdk.id.clone());
+                    }
+                });
+                ui.small(jdk.home.display().to_string());
+                ui.separator();
+            }
+        });
+    if let Some(id) = remove {
+        state.settings.jdks.retain(|jdk| jdk.id != id);
+        // Retain selected ids: affected projects must explicitly pick a replacement.
+        changed = true;
+        state.pending_language_restart = true;
+    }
+    ui.label("Global default JDK");
+    let selection_changed = jdk_selector(
+        ui,
+        "global_jdk",
+        &mut state.settings.default_jdk_id,
+        &mut state.settings.jdks,
+        "No global default",
+        "No global default",
+        "Choose JDK…",
+        0,
+        crate::java::jdk::JdkSelectionTarget::Global,
+        &mut state.events,
+        state.jdk_discovery.has_worker(),
+    );
+    changed |= selection_changed;
+    if selection_changed {
+        state.pending_language_restart = true;
+        state.status = "Restarting Java intelligence with the selected default JDK…".into();
+    }
+    let minimum_jdt_java = state.settings.jdt_ls_minimum_major();
+    ui.weak("Changing the selected JDK restarts Java intelligence automatically.");
+    ui.label(format!("JDT Language Server runtime (Java {minimum_jdt_java}+)")).on_hover_text(if state.settings.jdt_ls_executable.is_some() { "A custom JDT LS launcher requires Java 21 or newer." } else { "The bundled JDT LS requires Java 25 or newer." });
+    let selection_changed = jdk_selector(
+        ui,
+        "jdt_ls_jdk",
+        &mut state.settings.jdt_ls_jdk_id,
+        &mut state.settings.jdks,
+        "No JDT LS runtime",
+        "No JDT LS runtime",
+        &format!("Choose Java {minimum_jdt_java}+…"),
+        minimum_jdt_java,
+        crate::java::jdk::JdkSelectionTarget::JdtLs,
+        &mut state.events,
+        state.jdk_discovery.has_worker(),
+    );
+    changed |= selection_changed;
+    if selection_changed {
+        state.pending_language_restart = true;
+        state.status = "Restarting Java intelligence with the selected JDT LS runtime…".into();
+    }
+    ui.label("JDT LS launcher override (bundled launcher is used when unset)");
+    ui.horizontal(|ui| {
+        let display = state
+            .language
+            .tooling
+            .jdtls_path
+            .as_ref()
+            .map(|path| {
+                if state.settings.jdt_ls_executable.is_some() {
+                    format!("Override: {}", path.display())
+                } else {
+                    format!("Bundled: {}", path.display())
+                }
+            })
+            .unwrap_or_else(|| {
+                if state.language.tooling.resolving {
+                    "Checking launcher…".into()
+                } else {
+                    "No launcher found — editor and builds remain available".into()
+                }
+            });
+        ui.label(display);
+        if ui.small_button("Choose launcher…").clicked() {
+            if let Some(path) = rfd::FileDialog::new()
+                .set_title("Select installed jdtls launcher")
+                .pick_file()
+            {
+                state.settings.jdt_ls_executable = Some(path);
+                changed = true;
+            }
+        }
+        if state.settings.jdt_ls_executable.is_some() && ui.small_button("Clear launcher").clicked()
+        {
+            state.settings.jdt_ls_executable = None;
+            changed = true;
+        }
+    });
+    if let Some(error) = &state.language.tooling.jdtls_error {
+        ui.colored_label(ui.visuals().error_fg_color, error);
+    }
+    ui.label("Java Debug Server plugin override (bundled plugin is used when unset)");
+    ui.horizontal(|ui| {
+        let display = state
+            .language
+            .tooling
+            .debug_bundle
+            .as_ref()
+            .map(|path| {
+                if state.settings.java_debug_bundle.is_some() {
+                    format!("Override: {}", path.display())
+                } else {
+                    format!("Bundled: {}", path.display())
+                }
+            })
+            .unwrap_or_else(|| {
+                if state.language.tooling.resolving {
+                    "Checking plugin…".into()
+                } else {
+                    "No plugin found".into()
+                }
+            });
+        ui.label(display);
+        if ui.small_button("Choose plugin JAR…").clicked() {
+            if let Some(path) = rfd::FileDialog::new()
+                .add_filter("Java Debug Server plugin", &["jar"])
+                .set_title("Select com.microsoft.java.debug.plugin-<version>.jar")
+                .pick_file()
+            {
+                state.settings.java_debug_bundle = Some(path);
+                changed = true;
+            }
+        }
+        if state.settings.java_debug_bundle.is_some() && ui.small_button("Clear plugin").clicked() {
+            state.settings.java_debug_bundle = None;
+            changed = true;
+        }
+    });
+    if let Some(error) = &state.language.tooling.debug_error {
+        ui.colored_label(ui.visuals().error_fg_color, error);
+    } else if state.language.tooling.debug_bundle.is_some() {
+        ui.small("Plugin path is valid. Apply / restart Java intelligence to load it. Compatibility is checked by JDT LS.");
+    }
+    if ui.button("Apply / restart Java intelligence").clicked() {
+        state.enqueue(AppEvent::RestartLanguage);
+    }
+    ui.small(&state.language.summary);
+    ui.separator();
+    ui.label("Build executables (projects prefer their wrapper)");
+    for (label, executable) in [
+        ("Maven", &mut state.settings.maven_executable),
+        ("Gradle", &mut state.settings.gradle_executable),
+    ] {
+        ui.horizontal(|ui| {
+            ui.label(label);
+            ui.label(
+                executable
+                    .as_ref()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_else(|| "Unconfigured".into()),
+            );
+            if ui.small_button("Choose…").clicked() {
+                if let Some(path) = rfd::FileDialog::new()
+                    .set_title(format!("Select {label} executable"))
+                    .pick_file()
+                {
+                    *executable = Some(path);
+                    changed = true;
+                }
+            }
+            if executable.is_some() && ui.small_button("Clear").clicked() {
+                *executable = None;
+                changed = true;
+            }
+        });
+    }
+    if changed {
+        state.enqueue(AppEvent::SettingsChanged);
+    }
+}
+
+pub fn project_jdk_ui(ui: &mut egui::Ui, state: &mut AppState) {
+    let Some(project) = &state.project else {
+        ui.label("Open a project first");
+        return;
+    };
+    let root = project.root.clone();
+    let display_name = project.display_name.clone();
+    ui.strong(&display_name);
+    ui.small(root.display().to_string());
+    ui.label("Java installations");
+    jdk_catalog_controls(ui, state);
+    ui.separator();
+    ui.label("Project default JDK");
+    let mut selected = state.settings.project_jdk_id(&root).map(str::to_owned);
+    let inherited = state
+        .settings
+        .default_jdk_id
+        .as_deref()
+        .and_then(|id| state.settings.jdks.iter().find(|jdk| jdk.id == id))
+        .map(|jdk| format!("Use global default ({})", jdk.label()))
+        .unwrap_or_else(|| "Use global default (unconfigured)".into());
+    let selection_changed = jdk_selector(
+        ui,
+        "project_jdk",
+        &mut selected,
+        &mut state.settings.jdks,
+        &inherited,
+        &inherited,
+        "Add JDK…",
+        0,
+        crate::java::jdk::JdkSelectionTarget::Project(root.clone()),
+        &mut state.events,
+        state.jdk_discovery.has_worker(),
+    );
+    if selection_changed {
+        state.settings.set_project_jdk(root.clone(), selected);
+        state.pending_language_restart = true;
+        state.status = "Restarting Java intelligence with the selected project JDK…".into();
+    }
+    if selection_changed {
+        state.enqueue(AppEvent::SettingsChanged);
+    }
+    match state.settings.selected_jdk(&root, None) {
+        Ok(jdk) => {
+            ui.label(format!("Effective JDK: {}", jdk.label()));
+            ui.small(jdk.home.display().to_string());
+        }
+        Err(error) => {
+            ui.colored_label(ui.visuals().error_fg_color, error);
+        }
+    }
+}
+
+pub(crate) fn restart_language(state: &mut AppState) {
+    if state.quit_requested {
+        return;
+    }
+    state.run.cancel();
+    state.debugger.cancel();
+    if state.debugger.has_workers() {
+        state.pending_language_restart = true;
+        return;
+    }
+    state.pending_language_restart = false;
+    let model = state
+        .project
+        .as_ref()
+        .and_then(|project| project.model.as_ref());
+    let selection_root = state.project.as_ref().map(|project| project.root.as_path());
+    state
+        .language
+        .restart(model, &state.settings, selection_root);
+    state.language.sync_documents(&state.editor_tabs);
+}

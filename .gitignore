@@ -1,0 +1,6 @@
+/target/
+/.idea/
+/docs/
+/*.dist-stage*/
+/.dist-packages
+/dist

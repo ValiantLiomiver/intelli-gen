@@ -1,0 +1,25 @@
+[package]
+name = "intelli-gen"
+version = "0.1.0"
+edition = "2024"
+description = "A native Rust workbench for Java projects"
+publish = false
+
+[dependencies]
+eframe = "0.37"
+rfd = "0.17"
+directories = "6"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+url = "2"
+toml = "0.9"
+quick-xml = { version = "0.38", features = ["serialize"] }
+syntect = { version = "5", default-features = false, features = ["default-fancy"] }
+ignore = "0.4"
+globset = "0.4"
+portable-pty = "0.9"
+plist = "1.10"
+vt100 = "0.16"
+git2 = { version = "0.21", default-features = false }
+libc = "0.2"
+tokio = { version = "1.53", features = ["rt", "process", "io-util", "time", "sync", "macros", "net"] }
