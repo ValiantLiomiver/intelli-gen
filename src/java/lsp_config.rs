@@ -133,6 +133,8 @@ pub fn resolve_debug_bundle(settings: &crate::settings::UserSettings, executable
 pub struct JdtlsConfig {
     pub executable: PathBuf,
     pub launcher_arguments: Vec<OsString>,
+    /// Project-resolved Lombok agent, when Lombok is declared and already cached locally.
+    pub lombok_agent: Option<PathBuf>,
     pub shared_configuration: Option<PathBuf>,
     pub package_version: Option<OsString>,
     pub runtime_jdk_id: String,
@@ -162,6 +164,7 @@ impl JdtlsConfig {
         let runtime_jdk_id = settings.jdt_ls_jdk().map_err(LspError)?.id.clone();
         let application = std::env::current_exe().map_err(|error| LspError(format!("Cannot locate Intelli-gen executable: {error}")))?;
         let resolved = resolve_jdtls(settings, &application)?;
+        let lombok_agent = find_project_lombok(root);
         let (debug_bundle, debug_bundle_error) = match resolve_debug_bundle(settings, &application) {
             Ok(path) => (Some(path), None),
             Err(error) => (None, Some(error.to_string())),
@@ -174,7 +177,7 @@ impl JdtlsConfig {
             hash ^= u64::from(*byte);
             hash = hash.wrapping_mul(0x100000001b3);
         }
-        Ok(Self { executable: resolved.display_path, launcher_arguments: resolved.arguments,
+        Ok(Self { executable: resolved.display_path, launcher_arguments: resolved.arguments, lombok_agent,
             shared_configuration: resolved.shared_configuration, package_version: resolved.package_version, runtime_jdk_id,
             workspace_data: dirs.data_local_dir().join("jdtls").join(format!("{hash:016x}")),
             jdks: settings.jdks.clone(),
@@ -219,4 +222,75 @@ impl JdtlsConfig {
             "autobuild": {"enabled": true}
         }}))
     }
+}
+
+/// Locate Lombok only when a Maven or Gradle descriptor in this workspace declares it.
+/// The IDE never downloads dependencies: only jars already present in the user's caches qualify.
+fn find_project_lombok(root: &Path) -> Option<PathBuf> {
+    fn inspect(dir: &Path, depth: usize, descriptors: &mut Vec<String>) {
+        if depth > 6 { return; }
+        let Ok(entries) = std::fs::read_dir(dir) else { return; };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = entry.file_name();
+            if path.is_dir() {
+                if matches!(name.to_str(), Some(".git" | "target" | "build" | ".gradle" | "node_modules")) { continue; }
+                inspect(&path, depth + 1, descriptors);
+            } else if matches!(name.to_str(), Some("pom.xml" | "build.gradle" | "build.gradle.kts")) {
+                if let Ok(text) = std::fs::read_to_string(path) { descriptors.push(text); }
+            }
+        }
+    }
+    let mut descriptors = Vec::new();
+    inspect(root, 0, &mut descriptors);
+    let declared = descriptors.iter().any(|text| {
+        text.contains("org.projectlombok")
+            || text.contains("projectlombok:lombok")
+            || text.contains("lombok(\"")
+            || text.contains("lombok:")
+    });
+    if !declared { return None; }
+
+    let version = descriptors.iter().find_map(|text| {
+        let start = text.find("<lombok.version>")? + "<lombok.version>".len();
+        let end = text[start..].find("</lombok.version>")? + start;
+        Some(text[start..end].trim().to_owned())
+    }).or_else(|| descriptors.iter().find_map(|text| {
+        let start = text.find("<artifactId>lombok</artifactId>")?;
+        let dependency_end = text[start..].find("</dependency>")? + start;
+        let block = &text[start..dependency_end];
+        let start = block.find("<version>")? + "<version>".len();
+        let end = block[start..].find("</version>")? + start;
+        Some(block[start..end].trim().to_owned())
+    })).or_else(|| descriptors.iter().find_map(|text| {
+        let start = text.find("projectlombok:lombok:")? + "projectlombok:lombok:".len();
+        let version: String = text[start..].chars().take_while(|ch| ch.is_ascii_digit() || *ch == '.').collect();
+        (!version.is_empty()).then_some(version)
+    }));
+    let version = version.map(|version| {
+        if version.starts_with("${") && version.ends_with('}') {
+            let property = &version[2..version.len() - 1];
+            descriptors.iter().find_map(|text| {
+                let tag = format!("<{property}>");
+                let start = text.find(&tag)? + tag.len();
+                let end = text[start..].find(&format!("</{property}>"))? + start;
+                Some(text[start..end].trim().to_owned())
+            }).unwrap_or_default()
+        } else { version }
+    }).filter(|version| !version.is_empty() && !version.contains("${"));
+    let mut candidates = Vec::new();
+    if let Some(version) = version {
+        if let Some(home) = directories::UserDirs::new().map(|dirs| dirs.home_dir().to_path_buf()) {
+            candidates.push(home.join(".m2/repository/org/projectlombok/lombok").join(&version).join(format!("lombok-{version}.jar")));
+            let gradle = home.join(".gradle/caches/modules-2/files-2.1/org.projectlombok/lombok").join(&version);
+            if let Ok(entries) = std::fs::read_dir(gradle) {
+                for hash in entries.flatten() {
+                    if let Ok(jars) = std::fs::read_dir(hash.path()) {
+                        candidates.extend(jars.flatten().map(|entry| entry.path()).filter(|path| path.extension().is_some_and(|ext| ext == "jar")));
+                    }
+                }
+            }
+        }
+    }
+    candidates.into_iter().find(|path| path.is_file())
 }

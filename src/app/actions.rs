@@ -64,6 +64,39 @@ pub fn keyboard_shortcuts(ctx: &egui::Context, state: &mut AppState) {
     if state.quit_approved {
         return;
     }
+    let completion_editor = state
+        .active_tab
+        .and_then(|index| state.editor_tabs.get(index))
+        .and_then(|tab| {
+            let is_current = state.language.completion.as_ref().is_some_and(
+                |(path, _, _, items)| {
+                    path == &tab.path && items.iter().any(|item| item.applicable)
+                },
+            );
+            is_current.then(|| {
+                if tab.document.text.len() > crate::editor::document::PAGED_EDITOR_BYTES {
+                    egui::Id::unique(("paged_source_editor", &tab.path))
+                } else {
+                    egui::Id::unique(("source_editor", &tab.path))
+                }
+            })
+        });
+    if completion_editor.is_some_and(|id| ctx.memory(|memory| memory.focused() == Some(id))) {
+        if ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown)) {
+            state.language.move_completion_selection(1);
+        }
+        if ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp)) {
+            state.language.move_completion_selection(-1);
+        }
+        if ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Enter))
+            && let Some(index) = state.language.completion_selection
+        {
+            state.enqueue(AppEvent::ApplyCompletion(index));
+        }
+        if ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
+            state.language.dismiss_completion();
+        }
+    }
     if ctx.input_mut(|input| {
         input.consume_key(
             egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,

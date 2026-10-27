@@ -1,5 +1,6 @@
 //! Stdio JSON RPC client with worker-owned process and explicit shutdown/reaping.
 use std::collections::HashMap;
+use std::ffi::OsString;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -635,6 +636,17 @@ async fn run(
     }
     std::fs::create_dir_all(&config.workspace_data)?;
     let mut launcher_arguments = config.launcher_arguments.clone();
+    // Lombok patches JDT inside the language-server JVM, so attach the project's
+    // existing jar before Equinox starts. Do not affect custom launchers whose
+    // argument contract is user-defined.
+    if config.shared_configuration.is_some()
+        && let Some(agent) = &config.lombok_agent
+    {
+        let mut argument = OsString::from("-javaagent:");
+        argument.push(agent.as_os_str());
+        let position = launcher_arguments.iter().position(|value| value == "-jar").unwrap_or(launcher_arguments.len());
+        launcher_arguments.insert(position, argument);
+    }
     if let (Some(shared), Some(version)) = (&config.shared_configuration, &config.package_version) {
         let configuration = config.workspace_data.join("configuration").join(version);
         if !configuration.exists() {
@@ -1628,6 +1640,7 @@ pub struct LanguageTool {
     pub diagnostics: HashMap<PathBuf, Vec<LanguageDiagnostic>>,
     pub summary: String,
     pub completion: Option<(PathBuf, i64, Position, Vec<CompletionItem>)>,
+    pub completion_selection: Option<usize>,
     pub signature_help: Option<(PathBuf, i64, Vec<SignatureInformation>, usize)>,
     pub hover: Option<(PathBuf, String)>,
     pub locations: Vec<Location>,
@@ -1785,6 +1798,7 @@ impl LanguageTool {
         self.pending_saves.clear();
         self.diagnostics.clear();
         self.completion = None;
+        self.completion_selection = None;
         self.signature_help = None;
         self.hover = None;
         self.locations.clear();
@@ -2094,6 +2108,7 @@ impl LanguageTool {
                     previous.text.clone_from(&document.text);
                     self.diagnostics.remove(&tab.path);
                     self.completion = None;
+                    self.completion_selection = None;
                     self.signature_help = None;
                     self.hover = None;
                     if self.document_symbols_path.as_ref() == Some(&tab.path) {
@@ -2191,6 +2206,7 @@ impl LanguageTool {
                 position,
                 items,
             } if self.current(&path, version) => {
+                self.completion_selection = items.iter().position(|item| item.applicable);
                 self.completion = Some((path, version, position, items));
             }
             LanguageEvent::SignatureHelp {
@@ -2333,7 +2349,40 @@ impl LanguageTool {
         edits.push((range, item.insert_text.clone()));
         document.apply_lsp_edits(&edits).map_err(LspError)?;
         self.completion = None;
+        self.completion_selection = None;
         Ok(())
+    }
+
+    pub fn move_completion_selection(&mut self, direction: i32) -> Option<usize> {
+        let items = &self.completion.as_ref()?.3;
+        let available: Vec<_> = items
+            .iter()
+            .enumerate()
+            .filter_map(|(index, item)| item.applicable.then_some(index))
+            .collect();
+        if available.is_empty() {
+            self.completion_selection = None;
+            return None;
+        }
+        let current = self
+            .completion_selection
+            .and_then(|selected| available.iter().position(|index| *index == selected))
+            .unwrap_or(0);
+        let next = if direction < 0 {
+            if current == 0 { available.len() - 1 } else { current - 1 }
+        } else if current + 1 == available.len() {
+            0
+        } else {
+            current + 1
+        };
+        let selected = available[next];
+        self.completion_selection = Some(selected);
+        Some(selected)
+    }
+
+    pub fn dismiss_completion(&mut self) {
+        self.completion = None;
+        self.completion_selection = None;
     }
 }
 
@@ -2477,17 +2526,23 @@ pub fn render(ui: &mut eframe::egui::Ui, state: &mut crate::app::AppState) {
                 .max_height(140.0)
                 .show(ui, |ui| {
                     for (index, item) in items.iter().enumerate() {
-                        if ui
-                            .add_enabled(item.applicable, egui::Button::new(&item.label))
-                            .on_hover_text(&item.detail)
-                            .clicked()
-                        {
+                        let selected = state.language.completion_selection == Some(index);
+                        let response = ui
+                            .add_enabled(
+                                item.applicable,
+                                egui::Button::new(&item.label).selected(selected),
+                            )
+                            .on_hover_text(&item.detail);
+                        if selected {
+                            response.scroll_to_me(Some(egui::Align::Center));
+                        }
+                        if response.clicked() {
                             events.push(AppEvent::ApplyCompletion(index));
                         }
                     }
                 });
             if ui.small_button("Dismiss completions").clicked() {
-                state.language.completion = None;
+                state.language.dismiss_completion();
             }
         }
     }
