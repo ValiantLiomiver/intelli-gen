@@ -2323,6 +2323,8 @@ impl LanguageTool {
                     previous.version = version;
                     previous.text.clone_from(&document.text);
                     self.diagnostics.remove(&tab.path);
+                    self.code_actions = None;
+                    self.code_actions_error = None;
                     self.completion = None;
                     self.completion_selection = None;
                     self.signature_help = None;
