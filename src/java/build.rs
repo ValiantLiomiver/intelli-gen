@@ -331,8 +331,11 @@ async fn read_output(mut reader: impl AsyncRead + Unpin, stderr: bool, root: Pat
                 }
                 // Bound even malformed tool output with no line breaks.
                 if pending.len() >= 16_384 {
-                    if !emit_output(&pending, stderr, &root, &events).await { return; }
-                    pending.clear();
+                    let flush = utf8_safe_prefix_len(&pending);
+                    if flush > 0 {
+                        let output: Vec<_> = pending.drain(..flush).collect();
+                        if !emit_output(&output, stderr, &root, &events).await { return; }
+                    }
                 }
             }
             Err(error) => {
@@ -342,6 +345,19 @@ async fn read_output(mut reader: impl AsyncRead + Unpin, stderr: bool, root: Pat
         }
     }
     if !pending.is_empty() { let _ = emit_output(&pending, stderr, &root, &events).await; }
+}
+
+fn utf8_safe_prefix_len(bytes: &[u8]) -> usize {
+    let Some(last) = bytes.len().checked_sub(1) else { return 0; };
+    let mut start = last;
+    while start > 0 && bytes[start] & 0b1100_0000 == 0b1000_0000 { start -= 1; }
+    let expected = match bytes[start] {
+        0xC2..=0xDF => 2,
+        0xE0..=0xEF => 3,
+        0xF0..=0xF4 => 4,
+        _ => 1,
+    };
+    if bytes.len() - start < expected { start } else { bytes.len() }
 }
 
 async fn emit_output(bytes: &[u8], stderr: bool, root: &Path, events: &mpsc::Sender<BuildEvent>) -> bool {
