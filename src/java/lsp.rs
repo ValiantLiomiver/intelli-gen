@@ -42,6 +42,7 @@ pub enum EditorCommand {
     DocumentSymbols,
     Format,
     OrganizeImports,
+    Rename,
 }
 impl EditorCommand {
     fn method(self) -> &'static str {
@@ -56,6 +57,7 @@ impl EditorCommand {
             Self::DocumentSymbols => "textDocument/documentSymbol",
             Self::Format => "textDocument/formatting",
             Self::OrganizeImports => "java/organizeImports",
+            Self::Rename => "textDocument/rename",
         }
     }
 }
@@ -86,6 +88,11 @@ pub struct LanguageDiagnostic {
 pub struct Location {
     pub path: PathBuf,
     pub range: Range,
+}
+#[derive(Clone, Debug)]
+pub struct WorkspaceFileEdits {
+    pub path: PathBuf,
+    pub edits: Vec<(Range, String)>,
 }
 #[derive(Clone, Debug)]
 pub struct WorkspaceSymbol {
@@ -174,6 +181,12 @@ pub enum LanguageEvent {
         version: i64,
         kind: DocumentEditKind,
         result: Result<Vec<(Range, String)>, String>,
+    },
+    RenameEdits {
+        path: PathBuf,
+        version: i64,
+        position: Position,
+        result: Result<Vec<WorkspaceFileEdits>, String>,
     },
     ServerState(String),
 }
@@ -398,9 +411,11 @@ enum LanguageCommand {
     Request {
         command: EditorCommand,
         path: PathBuf,
+        project_root: PathBuf,
         position: Position,
         document_end: Position,
         version: i64,
+        rename_to: Option<String>,
     },
     SearchSymbols {
         query: String,
@@ -924,8 +939,10 @@ fn kill_group(pid: Option<u32>) {
 struct Pending {
     command: EditorCommand,
     path: PathBuf,
+    project_root: PathBuf,
     version: i64,
     position: Position,
+    rename_to: Option<String>,
     sent: Instant,
 }
 
@@ -1056,15 +1073,28 @@ async fn protocol(
                     LanguageCommand::Change { path, text, version } => notify(input, "textDocument/didChange", json!({"textDocument": {"uri": uri(&path)?, "version": version}, "contentChanges": [{"text": text}]})).await?,
                     LanguageCommand::Save(path) => notify(input, "textDocument/didSave", json!({"textDocument": {"uri": uri(&path)?}})).await?,
                     LanguageCommand::Close(path) => notify(input, "textDocument/didClose", json!({"textDocument": {"uri": uri(&path)?}})).await?,
-                    LanguageCommand::Request { command, path, position, document_end, version } => {
+                    LanguageCommand::Request { command, path, project_root, position, document_end, version, rename_to } => {
                         let id = next_id; next_id += 1;
                         let mut params = json!({"textDocument": {"uri": uri(&path)?}, "position": position});
+                        if let Some(new_name) = &rename_to {
+                            params["newName"] = json!(new_name);
+                        }
                         if command == EditorCommand::DocumentSymbols { params = json!({"textDocument": {"uri": uri(&path)?}}); }
                         if command == EditorCommand::Format { params = json!({"textDocument": {"uri": uri(&path)?}, "options": {"tabSize": 4, "insertSpaces": true}}); }
                         if command == EditorCommand::OrganizeImports { params = json!({"textDocument": {"uri": uri(&path)?}, "range": {"start": {"line": 0, "character": 0}, "end": document_end}, "context": {"diagnostics": []}}); }
                         if command == EditorCommand::References { params["context"] = json!({"includeDeclaration": true}); }
-                        if pending.len() + pending_symbols.len() >= 32 { let _ = events.send(LanguageEvent::ServerState("Too many Java requests pending; try again shortly".into())).await; continue; }
-                        pending.insert(id, Pending { command, path, version, position, sent: Instant::now() });
+                        if pending.len() + pending_symbols.len() >= 32 {
+                            if rename_to.is_some() {
+                                let _ = events.send(LanguageEvent::RenameEdits {
+                                    path, version, position,
+                                    result: Err("Too many Java requests pending; try again shortly".into()),
+                                }).await;
+                            } else {
+                                let _ = events.send(LanguageEvent::ServerState("Too many Java requests pending; try again shortly".into())).await;
+                            }
+                            continue;
+                        }
+                        pending.insert(id, Pending { command, path, project_root, version, position, rename_to, sent: Instant::now() });
                         send(input, json!({"jsonrpc": "2.0", "id": id, "method": command.method(), "params": params})).await?;
                     }
                     LanguageCommand::SearchSymbols { query } => {
@@ -1250,6 +1280,13 @@ async fn server_message(
 }
 
 async fn deliver_response(request: Pending, result: &Value, events: &LanguageEventSender) {
+    if request.rename_to.is_some() {
+        let result = parse_rename_workspace_edits(&request.project_root, result);
+        let _ = events.send(LanguageEvent::RenameEdits {
+            path: request.path, version: request.version, position: request.position, result,
+        }).await;
+        return;
+    }
     let Pending {
         command,
         path,
@@ -1379,6 +1416,7 @@ async fn deliver_response(request: Pending, result: &Value, events: &LanguageEve
             };
             LanguageEvent::DocumentEdits { path, version, kind, result }
         }
+        EditorCommand::Rename => LanguageEvent::ServerState("Rename response was missing its new name".into()),
     };
     let _ = events.send(event).await;
 }
@@ -1439,6 +1477,52 @@ fn parse_workspace_edits(path: &Path, value: &Value) -> Result<Vec<(Range, Strin
     Ok(edits)
 }
 
+fn parse_rename_workspace_edits(
+    root: &Path,
+    value: &Value,
+) -> Result<Vec<WorkspaceFileEdits>, String> {
+    if value.is_null() { return Ok(Vec::new()); }
+    let root = root.canonicalize().map_err(|error| format!("Cannot resolve project root: {error}"))?;
+    if value.get("changes").is_some_and(|changes| !changes.is_null() && !changes.is_object()) {
+        return Err("JDT LS returned an invalid workspace changes map".into());
+    }
+    if value.get("documentChanges").is_some_and(|changes| !changes.is_null() && !changes.is_array()) {
+        return Err("JDT LS returned an invalid document changes list".into());
+    }
+    let mut by_path: std::collections::BTreeMap<PathBuf, Vec<(Range, String)>> = std::collections::BTreeMap::new();
+    let mut total_edits = 0usize;
+    let mut append = |uri_value: &Value, edits_value: &Value| -> Result<(), String> {
+        let raw_uri = uri_value.as_str().ok_or("JDT LS returned an edit without a document URI")?;
+        let path = file_path(&Value::String(raw_uri.to_owned()))
+            .ok_or_else(|| format!("JDT LS returned a non-file edit URI: {raw_uri}"))?;
+        let canonical = path.canonicalize().map_err(|error| format!("Cannot resolve rename target {}: {error}", path.display()))?;
+        let metadata = std::fs::metadata(&canonical).map_err(|error| format!("Cannot inspect rename target {}: {error}", canonical.display()))?;
+        if !metadata.is_file() || !canonical.starts_with(&root) {
+            return Err(format!("Rename target must be a regular file inside the open project: {}", canonical.display()));
+        }
+        let edits = parse_text_edits(edits_value)?;
+        total_edits = total_edits.checked_add(edits.len()).ok_or("Too many rename edits")?;
+        if total_edits > 20_000 { return Err("JDT LS returned too many rename edits".into()); }
+        by_path.entry(canonical).or_default().extend(edits);
+        if by_path.len() > 200 { return Err("Rename affects more than 200 files; narrow the symbol scope and try again".into()); }
+        Ok(())
+    };
+    if let Some(changes) = value["changes"].as_object() {
+        for (uri, edits) in changes { append(&Value::String(uri.clone()), edits)?; }
+    }
+    if let Some(changes) = value["documentChanges"].as_array() {
+        for change in changes {
+            let document = change.get("textDocument").ok_or("JDT LS returned an unsupported resource operation")?;
+            if change.get("kind").is_some() { return Err("File resource operations are unsupported in symbol rename".into()); }
+            append(&document["uri"], &change["edits"])?;
+        }
+    }
+    if value.get("changes").is_none() && value.get("documentChanges").is_none() {
+        return Err("JDT LS returned an invalid workspace edit".into());
+    }
+    Ok(by_path.into_iter().map(|(path, edits)| WorkspaceFileEdits { path, edits }).collect())
+}
+
 fn signature_parameter_label(signature_label: &str, parameter_label: &Value) -> Option<String> {
     if let Some(label) = parameter_label.as_str() {
         return Some(label.chars().take(256).collect());
@@ -1472,6 +1556,12 @@ fn utf16_offset_to_byte(text: &str, offset: usize) -> Option<usize> {
 }
 
 async fn deliver_request_error(request: Pending, error: String, events: &LanguageEventSender) {
+    if request.rename_to.is_some() {
+        let _ = events.send(LanguageEvent::RenameEdits {
+            path: request.path, version: request.version, position: request.position, result: Err(error),
+        }).await;
+        return;
+    }
     if matches!(request.command, EditorCommand::Format | EditorCommand::OrganizeImports) {
         let kind = if request.command == EditorCommand::Format {
             DocumentEditKind::Format
@@ -2026,9 +2116,11 @@ impl LanguageTool {
             session.try_command(LanguageCommand::Request {
                 command: EditorCommand::DocumentSymbols,
                 path: document.path.clone(),
+                project_root: self.root.clone().ok_or_else(|| LspError("No Java workspace is open".into()))?,
                 position: document.lsp_position(),
                 document_end: document_end_position(&document.text),
                 version: synced.version,
+                rename_to: None,
             })?;
             self.document_symbols_version = Some(synced.version);
             Ok::<(), LspError>(())
@@ -2157,15 +2249,41 @@ impl LanguageTool {
             session.try_command(LanguageCommand::Request {
                 command,
                 path: document.path.clone(),
+                project_root: self.root.clone().ok_or_else(|| LspError("No Java workspace is open".into()))?,
                 position: document.lsp_position(),
                 document_end: document_end_position(&document.text),
                 version: synced.version,
+                rename_to: None,
             })
         })();
         if let Err(error) = result {
             self.summary = error.to_string();
         }
     }
+    pub fn request_rename(&mut self, document: &Document, position: Position, new_name: String) -> Result<(), LspError> {
+        let result = (|| {
+            if new_name.trim().is_empty() || new_name.chars().count() > 256 {
+                return Err(LspError("Enter a nonempty Java name of at most 256 characters".into()));
+            }
+            if document.lsp_position() != position {
+                return Err(LspError("The rename location changed; invoke Rename Symbol again".into()));
+            }
+            let session = self.session.as_ref().ok_or_else(|| LspError(self.summary.clone()))?;
+            let synced = self.documents.get(&document.path)
+                .filter(|synced| synced.text == document.text)
+                .ok_or_else(|| LspError("Java document is not synchronized yet; try again shortly".into()))?;
+            let project_root = self.root.clone().ok_or_else(|| LspError("No Java workspace is open".into()))?;
+            session.try_command(LanguageCommand::Request {
+                command: EditorCommand::Rename,
+                path: document.path.clone(), project_root, position,
+                document_end: document_end_position(&document.text), version: synced.version,
+                rename_to: Some(new_name.trim().to_owned()),
+            })
+        })();
+        if let Err(error) = &result { self.summary = error.to_string(); }
+        result
+    }
+    pub fn generation(&self) -> u64 { self.generation }
     pub fn accepts_generation(&self, generation: u64) -> bool {
         self.generation == generation
     }

@@ -51,6 +51,8 @@ pub enum AppEvent {
     RequestQuit,
     EditorCompleted(crate::editor::EditorCompletion),
     EditorCommand(crate::java::lsp::EditorCommand),
+    RenameSymbolOpen,
+    RenameSymbolConfirm(String),
     ApplyCompletion(usize),
     Language(crate::java::lsp::LanguageUpdate),
     RestartLanguage,

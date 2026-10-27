@@ -284,6 +284,39 @@ impl Document {
             + self.cursor_column.saturating_sub(1)
     }
 
+    pub fn word_at_cursor(&self) -> Option<String> {
+        let cursor = self.lsp_byte_offset(self.lsp_position())?;
+        let line_start = self.text[..cursor].rfind('\n').map_or(0, |newline| newline + 1);
+        let line_end = self.text[cursor..].find('\n').map_or(self.text.len(), |newline| cursor + newline);
+        let line = &self.text[line_start..line_end];
+        let cursor = cursor - line_start;
+        let is_identifier_part = |character: char| {
+            character.is_alphanumeric() || character == '_' || character == '$'
+        };
+        let start = if line.get(cursor..).and_then(|tail| tail.chars().next()).is_some_and(is_identifier_part) {
+            cursor
+        } else {
+            let (byte, character) = line[..cursor].char_indices().next_back()?;
+            is_identifier_part(character).then_some(byte)?
+        };
+        let mut start = start;
+        while start > 0 {
+            let Some((byte, character)) = line[..start].char_indices().next_back() else { break; };
+            if !is_identifier_part(character) { break; }
+            start = byte;
+        }
+        let mut end = cursor.max(start);
+        if end == start {
+            end += line[start..].chars().next()?.len_utf8();
+        }
+        while end < line.len() {
+            let character = line[end..].chars().next()?;
+            if !is_identifier_part(character) { break; }
+            end += character.len_utf8();
+        }
+        Some(line[start..end].to_owned())
+    }
+
     fn lsp_byte_offset(&self, position: crate::java::lsp::Position) -> Option<usize> {
         let mut start = 0;
         for _ in 0..position.line { start += self.text.get(start..)?.find('\n')? + 1; }

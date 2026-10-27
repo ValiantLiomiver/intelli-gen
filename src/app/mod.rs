@@ -7,7 +7,7 @@ pub mod layout;
 mod quick_open;
 mod symbol_search;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use eframe::egui;
@@ -103,6 +103,10 @@ pub struct AppState {
     pub project_tree_error: Option<String>,
     pub new_java_class: Option<NewJavaClassDialog>,
     pub new_java_project: Option<NewJavaProjectDialog>,
+    pub rename_symbol: Option<RenameSymbolDialog>,
+    pub pending_rename_request: Option<PendingRenameRequest>,
+    pub pending_workspace_edits: HashMap<u64, PendingWorkspaceRename>,
+    pub next_workspace_edit_id: u64,
     pub editor_tabs: Vec<EditorTab>,
     pub active_tab: Option<usize>,
     pub editor_io: EditorIo,
@@ -146,6 +150,34 @@ pub struct NewJavaProjectDialog {
     pub name: String,
     pub package: String,
     pub kind: crate::project::ProjectKind,
+}
+
+pub struct RenameSymbolDialog {
+    pub path: PathBuf,
+    pub revision: u64,
+    pub position: crate::java::lsp::Position,
+    pub old_name: String,
+    pub new_name: String,
+}
+
+pub struct PendingWorkspaceRename {
+    pub root: PathBuf,
+    pub generation: u64,
+    pub source_path: PathBuf,
+    pub version: i64,
+    pub position: crate::java::lsp::Position,
+    pub source_revision: u64,
+    pub open_revisions: HashMap<PathBuf, u64>,
+    pub files: Vec<crate::java::lsp::WorkspaceFileEdits>,
+}
+
+pub struct PendingRenameRequest {
+    pub root: PathBuf,
+    pub generation: u64,
+    pub source_path: PathBuf,
+    pub source_revision: u64,
+    pub position: crate::java::lsp::Position,
+    pub open_revisions: HashMap<PathBuf, u64>,
 }
 
 impl AppState {
@@ -232,6 +264,10 @@ impl IdeaLikeApp {
             project_tree_error: None,
             new_java_class: None,
             new_java_project: None,
+            rename_symbol: None,
+            pending_rename_request: None,
+            pending_workspace_edits: HashMap::new(),
+            next_workspace_edit_id: 0,
             editor_tabs: Vec::new(),
             active_tab: None,
             editor_io: EditorIo::new(cc.egui_ctx.clone()),

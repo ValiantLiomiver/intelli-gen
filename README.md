@@ -46,6 +46,7 @@ The command-line link accepts the same optional project or file path: `dist/inte
 | File structure | `⌘F12` |
 | Complete / parameter info / hover | `Ctrl+Space` / `Ctrl+Shift+Space` / `F1` |
 | Go to definition / find references | `F12` / `Shift+F12` |
+| Rename Java symbol | `Shift+F6` |
 | Go to type definition | `⇧⌘B` |
 | Go to implementation | `⌥⌘B` |
 | Save / save all | `⌘S` / `⇧⌘S` |

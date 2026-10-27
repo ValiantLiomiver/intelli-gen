@@ -77,6 +77,11 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
                 }
             });
             ui.menu_button("Edit", |ui| {
+                if ui.add_enabled(state.active_tab.is_some(), egui::Button::new("Rename Symbol…    Shift+F6")).clicked() {
+                    state.enqueue(AppEvent::RenameSymbolOpen);
+                    ui.close();
+                }
+                ui.separator();
                 if ui.button("Find in Project…    ⇧⌘F").clicked() {
                     state.enqueue(AppEvent::Search(super::events::SearchAction::Open));
                     ui.close();
@@ -529,6 +534,28 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
             }
         } else if cancel {
             state.new_java_project = None;
+        }
+    }
+    if let Some(dialog) = state.rename_symbol.as_mut() {
+        let mut confirm = false;
+        let mut cancel = false;
+        egui::Modal::new(egui::Id::unique("rename_symbol_modal")).show(ui.ctx(), |ui| {
+            ui.heading("Rename Java Symbol");
+            ui.label(format!("{} in {}", dialog.old_name, dialog.path.display()));
+            let input_id = egui::Id::new("rename_symbol_name");
+            let was_focused = ui.ctx().memory(|memory| memory.has_focus(input_id));
+            let input = ui.add(egui::TextEdit::singleline(&mut dialog.new_name).id(input_id).hint_text("New name"));
+            if !was_focused { input.request_focus(); }
+            confirm = ui.add_enabled(!dialog.new_name.trim().is_empty(), egui::Button::new("Rename")).clicked()
+                || input.has_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
+            cancel = ui.button("Cancel").clicked();
+        });
+        if confirm {
+            let new_name = dialog.new_name.trim().to_owned();
+            state.rename_symbol = None;
+            state.enqueue(AppEvent::RenameSymbolConfirm(new_name));
+        } else if cancel {
+            state.rename_symbol = None;
         }
     }
 }

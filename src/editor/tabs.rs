@@ -53,6 +53,14 @@ impl EditorTab {
         self.pending_character_index = Some(self.document.character_index());
     }
 
+    pub fn refresh_after_workspace_edit(&mut self) {
+        self.page_start = 0;
+        self.page_end = 0;
+        self.page_cursor = None;
+        self.pending_character_index = Some(self.document.character_index());
+        self.highlighter = Highlighter::default();
+    }
+
     pub fn select_char_range(&mut self, start: usize, end: usize) {
         if self.document.text.len() > PAGED_EDITOR_BYTES {
             self.pending_character_index = Some(start);
