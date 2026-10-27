@@ -278,11 +278,16 @@ fn find_project_lombok(root: &Path) -> Option<PathBuf> {
             }).unwrap_or_default()
         } else { version }
     }).filter(|version| !version.is_empty() && !version.contains("${"));
+    let home = directories::UserDirs::new().map(|dirs| dirs.home_dir().to_path_buf())?;
+    let maven_repository = maven_local_repository(&home);
+    let gradle_home = std::env::var_os("GRADLE_USER_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.join(".gradle"));
     let mut candidates = Vec::new();
     if let Some(version) = version {
-        if let Some(home) = directories::UserDirs::new().map(|dirs| dirs.home_dir().to_path_buf()) {
-            candidates.push(home.join(".m2/repository/org/projectlombok/lombok").join(&version).join(format!("lombok-{version}.jar")));
-            let gradle = home.join(".gradle/caches/modules-2/files-2.1/org.projectlombok/lombok").join(&version);
+        {
+            candidates.push(maven_repository.join("org/projectlombok/lombok").join(&version).join(format!("lombok-{version}.jar")));
+            let gradle = gradle_home.join("caches/modules-2/files-2.1/org.projectlombok/lombok").join(&version);
             if let Ok(entries) = std::fs::read_dir(gradle) {
                 for hash in entries.flatten() {
                     if let Ok(jars) = std::fs::read_dir(hash.path()) {
@@ -293,4 +298,23 @@ fn find_project_lombok(root: &Path) -> Option<PathBuf> {
         }
     }
     candidates.into_iter().find(|path| path.is_file())
+}
+
+fn maven_local_repository(home: &Path) -> PathBuf {
+    let settings = std::env::var_os("MAVEN_CONFIG")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.join(".m2"))
+        .join("settings.xml");
+    if let Ok(text) = std::fs::read_to_string(settings)
+        && let Some(start) = text.find("<localRepository>")
+    {
+        let start = start + "<localRepository>".len();
+        if let Some(end) = text[start..].find("</localRepository>") {
+            let configured = text[start..start + end].trim()
+                .replace("${user.home}", &home.to_string_lossy());
+            let path = PathBuf::from(configured);
+            if path.is_absolute() { return path; }
+        }
+    }
+    home.join(".m2/repository")
 }
