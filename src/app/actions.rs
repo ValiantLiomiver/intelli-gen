@@ -1900,6 +1900,21 @@ pub fn jdk_settings_ui(ui: &mut egui::Ui, state: &mut AppState) {
         &mut state.events,
         state.jdk_discovery.has_worker(),
     );
+    if !selection_changed
+        && let (Some(selected), Ok(runtime)) = (
+            state.settings.jdt_ls_jdk_id.as_deref(),
+            state.settings.jdt_ls_jdk(),
+        )
+        && selected != runtime.id
+    {
+        ui.colored_label(
+            ui.visuals().warn_fg_color,
+            format!(
+                "Saved JDT LS runtime is incompatible; using {} for Java intelligence.",
+                runtime.label()
+            ),
+        );
+    }
     changed |= selection_changed;
     if selection_changed {
         state.pending_language_restart = true;

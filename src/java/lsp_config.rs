@@ -159,15 +159,13 @@ pub(crate) fn java_settings_for_maven_refresh(settings: &Value) -> Value {
 
 impl JdtlsConfig {
     pub fn from_settings(settings: &crate::settings::UserSettings, root: &Path) -> Result<Self, LspError> {
-        settings.jdt_ls_jdk().map_err(LspError)?;
+        let runtime_jdk_id = settings.jdt_ls_jdk().map_err(LspError)?.id.clone();
         let application = std::env::current_exe().map_err(|error| LspError(format!("Cannot locate Intelli-gen executable: {error}")))?;
         let resolved = resolve_jdtls(settings, &application)?;
         let (debug_bundle, debug_bundle_error) = match resolve_debug_bundle(settings, &application) {
             Ok(path) => (Some(path), None),
             Err(error) => (None, Some(error.to_string())),
         };
-        let runtime_jdk_id = settings.jdt_ls_jdk_id.clone()
-            .ok_or_else(|| LspError(format!("Choose a dedicated Java {}+ JDT LS runtime in Settings", settings.jdt_ls_minimum_major())))?;
         let dirs = directories::ProjectDirs::from("dev", "Intelli-gen", "Intelli-gen")
             .ok_or_else(|| LspError("Application data directory is unavailable".into()))?;
         // Stable per-build-root data identity, independent of basename or hash randomization.
