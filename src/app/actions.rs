@@ -740,10 +740,22 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                 let open_revisions = state.editor_tabs.iter().map(|tab| (tab.path.clone(), tab.document.revision)).collect();
                 let generation = state.language.generation();
                 state.language.sync_documents(&state.editor_tabs);
+                let synchronized_versions = state.language.document_versions();
+                let open_java_documents_synced = state.editor_tabs.iter()
+                    .filter(|tab| tab.path.extension().is_some_and(|extension| extension == "java")
+                        && tab.path.starts_with(&root))
+                    .all(|tab| synchronized_versions.get(&tab.path).is_some_and(|version|
+                        state.language.is_document_current(&tab.path, *version, &tab.document.text)));
+                if !open_java_documents_synced {
+                    state.last_error = Some("Wait for open Java files to synchronize before renaming".into());
+                    continue;
+                }
+                let open_versions = synchronized_versions.into_iter()
+                    .map(|(path, version)| (path.canonicalize().unwrap_or(path), version)).collect();
                 match state.language.request_rename(&document, dialog.position, new_name) {
                     Ok(()) => state.pending_rename_request = Some(super::PendingRenameRequest {
                         root, generation, source_path: dialog.path, source_revision: dialog.revision,
-                        position: dialog.position, open_revisions,
+                        position: dialog.position, open_revisions, open_versions,
                     }),
                     Err(error) => state.last_error = Some(error.to_string()),
                 }
@@ -1766,6 +1778,12 @@ fn begin_workspace_rename(
     for file in &files {
         if !file.path.starts_with(&snapshot.root) {
             state.last_error = Some(format!("Rename target leaves the project: {}", file.path.display()));
+            return;
+        }
+        if let Some(version) = file.version
+            && snapshot.open_versions.get(&file.path) != Some(&version)
+        {
+            state.last_error = Some(format!("{} changed in Java intelligence while rename was running", file.path.display()));
             return;
         }
         let tab = state.editor_tabs.iter().find(|tab| tab.path == file.path);

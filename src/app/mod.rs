@@ -178,6 +178,7 @@ pub struct PendingRenameRequest {
     pub source_revision: u64,
     pub position: crate::java::lsp::Position,
     pub open_revisions: HashMap<PathBuf, u64>,
+    pub open_versions: HashMap<PathBuf, i64>,
 }
 
 impl AppState {

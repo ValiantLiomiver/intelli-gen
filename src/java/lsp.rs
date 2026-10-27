@@ -96,6 +96,7 @@ pub struct WorkspaceFileEdits {
     pub path: PathBuf,
     pub edits: Vec<(Range, String)>,
     pub rename_to: Option<PathBuf>,
+    pub version: Option<i64>,
 }
 #[derive(Clone, Debug)]
 pub struct WorkspaceSymbol {
@@ -1580,7 +1581,7 @@ fn parse_rename_workspace_edits(
     let mut by_path: std::collections::BTreeMap<PathBuf, WorkspaceFileEdits> = std::collections::BTreeMap::new();
     let mut resource_renames = Vec::new();
     let mut total_edits = 0usize;
-    let mut append = |uri_value: &Value, edits_value: &Value| -> Result<(), String> {
+    let mut append = |uri_value: &Value, edits_value: &Value, version: Option<i64>| -> Result<(), String> {
         let raw_uri = uri_value.as_str().ok_or("JDT LS returned an edit without a document URI")?;
         let path = file_path(&Value::String(raw_uri.to_owned()))
             .ok_or_else(|| format!("JDT LS returned a non-file edit URI: {raw_uri}"))?;
@@ -1592,12 +1593,18 @@ fn parse_rename_workspace_edits(
         let edits = parse_text_edits(edits_value)?;
         total_edits = total_edits.checked_add(edits.len()).ok_or("Too many rename edits")?;
         if total_edits > 20_000 { return Err("JDT LS returned too many rename edits".into()); }
-        by_path.entry(canonical.clone()).or_insert_with(|| WorkspaceFileEdits { path: canonical, edits: Vec::new(), rename_to: None }).edits.extend(edits);
+        let entry = by_path.entry(canonical.clone()).or_insert_with(|| WorkspaceFileEdits {
+            path: canonical, edits: Vec::new(), rename_to: None, version,
+        });
+        if entry.version != version {
+            return Err(format!("JDT LS returned inconsistent document versions for {}", entry.path.display()));
+        }
+        entry.edits.extend(edits);
         if by_path.len() > 200 { return Err("Rename affects more than 200 files; narrow the symbol scope and try again".into()); }
         Ok(())
     };
     if let Some(changes) = value["changes"].as_object() {
-        for (uri, edits) in changes { append(&Value::String(uri.clone()), edits)?; }
+        for (uri, edits) in changes { append(&Value::String(uri.clone()), edits, None)?; }
     }
     if let Some(changes) = value["documentChanges"].as_array() {
         for change in changes {
@@ -1617,7 +1624,11 @@ fn parse_rename_workspace_edits(
                 resource_renames.push((old_path, destination));
             } else {
                 let document = change.get("textDocument").ok_or("JDT LS returned an invalid document change")?;
-                append(&document["uri"], &change["edits"])?;
+                let version = match &document["version"] {
+                    Value::Null => None,
+                    value => Some(value.as_i64().ok_or("JDT LS returned an invalid document version")?),
+                };
+                append(&document["uri"], &change["edits"], version)?;
             }
         }
     }
@@ -1626,7 +1637,7 @@ fn parse_rename_workspace_edits(
     }
     drop(append);
     for (old_path, destination) in resource_renames {
-        let entry = by_path.entry(old_path.clone()).or_insert_with(|| WorkspaceFileEdits { path: old_path, edits: Vec::new(), rename_to: None });
+        let entry = by_path.entry(old_path.clone()).or_insert_with(|| WorkspaceFileEdits { path: old_path, edits: Vec::new(), rename_to: None, version: None });
         if entry.rename_to.replace(destination).is_some() { return Err("JDT LS returned multiple file renames for one source".into()); }
     }
     Ok(by_path.into_values().collect())
@@ -2428,6 +2439,9 @@ impl LanguageTool {
         result
     }
     pub fn generation(&self) -> u64 { self.generation }
+    pub fn document_versions(&self) -> std::collections::HashMap<PathBuf, i64> {
+        self.documents.iter().map(|(path, document)| (path.clone(), document.version)).collect()
+    }
     pub fn accepts_generation(&self, generation: u64) -> bool {
         self.generation == generation
     }
