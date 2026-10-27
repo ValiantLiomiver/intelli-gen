@@ -711,17 +711,36 @@ async fn run(
     } else {
         runtime.home.join("bin/java")
     };
+    let mut child_environment = runtime
+        .child_environment()
+        .map_err(|error| LspError(error.to_string()))?;
+    if config.shared_configuration.is_none()
+        && let Some(agent) = &config.lombok_agent
+    {
+        let mut options = std::env::var_os("JAVA_TOOL_OPTIONS").unwrap_or_default();
+        let agent_text = agent.to_string_lossy();
+        if !options.to_string_lossy().contains(agent_text.as_ref()) {
+            if !options.is_empty() { options.push(" "); }
+            options.push("-javaagent:");
+            let quote = if agent_text.chars().any(char::is_whitespace)
+                || agent_text.contains('"') || agent_text.contains('\'') {
+                if !agent_text.contains('"') { Some('"') }
+                else if !agent_text.contains('\'') { Some('\'') }
+                else { return Err(LspError("Cannot quote the Lombok JAR path for the custom JDT LS launcher".into())); }
+            } else { None };
+            if let Some(quote) = quote { options.push(quote.to_string()); }
+            options.push(agent.as_os_str());
+            if let Some(quote) = quote { options.push(quote.to_string()); }
+            child_environment.push(("JAVA_TOOL_OPTIONS".into(), options));
+        }
+    }
     let mut command = tokio::process::Command::new(program);
     command
         .args(&launcher_arguments)
         .arg("-data")
         .arg(&config.workspace_data)
         .current_dir(&project.root)
-        .envs(
-            runtime
-                .child_environment()
-                .map_err(|error| LspError(error.to_string()))?,
-        )
+        .envs(child_environment)
         // JDT LS uses stdio unless one of these inherited socket settings exists.
         .env_remove("CLIENT_PORT")
         .env_remove("CLIENT_HOST")
