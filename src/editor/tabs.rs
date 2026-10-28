@@ -6,6 +6,65 @@ use super::{Document, highlighter::Highlighter};
 use super::document::{EDITOR_PAGE_BYTES, PAGED_EDITOR_BYTES};
 use crate::app::{AppState, events::AppEvent};
 
+fn byte_index(text: &str, character_index: usize) -> usize {
+    text.char_indices()
+        .nth(character_index)
+        .map_or(text.len(), |(byte, _)| byte)
+}
+
+fn auto_indent_java_enter(ui: &egui::Ui, text: &mut String, editor_id: egui::Id) -> bool {
+    if ui.memory(|memory| memory.focused()) != Some(editor_id) {
+        return false;
+    }
+    let Some(mut state) = egui::text_edit::TextEditState::load(ui.ctx(), editor_id) else {
+        return false;
+    };
+    let Some(range) = state.cursor.char_range() else {
+        return false;
+    };
+    if !ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Enter)) {
+        return false;
+    }
+    let primary: usize = range.primary.index.into();
+    let secondary: usize = range.secondary.index.into();
+    let start = primary.min(secondary);
+    let end = primary.max(secondary);
+    let start_byte = byte_index(text, start);
+    let end_byte = byte_index(text, end);
+    let line_start = text[..start_byte].rfind('\n').map_or(0, |newline| newline + 1);
+    let prefix = &text[line_start..start_byte];
+    let indent: String = prefix
+        .chars()
+        .take_while(|character| matches!(character, ' ' | '\t'))
+        .collect();
+    let newline = if text.contains("\r\n") { "\r\n" } else { "\n" };
+    let opens_block = prefix.trim_end().ends_with('{');
+    let indent_unit = if opens_block {
+        if indent.contains('\t') { "\t" } else { "    " }
+    } else {
+        ""
+    };
+    let mut replace_end = end_byte;
+    let mut insertion = format!("{newline}{indent}{indent_unit}");
+    let cursor_byte = insertion.len();
+    if start == end && opens_block {
+        let suffix = &text[end_byte..];
+        let close_offset = suffix.bytes().take_while(|byte| matches!(byte, b' ' | b'\t')).count();
+        if suffix.as_bytes().get(close_offset) == Some(&b'}') {
+            replace_end = end_byte + close_offset;
+            insertion.push_str(newline);
+            insertion.push_str(&indent);
+        }
+    }
+    text.replace_range(start_byte..replace_end, &insertion);
+    let cursor = text[..start_byte + cursor_byte].chars().count();
+    state.cursor.set_char_range(Some(egui::text::CCursorRange::one(
+        egui::text::CCursor::new(cursor),
+    )));
+    state.store(ui.ctx(), editor_id);
+    true
+}
+
 pub struct EditorTab {
     /// Canonical identity, matching the loaded document's path.
     pub path: PathBuf,
@@ -131,6 +190,13 @@ impl EditorTab {
         });
         let language = super::highlighter::SourceLanguage::for_path(&self.path);
         let java = language == super::highlighter::SourceLanguage::Java;
+        let auto_indented = java
+            && allow_edits
+            && !self.close_after_save
+            && auto_indent_java_enter(ui, &mut self.document.text, editor_id);
+        if auto_indented {
+            self.document.mark_changed();
+        }
         let highlighter = &mut self.highlighter;
         let mut layouter = |ui: &egui::Ui, buffer: &dyn egui::TextBuffer, _width: f32| {
             let mut job = highlighter.layout(ui, buffer.as_str(), language);
@@ -155,7 +221,9 @@ impl EditorTab {
                     .layouter(&mut layouter)
                     .show(ui);
                 if output.response.changed() {
-                    self.document.mark_changed();
+                    if !auto_indented {
+                        self.document.mark_changed();
+                    }
                 }
                 toggled = super::editor_gutter(
                     ui,
@@ -243,6 +311,10 @@ impl EditorTab {
             .filter(|byte| *byte == b'\n')
             .count() as u32 + 1;
         let mut page = self.document.text[self.page_start..self.page_end].to_owned();
+        let auto_indented = super::highlighter::SourceLanguage::for_path(&self.path)
+            == super::highlighter::SourceLanguage::Java
+            && allow_edits
+            && auto_indent_java_enter(ui, &mut page, editor_id);
         let mut toggled = None;
         let highlighter = &mut self.highlighter;
         let mut layouter = |ui: &egui::Ui, buffer: &dyn egui::TextBuffer, _width: f32| {
@@ -270,7 +342,7 @@ impl EditorTab {
                     output
                 })
             }).inner.inner;
-        if output.response.changed() {
+        if output.response.changed() || auto_indented {
             self.document.text.replace_range(self.page_start..self.page_end, &page);
             self.page_end = self.page_start + page.len();
             self.document.mark_changed();
