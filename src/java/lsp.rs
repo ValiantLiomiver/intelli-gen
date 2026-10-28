@@ -2811,6 +2811,16 @@ fn maven_import_arguments(root_pom_uri: &str) -> Value {
 pub fn render(ui: &mut eframe::egui::Ui, state: &mut crate::app::AppState) {
     use crate::app::events::AppEvent;
     use eframe::egui;
+    let stale_completion = state.language.completion.as_ref().is_some_and(|(path, version, position, _)| {
+        state.active_tab.and_then(|index| state.editor_tabs.get(index)).is_none_or(|tab| {
+            &tab.path != path
+                || tab.document.lsp_position() != *position
+                || !state.language.is_document_current(path, *version, &tab.document.text)
+        })
+    });
+    if stale_completion {
+        state.language.dismiss_completion();
+    }
     let java = state
         .active_tab
         .and_then(|index| state.editor_tabs.get(index))

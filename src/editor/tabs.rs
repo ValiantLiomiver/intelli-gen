@@ -12,6 +12,33 @@ fn byte_index(text: &str, character_index: usize) -> usize {
         .map_or(text.len(), |(byte, _)| byte)
 }
 
+fn java_completion_trigger(document: &Document, events: &[egui::Event]) -> Option<crate::java::lsp::EditorCommand> {
+    let text_events = events.iter().filter_map(|event| match event {
+        egui::Event::Text(text) | egui::Event::Paste(text) => Some(text.as_str()),
+        _ => None,
+    });
+    let mut typed_identifier = false;
+    let mut typed_dot = false;
+    for text in text_events {
+        typed_dot |= text == ".";
+        typed_identifier |= text.chars().any(|character| {
+            character.is_alphanumeric() || matches!(character, '_' | '$')
+        });
+    }
+    if typed_dot {
+        return Some(crate::java::lsp::EditorCommand::Completion);
+    }
+    if !typed_identifier {
+        return None;
+    }
+    let caret = document.character_index().min(document.text.chars().count());
+    let caret_byte = byte_index(&document.text, caret);
+    let identifier_prefix = document.text[..caret_byte].chars().rev().take_while(|character| {
+        character.is_alphanumeric() || matches!(character, '_' | '$')
+    }).count();
+    (identifier_prefix >= 2).then_some(crate::java::lsp::EditorCommand::Completion)
+}
+
 fn auto_indent_java_enter(ui: &egui::Ui, text: &mut String, editor_id: egui::Id) -> bool {
     if ui.memory(|memory| memory.focused()) != Some(editor_id) {
         return false;
@@ -460,14 +487,13 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
             && state.language.can_request_for(&path)
         {
             let command = ui.input(|input| {
-                input.events.iter().rev().find_map(|event| match event {
-                    egui::Event::Text(text) if text == "." => {
-                        Some(crate::java::lsp::EditorCommand::Completion)
-                    }
-                    egui::Event::Text(text) if text == "(" || text == "," => {
-                        Some(crate::java::lsp::EditorCommand::SignatureHelp)
-                    }
-                    _ => None,
+                java_completion_trigger(&tab.document, &input.events).or_else(|| {
+                    input.events.iter().rev().find_map(|event| match event {
+                        egui::Event::Text(text) | egui::Event::Paste(text) if text == "(" || text == "," => {
+                            Some(crate::java::lsp::EditorCommand::SignatureHelp)
+                        }
+                        _ => None,
+                    })
                 })
             });
             editor_command = command;

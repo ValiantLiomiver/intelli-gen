@@ -76,8 +76,11 @@ pub fn keyboard_shortcuts(ctx: &egui::Context, state: &mut AppState) {
         .and_then(|index| state.editor_tabs.get(index))
         .and_then(|tab| {
             let is_current = state.language.completion.as_ref().is_some_and(
-                |(path, _, _, items)| {
-                    path == &tab.path && items.iter().any(|item| item.applicable)
+                |(path, version, position, items)| {
+                    path == &tab.path
+                        && *position == tab.document.lsp_position()
+                        && state.language.is_document_current(path, *version, &tab.document.text)
+                        && items.iter().any(|item| item.applicable)
                 },
             );
             is_current.then(|| {
