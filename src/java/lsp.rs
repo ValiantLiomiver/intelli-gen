@@ -1655,10 +1655,15 @@ fn parse_rename_workspace_edits(
                 let new_path = file_path(&Value::String(new_uri.to_owned())).ok_or("JDT LS returned a non-file rename destination")?;
                 let parent = new_path.parent().ok_or("Rename destination has no parent")?.canonicalize().map_err(|error| format!("Cannot resolve rename destination directory: {error}"))?;
                 let destination = parent.join(new_path.file_name().ok_or("Rename destination has no filename")?);
+                let destination_exists = match std::fs::symlink_metadata(&destination) {
+                    Ok(_) => true,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+                    Err(error) => return Err(format!("Cannot inspect rename destination {}: {error}", destination.display())),
+                };
                 if !old_path.starts_with(&root) || parent != old_path.parent().unwrap_or(Path::new(""))
                     || old_path.extension().is_none_or(|ext| ext != "java")
                     || destination.extension().is_none_or(|ext| ext != "java")
-                    || std::fs::symlink_metadata(&destination).is_ok()
+                    || destination_exists
                 { return Err("Java source rename must stay in the same project directory and cannot overwrite a file".into()); }
                 resource_renames.push((old_path, destination));
             } else {

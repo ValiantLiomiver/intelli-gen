@@ -742,7 +742,7 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                     state.last_error = Some("The Java source changed; invoke Rename Symbol again".into());
                     continue;
                 }
-                let Some(root) = state.project.as_ref().map(|project| project.root.canonicalize().ok()).flatten() else {
+                let Some(root) = state.project.as_ref().map(|project| project.root.clone()) else {
                     state.last_error = Some("Cannot resolve the open project root".into());
                     continue;
                 };
@@ -759,8 +759,7 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                     state.last_error = Some("Wait for open Java files to synchronize before renaming".into());
                     continue;
                 }
-                let open_versions = synchronized_versions.into_iter()
-                    .map(|(path, version)| (path.canonicalize().unwrap_or(path), version)).collect();
+                let open_versions = synchronized_versions;
                 match state.language.request_rename(&document, dialog.position, new_name) {
                     Ok(()) => state.pending_rename_request = Some(super::PendingRenameRequest {
                         root, generation, source_path: dialog.path, source_revision: dialog.revision,
@@ -1794,7 +1793,7 @@ fn begin_workspace_rename(
         state.language.summary = "Discarded stale Java rename result".into();
         return;
     }
-    if state.project.as_ref().is_none_or(|project| project.root.canonicalize().ok().as_deref() != Some(&snapshot.root)) {
+    if state.project.as_ref().is_none_or(|project| project.root != snapshot.root) {
         state.last_error = Some("The project changed before rename completed".into());
         return;
     }
@@ -1869,7 +1868,7 @@ fn finish_workspace_rename(
 ) {
     let Some(pending) = state.pending_workspace_edits.remove(&request) else { return; };
     if !state.language.accepts_generation(pending.generation)
-        || state.project.as_ref().is_none_or(|project| project.root.canonicalize().ok().as_deref() != Some(&pending.root))
+        || state.project.as_ref().is_none_or(|project| project.root != pending.root)
     {
         state.language.summary = "Discarded stale Java rename result".into();
         return;
@@ -1930,7 +1929,7 @@ fn finish_workspace_rename(
             }
         };
         if let Some(destination) = &file.rename_to {
-            if !destination.starts_with(&pending.root) || destination.exists() {
+            if !destination.starts_with(&pending.root) {
                 state.last_error = Some(format!("Rename destination is unavailable: {}", destination.display()));
                 return;
             }
