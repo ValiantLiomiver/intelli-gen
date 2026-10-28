@@ -416,6 +416,7 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
                     ActivePanel::Search => crate::search::render(ui, state),
                     ActivePanel::Terminal => crate::terminal::render(ui, state),
                     ActivePanel::Git => crate::git::render(ui, state),
+                    ActivePanel::Problems => super::problems::render(ui, state),
                     ActivePanel::Build => crate::java::build::render(ui, state),
                     ActivePanel::Run => crate::java::run_config::render(ui, state),
                     ActivePanel::Debugger => crate::debugger::render(ui, state),

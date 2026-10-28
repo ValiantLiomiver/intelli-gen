@@ -5,6 +5,7 @@ mod finder;
 mod go_to_line;
 pub mod layout;
 mod quick_open;
+mod problems;
 mod symbol_search;
 
 use std::collections::{HashMap, HashSet};
@@ -28,16 +29,18 @@ pub enum ActivePanel {
     Terminal,
     Git,
     Debugger,
+    Problems,
 }
 
 impl ActivePanel {
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::Build,
         Self::Run,
         Self::Search,
         Self::Terminal,
         Self::Git,
         Self::Debugger,
+        Self::Problems,
     ];
 
     pub fn title(self) -> &'static str {
@@ -48,6 +51,7 @@ impl ActivePanel {
             Self::Terminal => "Terminal",
             Self::Git => "Git",
             Self::Debugger => "Debugger",
+            Self::Problems => "Problems",
         }
     }
 }
