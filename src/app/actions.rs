@@ -126,8 +126,38 @@ pub fn keyboard_shortcuts(ctx: &egui::Context, state: &mut AppState) {
             state.language.dismiss_completion();
         }
     }
+    let snippet_editor = state
+        .active_tab
+        .and_then(|index| state.editor_tabs.get(index))
+        .filter(|tab| tab.has_snippet_tab_stops())
+        .map(|tab| {
+            if tab.document.text.len() > crate::editor::document::PAGED_EDITOR_BYTES {
+                egui::Id::new(("paged_source_editor", &tab.path))
+            } else {
+                egui::Id::new(("source_editor", &tab.path))
+            }
+        });
+    let snippet_direction = if snippet_editor.is_some_and(|id| ctx.memory(|memory| memory.focused() == Some(id))) {
+        ctx.input_mut(|input| {
+            if input.consume_key(egui::Modifiers::SHIFT, egui::Key::Tab) {
+                Some(true)
+            } else if input.consume_key(egui::Modifiers::NONE, egui::Key::Tab) {
+                Some(false)
+            } else {
+                None
+            }
+        })
+    } else {
+        None
+    };
+    if let Some(backward) = snippet_direction {
+        if let Some(tab) = state.active_tab.and_then(|index| state.editor_tabs.get_mut(index)) {
+            tab.advance_snippet_tab_stop(backward);
+        }
+    }
     let indent_target = state.active_tab.and_then(|index| state.editor_tabs.get(index))
         .filter(|tab| tab.path.extension().is_some_and(|extension| extension == "java"))
+        .filter(|_| snippet_direction.is_none())
         .map(|tab| if tab.document.text.len() > crate::editor::document::PAGED_EDITOR_BYTES {
                 egui::Id::new(("paged_source_editor", &tab.path))
             } else {
@@ -900,8 +930,8 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                     .and_then(|index| state.editor_tabs.get_mut(index))
                 {
                     match state.language.apply_completion(index, &mut tab.document) {
-                        Ok(Some((start, end))) => tab.select_char_range(start, end),
-                        Ok(None) => tab.restore_document_cursor(),
+                        Ok(Some(stops)) if !stops.is_empty() => tab.set_snippet_tab_stops(stops),
+                        Ok(Some(_)) | Ok(None) => tab.restore_document_cursor(),
                         Err(error) => state.language.summary = error.to_string(),
                     }
                 }

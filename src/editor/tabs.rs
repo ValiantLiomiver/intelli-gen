@@ -340,6 +340,8 @@ pub struct EditorTab {
     pending_line: Option<usize>,
     pending_character_index: Option<usize>,
     pending_selection: Option<(usize, usize)>,
+    snippet_tab_stops: Vec<(usize, usize)>,
+    active_snippet_tab_stop: Option<usize>,
     page_start: usize,
     page_end: usize,
     page_cursor: Option<usize>,
@@ -358,6 +360,8 @@ impl EditorTab {
             pending_line: None,
             pending_character_index: None,
             pending_selection: None,
+            snippet_tab_stops: Vec::new(),
+            active_snippet_tab_stop: None,
             page_start: 0,
             page_end: 0,
             page_cursor: None,
@@ -365,16 +369,70 @@ impl EditorTab {
     }
 
     pub fn navigate_to_line(&mut self, line: usize) {
+        self.active_snippet_tab_stop = None;
+        self.snippet_tab_stops.clear();
+        self.pending_selection = None;
         self.pending_line = Some(line.max(1));
     }
 
     pub fn navigate_to_character_index(&mut self, index: usize) {
+        self.active_snippet_tab_stop = None;
+        self.snippet_tab_stops.clear();
+        self.pending_selection = None;
         self.pending_line = None;
         self.pending_character_index = Some(index.min(self.document.text.chars().count()));
     }
 
     pub fn restore_document_cursor(&mut self) {
+        self.active_snippet_tab_stop = None;
+        self.snippet_tab_stops.clear();
+        self.pending_selection = None;
         self.pending_character_index = Some(self.document.character_index());
+    }
+
+    pub fn set_snippet_tab_stops(&mut self, stops: Vec<(usize, usize)>) {
+        if stops.is_empty() {
+            self.restore_document_cursor();
+            return;
+        }
+        if self.document.text.len() > PAGED_EDITOR_BYTES {
+            self.active_snippet_tab_stop = None;
+            self.snippet_tab_stops.clear();
+            self.pending_selection = None;
+            self.pending_character_index = Some(stops[0].0);
+            return;
+        }
+        self.active_snippet_tab_stop = Some(0);
+        self.pending_selection = Some(stops[0]);
+        self.pending_character_index = None;
+        self.snippet_tab_stops = stops;
+    }
+
+    pub fn has_snippet_tab_stops(&self) -> bool {
+        self.active_snippet_tab_stop.is_some()
+    }
+
+    pub fn advance_snippet_tab_stop(&mut self, backwards: bool) -> bool {
+        let Some(current) = self.active_snippet_tab_stop else { return false; };
+        let next = if backwards {
+            current.checked_sub(1)
+        } else {
+            Some(current + 1).filter(|index| *index < self.snippet_tab_stops.len())
+        };
+        match next {
+            Some(index) => {
+                self.active_snippet_tab_stop = Some(index);
+                self.pending_selection = Some(self.snippet_tab_stops[index]);
+                self.pending_character_index = None;
+            }
+            None if !backwards => {
+                self.active_snippet_tab_stop = None;
+                self.snippet_tab_stops.clear();
+                self.pending_selection = None;
+            }
+            None => {}
+        }
+        true
     }
 
     pub fn toggle_java_line_comment(&mut self, context: &egui::Context) -> bool {
@@ -487,6 +545,8 @@ impl EditorTab {
         self.page_start = 0;
         self.page_end = 0;
         self.page_cursor = None;
+        self.active_snippet_tab_stop = None;
+        self.snippet_tab_stops.clear();
         self.pending_character_index = Some(self.document.character_index());
         self.highlighter = Highlighter::default();
     }
@@ -510,6 +570,9 @@ impl EditorTab {
         diagnostics: &[crate::java::lsp::LanguageDiagnostic],
     ) -> Option<u32> {
         if self.document.text.len() > PAGED_EDITOR_BYTES {
+            self.active_snippet_tab_stop = None;
+            self.snippet_tab_stops.clear();
+            self.pending_selection = None;
             return self.render_paged_editor(
                 ui,
                 allow_edits && !self.close_after_save,
@@ -559,6 +622,8 @@ impl EditorTab {
         });
         let language = super::highlighter::SourceLanguage::for_path(&self.path);
         let java = language == super::highlighter::SourceLanguage::Java;
+        let snippet_length_before_edit = self.active_snippet_tab_stop
+            .map(|_| self.document.text.chars().count());
         let auto_deleted_pair = java && allow_edits && !self.close_after_save
             && auto_delete_java_pair(ui, &mut self.document.text, editor_id);
         if auto_deleted_pair {
@@ -585,6 +650,7 @@ impl EditorTab {
             job.wrap.max_width = f32::INFINITY;
             ui.fonts_mut(|fonts| fonts.layout_job(job))
         };
+        let mut snippet_changed = false;
         egui::ScrollArea::both()
             .id_salt(("source_scroll", &self.path))
             .auto_shrink([false, false])
@@ -603,6 +669,7 @@ impl EditorTab {
                     .layouter(&mut layouter)
                     .show(ui);
                 if output.response.changed() {
+                    snippet_changed = true;
                     if !auto_indented && !auto_deleted_pair && pair_edit != JavaPairEdit::InsertedPair {
                         self.document.mark_changed();
                     }
@@ -630,7 +697,30 @@ impl EditorTab {
                 }
                 });
             });
+        if snippet_changed && let Some(previous_length) = snippet_length_before_edit {
+            self.adjust_snippet_tab_stops(previous_length);
+        }
         toggled
+    }
+
+    fn adjust_snippet_tab_stops(&mut self, previous_length: usize) {
+        let Some(active) = self.active_snippet_tab_stop else { return; };
+        let Some((_, active_end)) = self.snippet_tab_stops.get(active).copied() else {
+            self.active_snippet_tab_stop = None;
+            self.snippet_tab_stops.clear();
+            return;
+        };
+        let current_length = self.document.text.chars().count();
+        let delta = current_length as isize - previous_length as isize;
+        if delta == 0 { return; }
+        for (index, (start, end)) in self.snippet_tab_stops.iter_mut().enumerate() {
+            if index == active {
+                *end = (*end as isize + delta).max(*start as isize) as usize;
+            } else if *start >= active_end {
+                *start = (*start as isize + delta).max(0) as usize;
+                *end = (*end as isize + delta).max(0) as usize;
+            }
+        }
     }
 
     /// Edit a bounded page while retaining the complete document in Document::text.

@@ -124,8 +124,7 @@ pub struct CompletionItem {
     pub insert_text: String,
     pub range: Option<Range>,
     pub additional_edits: Vec<(Range, String)>,
-    pub snippet_selection: Option<(usize, usize)>,
-    pub snippet_final_cursor: Option<usize>,
+    pub snippet_tab_stops: Option<Vec<(u32, usize, usize)>>,
     pub applicable: bool,
 }
 
@@ -154,7 +153,16 @@ impl SnippetParser {
             expansion: SnippetExpansion::default(),
         };
         parser.sequence(false)?;
-        (parser.cursor == parser.source.len()).then_some(parser.expansion)
+        if parser.cursor != parser.source.len() {
+            return None;
+        }
+        if !parser.expansion.tab_stops.is_empty()
+            && !parser.expansion.tab_stops.contains_key(&0)
+        {
+            let end = parser.expansion.text.chars().count();
+            parser.expansion.tab_stops.insert(0, (end, end));
+        }
+        Some(parser.expansion)
     }
 
     fn sequence(&mut self, nested: bool) -> Option<()> {
@@ -1554,24 +1562,21 @@ async fn deliver_response(request: Pending, result: &Value, events: &LanguageEve
                     let is_snippet = item["insertTextFormat"].as_u64() == Some(2);
                     let expansion = is_snippet.then(|| SnippetParser::parse(&insert_text)).flatten();
                     let snippet_supported = !is_snippet || expansion.is_some();
-                    let (insert_text, snippet_selection, snippet_final_cursor) = if is_snippet {
+                    let (insert_text, snippet_tab_stops) = if is_snippet {
                         match expansion {
                             Some(expansion) => {
-                        let first_tab_stop = expansion
-                            .tab_stops
-                            .iter()
-                                    .find(|(index, _)| **index > 0)
-                                    .map(|(_, range)| *range);
-                        let final_cursor = expansion
-                            .tab_stops
-                            .get(&0)
-                            .map(|(start, _)| *start);
-                                (expansion.text, first_tab_stop, final_cursor)
+                                let mut tab_stops: Vec<_> = expansion
+                                    .tab_stops
+                                    .into_iter()
+                                    .map(|(index, (start, end))| (index, start, end))
+                                    .collect();
+                                tab_stops.sort_by_key(|(index, _, _)| (*index == 0, *index));
+                                (expansion.text, Some(tab_stops))
                             }
-                            None => (String::new(), None, None),
+                            None => (String::new(), None),
                         }
                     } else {
-                        (insert_text, None, None)
+                        (insert_text, None)
                     };
                     let raw_additional = item["additionalTextEdits"].as_array();
                     let additional_edits: Vec<_> = raw_additional
@@ -1593,8 +1598,7 @@ async fn deliver_response(request: Pending, result: &Value, events: &LanguageEve
                         insert_text,
                         range,
                         additional_edits,
-                        snippet_selection,
-                        snippet_final_cursor,
+                        snippet_tab_stops,
                         applicable: valid_edits
                             && snippet_supported
                             && item.get("command").is_none_or(Value::is_null),
@@ -2911,7 +2915,7 @@ impl LanguageTool {
         &mut self,
         index: usize,
         document: &mut Document,
-    ) -> Result<Option<(usize, usize)>, LspError> {
+    ) -> Result<Option<Vec<(usize, usize)>>, LspError> {
         let (path, version, position, items) = self
             .completion
             .as_ref()
@@ -2941,18 +2945,18 @@ impl LanguageTool {
         let mut edits = item.additional_edits.clone();
         edits.push((range, item.insert_text.clone()));
         document.apply_lsp_edits(&edits).map_err(LspError)?;
-        let selection = if item.snippet_selection.is_some() || item.snippet_final_cursor.is_some() {
+        let tab_stops = if let Some(tab_stops) = item.snippet_tab_stops {
             let insertion_end = document.character_index();
             let insertion_start = insertion_end.saturating_sub(item.insert_text.chars().count());
-            item.snippet_selection
-                .or_else(|| item.snippet_final_cursor.map(|cursor| (cursor, cursor)))
-                .map(|(start, end)| (insertion_start + start, insertion_start + end))
+            Some(tab_stops.into_iter()
+                .map(|(_, start, end)| (insertion_start + start, insertion_start + end))
+                .collect())
         } else {
             None
         };
         self.completion = None;
         self.completion_selection = None;
-        Ok(selection)
+        Ok(tab_stops)
     }
 
     pub fn apply_code_action(&mut self, index: usize, document: &mut Document) -> Result<String, LspError> {
