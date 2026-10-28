@@ -85,9 +85,9 @@ pub fn keyboard_shortcuts(ctx: &egui::Context, state: &mut AppState) {
             );
             is_current.then(|| {
                 if tab.document.text.len() > crate::editor::document::PAGED_EDITOR_BYTES {
-                    egui::Id::unique(("paged_source_editor", &tab.path))
+                    egui::Id::new(("paged_source_editor", &tab.path))
                 } else {
-                    egui::Id::unique(("source_editor", &tab.path))
+                    egui::Id::new(("source_editor", &tab.path))
                 }
             })
         });
