@@ -64,6 +64,8 @@ pub struct TestFailure {
     pub class_name: String,
     pub test_name: String,
     pub message: String,
+    pub source_path: Option<PathBuf>,
+    pub source_line: Option<usize>,
 }
 
 #[derive(serde::Deserialize)]
@@ -371,16 +373,16 @@ fn collect_test_failures(project: &ProjectModel, started_at: SystemTime) -> Vec<
         match project.kind {
             ProjectKind::Maven => {
                 for directory in ["target/surefire-reports", "target/failsafe-reports"] {
-                    add_test_report_files(&module.join(directory), started_at, &mut report_files);
+                    add_test_report_files(&module, &module.join(directory), started_at, &mut report_files);
                 }
             }
             ProjectKind::Gradle => {
                 let results = module.join("build/test-results");
-                add_test_report_files(&results, started_at, &mut report_files);
+                add_test_report_files(&module, &results, started_at, &mut report_files);
                 if let Ok(entries) = std::fs::read_dir(&results) {
                     for entry in entries.flatten() {
                         if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
-                            add_test_report_files(&entry.path(), started_at, &mut report_files);
+                            add_test_report_files(&module, &entry.path(), started_at, &mut report_files);
                         }
                     }
                 }
@@ -394,7 +396,7 @@ fn collect_test_failures(project: &ProjectModel, started_at: SystemTime) -> Vec<
 
     let mut total_bytes = 0u64;
     let mut failures = Vec::new();
-    for path in report_files.into_iter().take(MAX_TEST_REPORT_FILES) {
+    for (module_root, path) in report_files.into_iter().take(MAX_TEST_REPORT_FILES) {
         let Ok(metadata) = std::fs::metadata(&path) else { continue; };
         if metadata.len() > MAX_TEST_REPORT_BYTES
             || total_bytes.saturating_add(metadata.len()) > MAX_TEST_REPORT_TOTAL_BYTES
@@ -404,14 +406,14 @@ fn collect_test_failures(project: &ProjectModel, started_at: SystemTime) -> Vec<
         total_bytes = total_bytes.saturating_add(metadata.len());
         let Ok(xml) = std::fs::read_to_string(path) else { continue; };
         let Ok(report) = quick_xml::de::from_str::<XmlTestReport>(&xml) else { continue; };
-        append_test_failures(&report, None, &mut failures);
+        append_test_failures(&report, None, &module_root, &mut failures);
         if failures.len() >= MAX_TEST_FAILURES { break; }
     }
     failures.truncate(MAX_TEST_FAILURES);
     failures
 }
 
-fn add_test_report_files(directory: &Path, started_at: SystemTime, output: &mut Vec<PathBuf>) {
+fn add_test_report_files(module_root: &Path, directory: &Path, started_at: SystemTime, output: &mut Vec<(PathBuf, PathBuf)>) {
     if output.len() >= MAX_TEST_REPORT_FILES { return; }
     let Ok(entries) = std::fs::read_dir(directory) else { return; };
     for entry in entries.flatten() {
@@ -425,12 +427,12 @@ fn add_test_report_files(directory: &Path, started_at: SystemTime, output: &mut 
         if metadata.len() <= MAX_TEST_REPORT_BYTES
             && metadata.modified().is_ok_and(|modified| modified >= started_at)
         {
-            output.push(entry.path());
+            output.push((module_root.to_path_buf(), entry.path()));
         }
     }
 }
 
-fn append_test_failures(report: &XmlTestReport, inherited_class: Option<&str>, output: &mut Vec<TestFailure>) {
+fn append_test_failures(report: &XmlTestReport, inherited_class: Option<&str>, module_root: &Path, output: &mut Vec<TestFailure>) {
     for case in &report.cases {
         let class_name = case.class_name.as_deref().or(report.name.as_deref()).or(inherited_class)
             .unwrap_or("Unknown test class");
@@ -441,15 +443,39 @@ fn append_test_failures(report: &XmlTestReport, inherited_class: Option<&str>, o
                     class_name: class_name.chars().take(256).collect(),
                     test_name: case.name.as_deref().unwrap_or("Unknown test").chars().take(256).collect(),
                     message: message.chars().take(1024).collect(),
+                    source_path: test_source_path(module_root, class_name),
+                    source_line: detail.text.as_deref().and_then(|text| test_source_line(text, class_name)),
                 });
                 if output.len() >= MAX_TEST_FAILURES { return; }
             }
         }
     }
     for suite in &report.suites {
-        append_test_failures(suite, report.name.as_deref().or(inherited_class), output);
+        append_test_failures(suite, report.name.as_deref().or(inherited_class), module_root, output);
         if output.len() >= MAX_TEST_FAILURES { return; }
     }
+}
+
+fn test_source_path(module_root: &Path, class_name: &str) -> Option<PathBuf> {
+    if class_name.is_empty() || !class_name.chars().all(|ch| ch.is_alphanumeric() || matches!(ch, '.' | '_' | '$')) {
+        return None;
+    }
+    let top_level = class_name.split('$').next()?;
+    let relative = format!("{}.java", top_level.replace('.', "/"));
+    ["src/test/java", "src/integrationTest/java", "src/it/java", "src/testFixtures/java"]
+        .into_iter()
+        .map(|source_root| module_root.join(source_root).join(&relative))
+        .find(|path| path.is_file())
+}
+
+fn test_source_line(stack_trace: &str, class_name: &str) -> Option<usize> {
+    let source_name = class_name.rsplit('.').next()?.split('$').next()?;
+    let marker = format!("({source_name}.java:");
+    stack_trace.lines().find_map(|line| {
+        let start = line.find(&marker)? + marker.len();
+        let digits: String = line[start..].chars().take_while(char::is_ascii_digit).collect();
+        digits.parse::<usize>().ok().filter(|line| *line > 0)
+    })
 }
 
 fn terminate_group(pid: Option<u32>) {
@@ -700,6 +726,7 @@ pub fn render(ui: &mut egui::Ui, state: &mut crate::app::AppState) {
             ),
         );
     }
+    let mut navigation = None;
     if !state.build.test_failures.is_empty() {
         egui::CollapsingHeader::new(format!("Failed tests ({})", state.build.test_failures.len()))
             .default_open(true)
@@ -709,10 +736,14 @@ pub fn render(ui: &mut egui::Ui, state: &mut crate::app::AppState) {
                     .max_height(120.0)
                     .show(ui, |ui| {
                         for failure in &state.build.test_failures {
-                            ui.colored_label(
-                                ui.visuals().error_fg_color,
-                                format!("{}.{}", failure.class_name, failure.test_name),
-                            );
+                            let label = format!("{}.{}", failure.class_name, failure.test_name);
+                            if let Some(path) = &failure.source_path {
+                                if ui.selectable_label(false, label).clicked() {
+                                    navigation = Some((path.clone(), failure.source_line.unwrap_or(1)));
+                                }
+                            } else {
+                                ui.colored_label(ui.visuals().error_fg_color, label);
+                            }
                             if !failure.message.is_empty() {
                                 ui.small(&failure.message);
                             }
@@ -720,7 +751,6 @@ pub fn render(ui: &mut egui::Ui, state: &mut crate::app::AppState) {
                     });
             });
     }
-    let mut navigation = None;
     if !state.build.diagnostics.is_empty() {
         egui::CollapsingHeader::new(format!("Compiler diagnostics ({})", state.build.diagnostics.len())).default_open(true).show(ui, |ui| {
             egui::ScrollArea::vertical().id_salt("build_diagnostics").max_height(90.0).show(ui, |ui| {
