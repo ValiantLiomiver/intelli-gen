@@ -41,24 +41,37 @@ impl ProjectEditorConfig {
     /// Scan and parse configuration on the project-open worker, never on the UI thread.
     pub fn load(root: &Path) -> Self {
         let mut config = Self::default();
+        let root = root.canonicalize().unwrap_or_else(|_| root.to_owned());
+        let mut ancestors = Vec::new();
+        let mut directory = root.parent();
+        for _ in 0..32 {
+            let Some(current) = directory else { break; };
+            let path = current.join(".editorconfig");
+            if let Some(parsed) = read_config(&path) {
+                let stop = parsed.root;
+                ancestors.push(ConfigFile { directory: current.to_owned(), parsed });
+                if stop { break; }
+            }
+            directory = current.parent();
+        }
+        config.files.extend(ancestors.into_iter().rev());
         let mut scanned = 0;
-        scan_directory(root, Path::new(""), 0, &mut scanned, &mut config.files);
-        config.files.sort_by(|left, right| left.directory.cmp(&right.directory));
+        scan_directory(&root, Path::new(""), 0, &mut scanned, &mut config.files);
+        config.files.sort_by_key(|file| file.directory.components().count());
         config
     }
 
     pub fn style_for(&self, root: &Path, file: &Path) -> EditorStyle {
-        let Ok(relative) = file.strip_prefix(root) else { return EditorStyle::default(); };
-        let file_directory = relative.parent().unwrap_or_else(|| Path::new(""));
+        if !file.starts_with(root) { return EditorStyle::default(); }
         let mut applicable: Vec<_> = self.files.iter()
-            .filter(|config| file_directory.starts_with(&config.directory))
+            .filter(|config| file.starts_with(&config.directory))
             .collect();
         if let Some(root_config) = applicable.iter().rposition(|config| config.parsed.root) {
             applicable.drain(..root_config);
         }
         let mut resolved = EditorStyle::default();
         for config in applicable {
-            let Ok(local_path) = relative.strip_prefix(&config.directory) else { continue; };
+            let Ok(local_path) = file.strip_prefix(&config.directory) else { continue; };
             let section_style = config.parsed.style_for(local_path);
             overlay(&mut resolved, section_style);
         }
@@ -82,11 +95,18 @@ fn scan_directory(root: &Path, relative: &Path, depth: usize, scanned: &mut usiz
             let child = if relative.as_os_str().is_empty() { PathBuf::from(name) } else { relative.join(name) };
             scan_directory(root, &child, depth + 1, scanned, files);
         } else if name == ".editorconfig" && metadata.is_file() && metadata.len() <= MAX_CONFIG_BYTES {
-            if let Ok(text) = fs::read_to_string(&path) {
-                files.push(ConfigFile { directory: relative.to_owned(), parsed: ParsedConfig::parse(&text) });
+            if let Some(parsed) = read_config(&path) {
+                files.push(ConfigFile { directory: root.join(relative), parsed });
             }
         }
     }
+}
+
+fn read_config(path: &Path) -> Option<ParsedConfig> {
+    let metadata = fs::symlink_metadata(path).ok()?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() || metadata.len() > MAX_CONFIG_BYTES { return None; }
+    let text = fs::read_to_string(path).ok()?;
+    Some(ParsedConfig::parse(&text))
 }
 
 fn overlay(target: &mut EditorStyle, source: EditorStyle) {
