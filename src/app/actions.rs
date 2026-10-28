@@ -1813,6 +1813,10 @@ fn begin_run_flow(state: &mut AppState) {
         state.run.summary = "Create a run configuration first".into();
         return;
     };
+    if let Err(error) = state.language.classpath_resolver() {
+        state.run.summary = error.to_string();
+        return;
+    }
     let jdk = match state.settings.run_jdk(&root, &config) {
         Ok(jdk) => jdk.clone(),
         Err(error) => { state.run.summary = error; return; }
@@ -1969,7 +1973,12 @@ fn advance_pending_run_launch(state: &mut AppState) {
     let resolver = match state.language.classpath_resolver() {
         Ok(resolver) => resolver,
         Err(error) if error.to_string().contains("Wait for Java intelligence to start") => {
-            state.run.summary = "Build finished; waiting for Java intelligence…".into();
+            if state.language.has_pending_start() || state.language.has_workers() {
+                state.run.summary = "Build finished; waiting for Java intelligence…".into();
+                return;
+            }
+            state.pending_run = None;
+            state.run.summary = error.to_string();
             return;
         }
         Err(error) => {
