@@ -340,7 +340,7 @@ pub struct EditorTab {
     pending_line: Option<usize>,
     pending_character_index: Option<usize>,
     pending_selection: Option<(usize, usize)>,
-    snippet_tab_stops: Vec<(usize, usize)>,
+    snippet_tab_stops: Vec<(u32, Vec<(usize, usize)>)>,
     active_snippet_tab_stop: Option<usize>,
     page_start: usize,
     page_end: usize,
@@ -390,7 +390,7 @@ impl EditorTab {
         self.pending_character_index = Some(self.document.character_index());
     }
 
-    pub fn set_snippet_tab_stops(&mut self, stops: Vec<(usize, usize)>) {
+    pub fn set_snippet_tab_stops(&mut self, stops: Vec<(u32, Vec<(usize, usize)>)>) {
         if stops.is_empty() {
             self.restore_document_cursor();
             return;
@@ -399,11 +399,11 @@ impl EditorTab {
             self.active_snippet_tab_stop = None;
             self.snippet_tab_stops.clear();
             self.pending_selection = None;
-            self.pending_character_index = Some(stops[0].0);
+            self.pending_character_index = Some(stops[0].1[0].0);
             return;
         }
         self.active_snippet_tab_stop = Some(0);
-        self.pending_selection = Some(stops[0]);
+        self.pending_selection = Some(stops[0].1[0]);
         self.pending_character_index = None;
         self.snippet_tab_stops = stops;
     }
@@ -414,6 +414,7 @@ impl EditorTab {
 
     pub fn advance_snippet_tab_stop(&mut self, backwards: bool) -> bool {
         let Some(current) = self.active_snippet_tab_stop else { return false; };
+        self.sync_active_snippet_mirrors();
         let next = if backwards {
             current.checked_sub(1)
         } else {
@@ -422,7 +423,7 @@ impl EditorTab {
         match next {
             Some(index) => {
                 self.active_snippet_tab_stop = Some(index);
-                self.pending_selection = Some(self.snippet_tab_stops[index]);
+                self.pending_selection = Some(self.snippet_tab_stops[index].1[0]);
                 self.pending_character_index = None;
             }
             None if !backwards => {
@@ -448,6 +449,8 @@ impl EditorTab {
         if context.memory(|memory| memory.focused()) != Some(editor_id) {
             return false;
         }
+        self.active_snippet_tab_stop = None;
+        self.snippet_tab_stops.clear();
         let Some(mut state) = egui::text_edit::TextEditState::load(context, editor_id) else {
             return false;
         };
@@ -489,6 +492,8 @@ impl EditorTab {
             egui::Id::new(("source_editor", &self.path))
         };
         if context.memory(|memory| memory.focused()) != Some(editor_id) { return false; }
+        self.active_snippet_tab_stop = None;
+        self.snippet_tab_stops.clear();
         let Some(mut state) = egui::text_edit::TextEditState::load(context, editor_id) else { return false; };
         let Some(range) = state.cursor.char_range() else { return false; };
         let base = if paged { self.document.text[..self.page_start].chars().count() } else { 0 };
@@ -552,6 +557,8 @@ impl EditorTab {
     }
 
     pub fn select_char_range(&mut self, start: usize, end: usize) {
+        self.active_snippet_tab_stop = None;
+        self.snippet_tab_stops.clear();
         if self.document.text.len() > PAGED_EDITOR_BYTES {
             self.pending_character_index = Some(start);
             self.pending_selection = None;
@@ -650,7 +657,9 @@ impl EditorTab {
             job.wrap.max_width = f32::INFINITY;
             ui.fonts_mut(|fonts| fonts.layout_job(job))
         };
-        let mut snippet_changed = false;
+        let mut snippet_changed = auto_deleted_pair
+            || pair_edit == JavaPairEdit::InsertedPair
+            || auto_indented;
         egui::ScrollArea::both()
             .id_salt(("source_scroll", &self.path))
             .auto_shrink([false, false])
@@ -701,7 +710,8 @@ impl EditorTab {
             self.adjust_snippet_tab_stops(previous_length);
         }
         if let Some(active) = self.active_snippet_tab_stop
-            && let Some((start, end)) = self.snippet_tab_stops.get(active)
+            && let Some((_, ranges)) = self.snippet_tab_stops.get(active)
+            && let Some((start, end)) = ranges.first()
             && !(*start..=*end).contains(&self.document.character_index())
         {
             self.active_snippet_tab_stop = None;
@@ -712,21 +722,66 @@ impl EditorTab {
 
     fn adjust_snippet_tab_stops(&mut self, previous_length: usize) {
         let Some(active) = self.active_snippet_tab_stop else { return; };
-        let Some((_, active_end)) = self.snippet_tab_stops.get(active).copied() else {
+        let Some((_, active_ranges)) = self.snippet_tab_stops.get(active) else {
             self.active_snippet_tab_stop = None;
             self.snippet_tab_stops.clear();
             return;
         };
+        let Some((_, active_end)) = active_ranges.first().copied() else { return; };
         let current_length = self.document.text.chars().count();
         let delta = current_length as isize - previous_length as isize;
         if delta == 0 { return; }
-        for (index, (start, end)) in self.snippet_tab_stops.iter_mut().enumerate() {
-            if index == active {
-                *end = (*end as isize + delta).max(*start as isize) as usize;
-            } else if *start >= active_end {
-                *start = (*start as isize + delta).max(0) as usize;
-                *end = (*end as isize + delta).max(0) as usize;
+        for (group_index, (_, ranges)) in self.snippet_tab_stops.iter_mut().enumerate() {
+            for (range_index, (start, end)) in ranges.iter_mut().enumerate() {
+                if group_index == active && range_index == 0 {
+                    *end = (*end as isize + delta).max(*start as isize) as usize;
+                } else if *start >= active_end {
+                    *start = (*start as isize + delta).max(0) as usize;
+                    *end = (*end as isize + delta).max(0) as usize;
+                }
             }
+        }
+    }
+
+    fn sync_active_snippet_mirrors(&mut self) {
+        let Some(active_group) = self.active_snippet_tab_stop else { return; };
+        let Some((active_index, active_ranges)) = self.snippet_tab_stops.get(active_group) else { return; };
+        if *active_index == 0 { return; }
+        let Some((active_start, active_end)) = active_ranges.first().copied() else { return; };
+        let replacement: String = self.document.text.chars()
+            .skip(active_start)
+            .take(active_end.saturating_sub(active_start))
+            .collect();
+        let mut mirrors: Vec<_> = active_ranges.iter().copied().enumerate().skip(1).collect();
+        mirrors.sort_by_key(|(_, (start, _))| std::cmp::Reverse(*start));
+        let mut cursor_shift = 0isize;
+        for (range_index, (start, end)) in mirrors {
+            let existing: String = self.document.text.chars().skip(start).take(end.saturating_sub(start)).collect();
+            if existing == replacement { continue; }
+            let start_byte = byte_index(&self.document.text, start);
+            let end_byte = byte_index(&self.document.text, end);
+            self.document.text.replace_range(start_byte..end_byte, &replacement);
+            let delta = replacement.chars().count() as isize - end.saturating_sub(start) as isize;
+            if start < self.document.character_index() { cursor_shift += delta; }
+            for (group_index, (_, ranges)) in self.snippet_tab_stops.iter_mut().enumerate() {
+                for (candidate_index, (candidate_start, candidate_end)) in ranges.iter_mut().enumerate() {
+                    if group_index == active_group && candidate_index == range_index {
+                        *candidate_start = start;
+                        *candidate_end = start + replacement.chars().count();
+                    } else if *candidate_start >= end {
+                        *candidate_start = (*candidate_start as isize + delta).max(0) as usize;
+                        *candidate_end = (*candidate_end as isize + delta).max(0) as usize;
+                    } else if *candidate_start < end && *candidate_end > start {
+                        let mapped_end = (*candidate_end as isize + delta).max(*candidate_start as isize) as usize;
+                        *candidate_end = mapped_end;
+                    }
+                }
+            }
+            self.document.mark_changed();
+        }
+        if cursor_shift != 0 {
+            let cursor = (self.document.character_index() as isize + cursor_shift).max(0) as usize;
+            self.document.set_cursor(cursor);
         }
     }
 

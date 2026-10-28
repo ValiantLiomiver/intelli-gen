@@ -124,7 +124,7 @@ pub struct CompletionItem {
     pub insert_text: String,
     pub range: Option<Range>,
     pub additional_edits: Vec<(Range, String)>,
-    pub snippet_tab_stops: Option<Vec<(u32, usize, usize)>>,
+    pub snippet_tab_stops: Option<Vec<(u32, Vec<(usize, usize)>)>>,
     pub applicable: bool,
 }
 
@@ -133,7 +133,7 @@ const MAX_COMPLETION_SNIPPET_CHARS: usize = 16 * 1024;
 #[derive(Default)]
 struct SnippetExpansion {
     text: String,
-    tab_stops: std::collections::BTreeMap<u32, (usize, usize)>,
+    tab_stops: std::collections::BTreeMap<u32, Vec<(usize, usize)>>,
 }
 
 struct SnippetParser {
@@ -160,7 +160,7 @@ impl SnippetParser {
             && !parser.expansion.tab_stops.contains_key(&0)
         {
             let end = parser.expansion.text.chars().count();
-            parser.expansion.tab_stops.insert(0, (end, end));
+            parser.expansion.tab_stops.insert(0, vec![(end, end)]);
         }
         Some(parser.expansion)
     }
@@ -200,7 +200,12 @@ impl SnippetParser {
         if self.source.get(self.cursor).is_some_and(char::is_ascii_digit) {
             let index = self.number()?;
             let position = self.expansion.text.chars().count();
-            self.record_stop(index, position, position);
+            let default = self.previous_stop_text(index);
+            let start = position;
+            if let Some(default) = default {
+                self.expansion.text.push_str(&default);
+            }
+            self.record_stop(index, start, self.expansion.text.chars().count());
             return Some(());
         }
         if self
@@ -236,12 +241,18 @@ impl SnippetParser {
             '}' => {
                 self.cursor += 1;
                 if let Some(index) = numeric {
-                    let position = self.expansion.text.chars().count();
-                    self.record_stop(index, position, position);
+                    let start = self.expansion.text.chars().count();
+                    if let Some(default) = self.previous_stop_text(index) {
+                        self.expansion.text.push_str(&default);
+                    }
+                    self.record_stop(index, start, self.expansion.text.chars().count());
                 }
                 Some(())
             }
             ':' => {
+                if numeric.is_some_and(|index| self.expansion.tab_stops.contains_key(&index)) {
+                    return None;
+                }
                 self.cursor += 1;
                 let start = self.expansion.text.chars().count();
                 self.sequence(true)?;
@@ -252,6 +263,9 @@ impl SnippetParser {
                 Some(())
             }
             '|' if numeric.is_some() => {
+                if numeric.is_some_and(|index| self.expansion.tab_stops.contains_key(&index)) {
+                    return None;
+                }
                 self.cursor += 1;
                 let start = self.expansion.text.chars().count();
                 self.choice_list()?;
@@ -311,7 +325,12 @@ impl SnippetParser {
     }
 
     fn record_stop(&mut self, index: u32, start: usize, end: usize) {
-        self.expansion.tab_stops.entry(index).or_insert((start, end));
+        self.expansion.tab_stops.entry(index).or_default().push((start, end));
+    }
+
+    fn previous_stop_text(&self, index: u32) -> Option<String> {
+        let (start, end) = *self.expansion.tab_stops.get(&index)?.first()?;
+        Some(self.expansion.text.chars().skip(start).take(end - start).collect())
     }
 }
 #[derive(Clone, Debug)]
@@ -1568,9 +1587,9 @@ async fn deliver_response(request: Pending, result: &Value, events: &LanguageEve
                                 let mut tab_stops: Vec<_> = expansion
                                     .tab_stops
                                     .into_iter()
-                                    .map(|(index, (start, end))| (index, start, end))
+                                    .map(|(index, ranges)| (index, ranges))
                                     .collect();
-                                tab_stops.sort_by_key(|(index, _, _)| (*index == 0, *index));
+                                tab_stops.sort_by_key(|(index, _)| (*index == 0, *index));
                                 (expansion.text, Some(tab_stops))
                             }
                             None => (String::new(), None),
@@ -2915,7 +2934,7 @@ impl LanguageTool {
         &mut self,
         index: usize,
         document: &mut Document,
-    ) -> Result<Option<Vec<(usize, usize)>>, LspError> {
+    ) -> Result<Option<Vec<(u32, Vec<(usize, usize)>)>>, LspError> {
         let (path, version, position, items) = self
             .completion
             .as_ref()
@@ -2949,7 +2968,11 @@ impl LanguageTool {
             let insertion_end = document.character_index();
             let insertion_start = insertion_end.saturating_sub(item.insert_text.chars().count());
             Some(tab_stops.into_iter()
-                .map(|(_, start, end)| (insertion_start + start, insertion_start + end))
+                .map(|(index, ranges)| {
+                    (index, ranges.into_iter()
+                        .map(|(start, end)| (insertion_start + start, insertion_start + end))
+                        .collect())
+                })
                 .collect())
         } else {
             None
