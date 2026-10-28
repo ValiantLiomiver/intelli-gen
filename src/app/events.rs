@@ -145,6 +145,8 @@ pub enum GradleAction {
 pub enum SearchAction {
     Open,
     Run(crate::search::SearchQuery),
+    PreviewReplace(crate::search::SearchQuery, String),
+    ApplyReplace,
     Cancel,
 }
 

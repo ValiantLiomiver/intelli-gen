@@ -18,6 +18,13 @@ pub const MAX_WORKSPACE_EDIT_BYTES: usize = 128 * 1024 * 1024;
 enum IoCommand {
     Load(PathBuf),
     LoadMany { request: u64, paths: Vec<PathBuf> },
+    ReplaceMany {
+        request: u64,
+        targets: Vec<WorkspaceReplaceTarget>,
+        query: String,
+        replacement: String,
+        case_sensitive: bool,
+    },
     Save { document: Document, destination: Option<PathBuf> },
     CreateJavaClass { root: PathBuf, directory: PathBuf, name: String, package: String },
 }
@@ -29,6 +36,7 @@ pub enum EditorCompletion {
         result: Result<Document, String>,
     },
     LoadedMany { request: u64, result: Result<Vec<Document>, String> },
+    ReplacedMany { request: u64, result: Result<Vec<(Document, usize)>, String> },
     Saved {
         path: PathBuf,
         saved_path: PathBuf,
@@ -36,6 +44,13 @@ pub enum EditorCompletion {
         result: Result<(), String>,
     },
     JavaClassCreated { root: PathBuf, directory: PathBuf, result: Result<PathBuf, String> },
+}
+
+pub struct WorkspaceReplaceTarget {
+    pub document: Document,
+    pub expected_text: String,
+    pub expected_matches: usize,
+    pub recheck_disk: bool,
 }
 
 /// One serial worker orders saves and never blocks the UI on filesystem access.
@@ -83,6 +98,45 @@ impl EditorIo {
                             Ok(documents)
                         })();
                         EditorCompletion::LoadedMany { request, result }
+                    }
+                    IoCommand::ReplaceMany { request, targets, query, replacement, case_sensitive } => {
+                        let result = (|| {
+                            if targets.is_empty() || targets.len() > 200 {
+                                return Err("Select between 1 and 200 project files to replace".into());
+                            }
+                            let mut total_bytes = 0usize;
+                            let mut replaced = Vec::with_capacity(targets.len());
+                            for mut target in targets {
+                                if target.document.text != target.expected_text {
+                                    return Err(format!("{} changed after the replace preview; run the preview again", target.document.path.display()));
+                                }
+                                if target.recheck_disk {
+                                    let current = Document::load(&target.document.path)
+                                        .map_err(|error| error.to_string())?;
+                                    if current.text != target.expected_text {
+                                        return Err(format!("{} changed after the replace preview; run the preview again", target.document.path.display()));
+                                    }
+                                    target.document.text.clone_from(&target.expected_text);
+                                }
+                                total_bytes = total_bytes.checked_add(target.document.text.len())
+                                    .ok_or("Workspace replace size overflow")?;
+                                if total_bytes > MAX_WORKSPACE_EDIT_BYTES {
+                                    return Err(format!("Workspace replace exceeds the {} MiB limit", MAX_WORKSPACE_EDIT_BYTES / (1024 * 1024)));
+                                }
+                                let (text, count, first) = crate::editor::find_replace::replace_all_text(
+                                    &target.document.text, &query, &replacement, case_sensitive,
+                                );
+                                if count == 0 || count != target.expected_matches {
+                                    return Err(format!("{} no longer matches the replace preview; run it again", target.document.path.display()));
+                                }
+                                target.document.text = text;
+                                target.document.set_cursor(first.unwrap_or(0) + replacement.chars().count());
+                                target.document.mark_changed();
+                                replaced.push((target.document, count));
+                            }
+                            Ok(replaced)
+                        })();
+                        EditorCompletion::ReplacedMany { request, result }
                     }
                     IoCommand::Save { mut document, destination } => {
                         let old_path = document.path.clone();
@@ -133,6 +187,20 @@ impl EditorIo {
     pub fn load_many(&self, request: u64, paths: Vec<PathBuf>) -> Result<(), String> {
         if paths.len() > 200 { return Err("Workspace edit load exceeds the 200-file limit".into()); }
         self.submit(IoCommand::LoadMany { request, paths })
+    }
+
+    pub fn replace_many(
+        &self,
+        request: u64,
+        targets: Vec<WorkspaceReplaceTarget>,
+        query: String,
+        replacement: String,
+        case_sensitive: bool,
+    ) -> Result<(), String> {
+        if targets.len() > 200 {
+            return Err("Workspace replace exceeds the 200-file limit".into());
+        }
+        self.submit(IoCommand::ReplaceMany { request, targets, query, replacement, case_sensitive })
     }
 
     pub fn save(&self, document: Document, destination: Option<PathBuf>) -> Result<(), String> {

@@ -113,6 +113,7 @@ pub struct AppState {
     pub rename_symbol: Option<RenameSymbolDialog>,
     pub pending_rename_request: Option<PendingRenameRequest>,
     pub pending_workspace_edits: HashMap<u64, PendingWorkspaceRename>,
+    pub pending_workspace_replacements: HashMap<u64, PendingWorkspaceReplace>,
     pub next_workspace_edit_id: u64,
     pub editor_tabs: Vec<EditorTab>,
     pub active_tab: Option<usize>,
@@ -176,6 +177,25 @@ pub struct PendingWorkspaceRename {
     pub source_revision: u64,
     pub open_revisions: HashMap<PathBuf, u64>,
     pub files: Vec<crate::java::lsp::WorkspaceFileEdits>,
+}
+
+#[derive(Clone)]
+pub struct PendingWorkspaceReplace {
+    pub root: PathBuf,
+    pub project_generation: u64,
+    pub query: crate::search::SearchQuery,
+    pub replacement: String,
+    pub files: Vec<PendingWorkspaceReplaceFile>,
+    pub open_revisions: HashMap<PathBuf, u64>,
+}
+
+#[derive(Clone)]
+pub struct PendingWorkspaceReplaceFile {
+    pub path: PathBuf,
+    pub source_text: Option<String>,
+    pub open_revision: Option<u64>,
+    pub recheck_disk: bool,
+    pub match_count: usize,
 }
 
 pub struct PendingRenameRequest {
@@ -278,6 +298,7 @@ impl IdeaLikeApp {
             rename_symbol: None,
             pending_rename_request: None,
             pending_workspace_edits: HashMap::new(),
+            pending_workspace_replacements: HashMap::new(),
             next_workspace_edit_id: 0,
             editor_tabs: Vec::new(),
             active_tab: None,

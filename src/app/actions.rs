@@ -1,5 +1,5 @@
 use eframe::egui;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use super::events::{AppEvent, MavenAction};
@@ -268,6 +268,7 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                 state.rename_symbol = None;
                 state.pending_rename_request = None;
                 state.pending_workspace_edits.clear();
+                state.pending_workspace_replacements.clear();
                 state.project_open_generation = state.project_open_generation.wrapping_add(1);
                 state.project_opening = true;
                 state.status = format!("Opening {}…", path.display());
@@ -708,6 +709,29 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                         state.search.start(project.root.clone(), query);
                     }
                 }
+                super::events::SearchAction::PreviewReplace(query, replacement) => {
+                    if let Some(project) = &state.project {
+                        let project_root = project.root.clone();
+                        let relevant_tabs: Vec<_> = state.editor_tabs.iter()
+                            .filter(|tab| tab.path.starts_with(&project_root))
+                            .collect();
+                        let dirty_tabs: Vec<_> = relevant_tabs.iter()
+                            .filter(|tab| tab.document.is_dirty())
+                            .collect();
+                        let dirty_bytes = dirty_tabs.iter().try_fold(0usize, |total, tab| total.checked_add(tab.document.text.len()));
+                        if dirty_tabs.len() > 200 || dirty_bytes.is_none_or(|bytes| bytes > crate::editor::MAX_WORKSPACE_EDIT_BYTES) {
+                            state.search.message = "Open unsaved files exceed the project replacement limit".into();
+                            return;
+                        }
+                        let open_documents = relevant_tabs.into_iter().map(|tab| crate::search::OpenDocumentSnapshot {
+                            path: tab.document.path.clone(),
+                            revision: tab.document.revision,
+                            text: tab.document.is_dirty().then(|| tab.document.text.clone()),
+                        }).collect();
+                        state.search.start_replace_preview(project_root, query, replacement, open_documents);
+                    }
+                }
+                super::events::SearchAction::ApplyReplace => apply_project_replace(state),
                 super::events::SearchAction::Cancel => state.search.cancel(),
             },
             AppEvent::Terminal(action) => match action {
@@ -2024,10 +2048,238 @@ fn finish_workspace_rename(
     state.language.summary = format!("Rename applied to {changed} file(s)");
 }
 
+fn apply_project_replace(state: &mut AppState) {
+    if !state.pending_workspace_replacements.is_empty() || !state.pending_workspace_edits.is_empty() {
+        state.search.message = "Wait for the current workspace edit to finish".into();
+        return;
+    }
+    let Some(project) = &state.project else {
+        state.search.message = "Open a project before replacing files".into();
+        return;
+    };
+    let Some(query) = state.search.preview_query.clone() else {
+        state.search.message = "Run a fresh replacement preview first".into();
+        return;
+    };
+    let Some(replacement) = state.search.preview_replacement.clone() else {
+        state.search.message = "Run a fresh replacement preview first".into();
+        return;
+    };
+    let selected_count = state.search.replace_files.iter().filter(|file| file.selected).count();
+    if selected_count == 0 {
+        state.search.message = "Select at least one file to replace".into();
+        return;
+    }
+    if selected_count > 200 {
+        state.search.message = "Select no more than 200 files at once".into();
+        return;
+    }
+    let root = project.root.clone();
+    let mut paths = HashSet::new();
+    let mut open_revisions = HashMap::new();
+    let mut closed_paths = Vec::new();
+    for file in state.search.replace_files.iter().filter(|file| file.selected) {
+        if !file.path.starts_with(&root) || !paths.insert(file.path.clone()) {
+            state.search.message = "The preview contains an invalid or duplicate workspace path".into();
+            return;
+        }
+        let tab = state.editor_tabs.iter().find(|tab| tab.path == file.path);
+        match (file.open_revision, tab) {
+            (Some(revision), Some(tab))
+                if tab.document.revision == revision
+                    && (file.recheck_disk || tab.document.text == file.source_text)
+                    && !tab.saving
+                    && !tab.close_after_save =>
+            {
+                open_revisions.insert(file.path.clone(), revision);
+            }
+            (Some(_), _) => {
+                state.search.message = format!("{} changed or closed since preview; run the preview again", file.path.display());
+                return;
+            }
+            (None, Some(_)) => {
+                state.search.message = format!("{} opened since preview; run the preview again", file.path.display());
+                return;
+            }
+            (None, None) => closed_paths.push(file.path.clone()),
+        }
+    }
+    let files = state.search.take_selected_replace_files().into_iter().map(|file| {
+        super::PendingWorkspaceReplaceFile {
+            path: file.path,
+            source_text: Some(file.source_text),
+            open_revision: file.open_revision,
+            recheck_disk: file.recheck_disk,
+            match_count: file.match_count,
+        }
+    }).collect();
+    state.next_workspace_edit_id = state.next_workspace_edit_id.wrapping_add(1).max(1);
+    let request = state.next_workspace_edit_id;
+    state.pending_workspace_replacements.insert(request, super::PendingWorkspaceReplace {
+        root,
+        project_generation: state.project_open_generation,
+        query,
+        replacement,
+        files,
+        open_revisions,
+    });
+    if closed_paths.is_empty() {
+        finish_workspace_replace_load(state, request, Ok(Vec::new()));
+    } else if let Err(error) = state.editor_io.load_many(request, closed_paths) {
+        state.pending_workspace_replacements.remove(&request);
+        state.search.message = format!("Cannot load replacement targets: {error}");
+    } else {
+        state.search.message = "Loading selected files for replacement…".into();
+    }
+}
+
+fn finish_workspace_replace_load(
+    state: &mut AppState,
+    request: u64,
+    result: Result<Vec<crate::editor::Document>, String>,
+) {
+    let Some(mut pending) = state.pending_workspace_replacements.remove(&request) else { return; };
+    if state.project_open_generation != pending.project_generation
+        || state.project.as_ref().is_none_or(|project| project.root != pending.root)
+    {
+        return;
+    }
+    let loaded = match result {
+        Ok(documents) => documents,
+        Err(error) => {
+            state.search.message = format!("Cannot load replacement targets: {error}");
+            return;
+        }
+    };
+    let mut loaded: HashMap<_, _> = loaded.into_iter().map(|document| (document.path.clone(), document)).collect();
+    let mut targets = Vec::with_capacity(pending.files.len());
+    for file in &mut pending.files {
+        let document = if let Some(revision) = file.open_revision {
+            let Some(tab) = state.editor_tabs.iter().find(|tab| tab.path == file.path)
+                .filter(|tab| tab.document.revision == revision && !tab.saving && !tab.close_after_save)
+            else {
+                state.search.message = format!("{} changed while loading targets; run the preview again", file.path.display());
+                return;
+            };
+            tab.document.clone()
+        } else {
+            if state.editor_tabs.iter().any(|tab| tab.path == file.path) {
+                state.search.message = format!("{} opened while loading targets; run the preview again", file.path.display());
+                return;
+            }
+            let Some(document) = loaded.remove(&file.path) else {
+                state.search.message = format!("Replacement target was not loaded: {}", file.path.display());
+                return;
+            };
+            document
+        };
+        let Some(expected_text) = file.source_text.take() else {
+            state.search.message = format!("Replacement preview for {} was already consumed", file.path.display());
+            return;
+        };
+        targets.push(crate::editor::WorkspaceReplaceTarget {
+            document,
+            expected_text,
+            expected_matches: file.match_count,
+            recheck_disk: file.recheck_disk,
+        });
+    }
+    if !loaded.is_empty() {
+        state.search.message = "Replacement targets changed while loading; run the preview again".into();
+        return;
+    }
+    let query = pending.query.text.clone();
+    let replacement = pending.replacement.clone();
+    let case_sensitive = pending.query.case_sensitive;
+    state.pending_workspace_replacements.insert(request, pending);
+    if let Err(error) = state.editor_io.replace_many(
+        request,
+        targets,
+        query,
+        replacement,
+        case_sensitive,
+    ) {
+        state.pending_workspace_replacements.remove(&request);
+        state.search.message = format!("Cannot prepare project replacement: {error}");
+    } else {
+        state.search.message = "Preparing replacements; editor files remain unsaved…".into();
+    }
+}
+
+fn finish_workspace_replace(
+    state: &mut AppState,
+    request: u64,
+    result: Result<Vec<(crate::editor::Document, usize)>, String>,
+) {
+    let Some(pending) = state.pending_workspace_replacements.remove(&request) else { return; };
+    if state.project_open_generation != pending.project_generation
+        || state.project.as_ref().is_none_or(|project| project.root != pending.root)
+    {
+        return;
+    }
+    let replacements = match result {
+        Ok(replacements) => replacements,
+        Err(error) => {
+            state.search.message = error;
+            return;
+        }
+    };
+    for file in &pending.files {
+        match pending.open_revisions.get(&file.path) {
+            Some(revision) if state.editor_tabs.iter().any(|tab| tab.path == file.path
+                && tab.document.revision == *revision && !tab.saving && !tab.close_after_save) => {}
+            Some(_) => {
+                state.search.message = format!("{} changed before replacement could be applied; no files were changed", file.path.display());
+                return;
+            }
+            None if state.editor_tabs.iter().any(|tab| tab.path == file.path) => {
+                state.search.message = format!("{} opened before replacement could be applied; no files were changed", file.path.display());
+                return;
+            }
+            None => {}
+        }
+    }
+    if replacements.len() != pending.files.len() {
+        state.search.message = "Replacement worker returned an incomplete result; no files were changed".into();
+        return;
+    }
+    let mut total_matches = 0usize;
+    for (document, count) in &replacements {
+        if !document.path.starts_with(&pending.root)
+            || !pending.files.iter().any(|file| file.path == document.path)
+        {
+            state.search.message = "Replacement worker returned a file outside the preview; no files were changed".into();
+            return;
+        }
+        total_matches = total_matches.saturating_add(*count);
+    }
+    let changed_files = replacements.len();
+    for (document, _) in replacements {
+        if let Some(tab) = state.editor_tabs.iter_mut().find(|tab| tab.path == document.path) {
+            tab.document = document;
+            tab.refresh_after_workspace_edit();
+        } else {
+            state.editor_tabs.push(EditorTab::new(document));
+        }
+    }
+    state.active_tab = state.editor_tabs.len().checked_sub(1);
+    state.last_error = None;
+    state.search.clear_replace_preview();
+    state.search.message = format!("Replaced {total_matches} matches in {changed_files} files; changes are unsaved");
+    state.status = "Project replacement applied to editor buffers; save changed files to keep the edits".into();
+}
+
 fn editor_completed(state: &mut AppState, completion: EditorCompletion) {
     match completion {
         EditorCompletion::LoadedMany { request, result } => {
-            finish_workspace_rename(state, request, result);
+            if state.pending_workspace_replacements.contains_key(&request) {
+                finish_workspace_replace_load(state, request, result);
+            } else {
+                finish_workspace_rename(state, request, result);
+            }
+        }
+        EditorCompletion::ReplacedMany { request, result } => {
+            finish_workspace_replace(state, request, result);
         }
         EditorCompletion::Loaded {
             requested_path,
