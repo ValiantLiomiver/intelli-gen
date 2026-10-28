@@ -99,6 +99,14 @@ pub fn keyboard_shortcuts(ctx: &egui::Context, state: &mut AppState) {
     if state.quit_approved {
         return;
     }
+    for (key, event) in [
+        (egui::Key::ArrowLeft, AppEvent::NavigateBack),
+        (egui::Key::ArrowRight, AppEvent::NavigateForward),
+    ] {
+        if ctx.input_mut(|input| input.consume_key(egui::Modifiers::CTRL | egui::Modifiers::ALT, key)) {
+            state.enqueue(event);
+        }
+    }
     if ctx.input_mut(|input| input.consume_key(egui::Modifiers::SHIFT, egui::Key::F6)) {
         state.enqueue(AppEvent::RenameSymbolOpen);
     }

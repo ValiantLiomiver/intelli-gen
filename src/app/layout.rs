@@ -100,11 +100,11 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
                 }
             });
             ui.menu_button("Navigate", |ui| {
-                if ui.add_enabled(!state.navigation_back.is_empty(), egui::Button::new("Back")).clicked() {
+                if ui.add_enabled(!state.navigation_back.is_empty(), egui::Button::new("Back    Ctrl+Alt+←")).clicked() {
                     state.enqueue(AppEvent::NavigateBack);
                     ui.close();
                 }
-                if ui.add_enabled(!state.navigation_forward.is_empty(), egui::Button::new("Forward")).clicked() {
+                if ui.add_enabled(!state.navigation_forward.is_empty(), egui::Button::new("Forward    Ctrl+Alt+→")).clicked() {
                     state.enqueue(AppEvent::NavigateForward);
                     ui.close();
                 }
