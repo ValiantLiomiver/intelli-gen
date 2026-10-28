@@ -122,14 +122,17 @@ fn auto_pair_java_character(ui: &egui::Ui, text: &mut String, editor_id: egui::I
     let Some(range) = state.cursor.char_range() else {
         return JavaPairEdit::None;
     };
-    let caret: usize = range.primary.index.into();
-    if range.primary != range.secondary {
-        return JavaPairEdit::None;
-    }
+    let primary: usize = range.primary.index.into();
+    let secondary: usize = range.secondary.index.into();
+    let has_selection = primary != secondary;
     let typed = ui.input_mut(|input| {
         let index = input.events.iter().position(|event| {
             matches!(event, egui::Event::Text(character)
-                if matches!(character.as_str(), "(" | "{" | "[" | ")" | "}" | "]" | "\"" | "'"))
+                if if has_selection {
+                    matches!(character.as_str(), "(" | "{" | "[" | "\"" | "'")
+                } else {
+                    matches!(character.as_str(), "(" | "{" | "[" | ")" | "}" | "]" | "\"" | "'")
+                })
         })?;
         match input.events.remove(index) {
             egui::Event::Text(character) => Some(character),
@@ -145,6 +148,22 @@ fn auto_pair_java_character(ui: &egui::Ui, text: &mut String, editor_id: egui::I
         "'" => Some("'"),
         _ => None,
     };
+    if has_selection {
+        let Some(close) = close else { return JavaPairEdit::None; };
+        let start = primary.min(secondary);
+        let end = primary.max(secondary);
+        let start_byte = byte_index(text, start);
+        let end_byte = byte_index(text, end);
+        text.insert_str(end_byte, close);
+        text.insert_str(start_byte, &typed);
+        state.cursor.set_char_range(Some(egui::text::CCursorRange::two(
+            egui::text::CCursor::new(primary + 1),
+            egui::text::CCursor::new(secondary + 1),
+        )));
+        state.store(ui.ctx(), editor_id);
+        return JavaPairEdit::InsertedPair;
+    }
+    let caret = primary;
     if close.is_none() {
         let caret_byte = byte_index(text, caret);
         if text[caret_byte..].starts_with(&typed) {
