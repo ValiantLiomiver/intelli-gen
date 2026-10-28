@@ -622,6 +622,9 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                     state.project_tree_error = Some(error);
                     continue;
                 }
+                if let Some(editor_config) = event.editor_config {
+                    state.project_editor_config = editor_config;
+                }
                 if state.project_tree.is_none() {
                     state.project_tree_generation = state.project_tree_generation.wrapping_add(1);
                     state.project_tree_loading = true;

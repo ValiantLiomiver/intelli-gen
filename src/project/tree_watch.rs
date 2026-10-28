@@ -15,6 +15,8 @@ pub struct ProjectTreeWatchEvent {
     pub paths: Vec<PathBuf>,
     pub rescan: bool,
     pub error: Option<String>,
+    /// Present only when a watched EditorConfig file may have changed.
+    pub editor_config: Option<super::editor_config::ProjectEditorConfig>,
 }
 
 pub struct ProjectTreeWatcher {
@@ -153,12 +155,15 @@ fn watch(
                     let changed_paths: Vec<_> = paths.drain().collect();
                     let needs_rescan = std::mem::take(&mut rescan);
                     if needs_rescan || !changed_paths.is_empty() {
+                        let editor_config = (needs_rescan || changed_paths.iter().any(|path| path.file_name().is_some_and(|name| name == ".editorconfig")))
+                            .then(|| super::editor_config::ProjectEditorConfig::load(&root));
                         let _ = sender.send(ProjectTreeWatchEvent {
                             root: root.clone(),
                             generation,
                             paths: changed_paths,
                             rescan: needs_rescan,
                             error: None,
+                            editor_config,
                         });
                     }
                     changed_at = None;
@@ -192,5 +197,6 @@ fn send_error(
         paths: Vec::new(),
         rescan: false,
         error: Some(error),
+        editor_config: None,
     });
 }

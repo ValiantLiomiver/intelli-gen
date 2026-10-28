@@ -1,6 +1,10 @@
-use std::{fs, path::Path};
+use std::{fs, path::{Path, PathBuf}};
 
 use globset::{GlobBuilder, GlobMatcher};
+
+const MAX_CONFIG_BYTES: u64 = 256 * 1024;
+const MAX_CONFIG_FILES: usize = 256;
+const MAX_SCANNED_DIRECTORIES: usize = 50_000;
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct EditorStyle {
@@ -16,23 +20,81 @@ struct Rule {
 }
 
 #[derive(Clone, Debug, Default)]
-pub struct ProjectEditorConfig {
+struct ParsedConfig {
+    root: bool,
     base: EditorStyle,
     rules: Vec<Rule>,
 }
 
+#[derive(Clone, Debug)]
+struct ConfigFile {
+    directory: PathBuf,
+    parsed: ParsedConfig,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct ProjectEditorConfig {
+    files: Vec<ConfigFile>,
+}
+
 impl ProjectEditorConfig {
-    /// Read the workspace-root EditorConfig without blocking the UI thread.
+    /// Scan and parse configuration on the project-open worker, never on the UI thread.
     pub fn load(root: &Path) -> Self {
-        let path = root.join(".editorconfig");
-        let Ok(metadata) = fs::symlink_metadata(&path) else { return Self::default(); };
-        if metadata.file_type().is_symlink() || !metadata.is_file() || metadata.len() > 256 * 1024 {
-            return Self::default();
-        }
-        let Ok(text) = fs::read_to_string(path) else { return Self::default(); };
-        Self::parse(&text)
+        let mut config = Self::default();
+        let mut scanned = 0;
+        scan_directory(root, Path::new(""), 0, &mut scanned, &mut config.files);
+        config.files.sort_by(|left, right| left.directory.cmp(&right.directory));
+        config
     }
 
+    pub fn style_for(&self, root: &Path, file: &Path) -> EditorStyle {
+        let Ok(relative) = file.strip_prefix(root) else { return EditorStyle::default(); };
+        let file_directory = relative.parent().unwrap_or_else(|| Path::new(""));
+        let mut applicable: Vec<_> = self.files.iter()
+            .filter(|config| file_directory.starts_with(&config.directory))
+            .collect();
+        if let Some(root_config) = applicable.iter().rposition(|config| config.parsed.root) {
+            applicable.drain(..root_config);
+        }
+        let mut resolved = EditorStyle::default();
+        for config in applicable {
+            let Ok(local_path) = relative.strip_prefix(&config.directory) else { continue; };
+            let section_style = config.parsed.style_for(local_path);
+            overlay(&mut resolved, section_style);
+        }
+        resolved
+    }
+}
+
+fn scan_directory(root: &Path, relative: &Path, depth: usize, scanned: &mut usize, files: &mut Vec<ConfigFile>) {
+    if depth > 64 || *scanned >= MAX_SCANNED_DIRECTORIES || files.len() >= MAX_CONFIG_FILES { return; }
+    *scanned += 1;
+    let directory = root.join(relative);
+    let Ok(entries) = fs::read_dir(directory) else { return; };
+    for entry in entries.flatten() {
+        if files.len() >= MAX_CONFIG_FILES || *scanned >= MAX_SCANNED_DIRECTORIES { break; }
+        let name = entry.file_name();
+        let path = entry.path();
+        let Ok(metadata) = fs::symlink_metadata(&path) else { continue; };
+        if metadata.file_type().is_symlink() { continue; }
+        if metadata.is_dir() {
+            if matches!(name.to_str(), Some(".git" | "target" | "build" | ".gradle" | ".idea" | "out" | "node_modules")) { continue; }
+            let child = if relative.as_os_str().is_empty() { PathBuf::from(name) } else { relative.join(name) };
+            scan_directory(root, &child, depth + 1, scanned, files);
+        } else if name == ".editorconfig" && metadata.is_file() && metadata.len() <= MAX_CONFIG_BYTES {
+            if let Ok(text) = fs::read_to_string(&path) {
+                files.push(ConfigFile { directory: relative.to_owned(), parsed: ParsedConfig::parse(&text) });
+            }
+        }
+    }
+}
+
+fn overlay(target: &mut EditorStyle, source: EditorStyle) {
+    if source.indent_size.is_some() { target.indent_size = source.indent_size; }
+    if source.insert_spaces.is_some() { target.insert_spaces = source.insert_spaces; }
+}
+
+impl ParsedConfig {
     fn parse(text: &str) -> Self {
         let mut config = Self::default();
         let mut current: Option<Rule> = None;
@@ -55,6 +117,10 @@ impl ProjectEditorConfig {
             let Some((key, value)) = line.split_once('=') else { continue; };
             let key = key.trim().to_ascii_lowercase();
             let value = value.trim().to_ascii_lowercase();
+            if key == "root" && current.is_none() {
+                config.root = value == "true";
+                continue;
+            }
             if key == "tab_width" {
                 if let Ok(size) = value.parse::<usize>() {
                     if (1..=16).contains(&size) {
@@ -95,15 +161,11 @@ impl ProjectEditorConfig {
         config
     }
 
-    pub fn style_for(&self, root: &Path, file: &Path) -> EditorStyle {
-        let Ok(relative) = file.strip_prefix(root) else { return self.base; };
-        let path = relative.to_string_lossy().replace('\\', "/");
+    fn style_for(&self, path: &Path) -> EditorStyle {
+        let name = path.to_string_lossy().replace('\\', "/");
         let mut style = self.base;
         for rule in &self.rules {
-            if rule.matcher.is_match(&path) {
-                if rule.style.indent_size.is_some() { style.indent_size = rule.style.indent_size; }
-                if rule.style.insert_spaces.is_some() { style.insert_spaces = rule.style.insert_spaces; }
-            }
+            if rule.matcher.is_match(&name) { overlay(&mut style, rule.style); }
         }
         style
     }
