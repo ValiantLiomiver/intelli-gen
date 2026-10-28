@@ -875,12 +875,14 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
             AppEvent::RequestQuit => state.quit_requested = true,
             AppEvent::EditorCompleted(completion) => editor_completed(state, completion),
             AppEvent::EditorCommand(command) => {
+                let tab_size = state.settings.java_indent_size.clamp(1, 8);
+                let insert_spaces = state.settings.java_insert_spaces;
                 state.language.sync_documents(&state.editor_tabs);
                 if let Some(tab) = state
                     .active_tab
                     .and_then(|index| state.editor_tabs.get(index))
                 {
-                    state.language.request(command, &tab.document);
+                    state.language.request(command, &tab.document, tab_size, insert_spaces);
                 }
             }
             AppEvent::RenameSymbolOpen => begin_symbol_rename(state),
@@ -942,8 +944,10 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                 }
             }
             AppEvent::IndentJava { outdent } => {
+                let indent_size = state.settings.java_indent_size.clamp(1, 8);
+                let insert_spaces = state.settings.java_insert_spaces;
                 if let Some(tab) = state.active_tab.and_then(|index| state.editor_tabs.get_mut(index)) {
-                    tab.indent_java_selection(context, outdent);
+                    tab.indent_java_selection(context, outdent, indent_size, insert_spaces);
                 }
             }
             AppEvent::ApplyCodeAction(index) => {

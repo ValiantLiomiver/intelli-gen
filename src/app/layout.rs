@@ -100,6 +100,12 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
                 }
             });
             ui.menu_button("Settings", |ui| {
+                ui.label("Java indentation");
+                let mut indentation_changed = false;
+                indentation_changed |= ui.add(egui::Slider::new(&mut state.settings.java_indent_size, 1..=8).text("Indent size")).changed();
+                indentation_changed |= ui.checkbox(&mut state.settings.java_insert_spaces, "Insert spaces").changed();
+                if indentation_changed { state.enqueue(AppEvent::SettingsChanged); }
+                ui.separator();
                 actions::jdk_settings_ui(ui, state);
             });
             ui.menu_button("Project Structure", |ui| {

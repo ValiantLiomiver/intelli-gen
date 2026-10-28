@@ -78,7 +78,7 @@ fn toggle_line_comment(text: &mut String, start: usize, end: usize) -> Option<(u
     ))
 }
 
-fn indent_java_lines(text: &mut String, start: usize, end: usize, outdent: bool) -> Option<(usize, usize)> {
+fn indent_java_lines(text: &mut String, start: usize, end: usize, outdent: bool, unit: &str, indent_size: usize) -> Option<(usize, usize)> {
     let char_count = text.chars().count();
     let start_byte = byte_index(text, start.min(char_count));
     let end_byte = byte_index(text, end.min(char_count));
@@ -92,11 +92,11 @@ fn indent_java_lines(text: &mut String, start: usize, end: usize, outdent: bool)
             let remove = if text.as_bytes().get(line_start) == Some(&b'\t') {
                 1
             } else {
-                text[line_start..].bytes().take(4).take_while(|byte| *byte == b' ').count()
+                text[line_start..].bytes().take(indent_size).take_while(|byte| *byte == b' ').count()
             };
             if remove > 0 { edits.push((line_start, line_start + remove, String::new())); }
         } else {
-            edits.push((line_start, line_start, "    ".to_owned()));
+            edits.push((line_start, line_start, unit.to_owned()));
         }
         if line_start >= last_line { break; }
         let Some(newline) = text[line_start..].find('\n') else { break; };
@@ -275,7 +275,7 @@ fn auto_pair_java_character(ui: &egui::Ui, text: &mut String, editor_id: egui::I
     JavaPairEdit::InsertedPair
 }
 
-fn auto_indent_java_enter(ui: &egui::Ui, text: &mut String, editor_id: egui::Id) -> bool {
+fn auto_indent_java_enter(ui: &egui::Ui, text: &mut String, editor_id: egui::Id, indent_size: usize, insert_spaces: bool) -> bool {
     if ui.memory(|memory| memory.focused()) != Some(editor_id) {
         return false;
     }
@@ -303,9 +303,9 @@ fn auto_indent_java_enter(ui: &egui::Ui, text: &mut String, editor_id: egui::Id)
     let newline = if text.contains("\r\n") { "\r\n" } else { "\n" };
     let opens_block = prefix.trim_end().ends_with('{');
     let indent_unit = if opens_block {
-        if indent.contains('\t') { "\t" } else { "    " }
+        if insert_spaces { " ".repeat(indent_size) } else { "\t".to_owned() }
     } else {
-        ""
+        String::new()
     };
     let mut replace_end = end_byte;
     let mut insertion = format!("{newline}{indent}{indent_unit}");
@@ -481,7 +481,7 @@ impl EditorTab {
         true
     }
 
-    pub fn indent_java_selection(&mut self, context: &egui::Context, outdent: bool) -> bool {
+    pub fn indent_java_selection(&mut self, context: &egui::Context, outdent: bool, indent_size: usize, insert_spaces: bool) -> bool {
         if self.close_after_save || !self.path.extension().is_some_and(|extension| extension == "java") {
             return false;
         }
@@ -502,7 +502,8 @@ impl EditorTab {
         let (primary, secondary) = if primary_local != secondary_local {
             let primary = base + primary_local;
             let secondary = base + secondary_local;
-            let Some(mapped) = indent_java_lines(&mut self.document.text, primary, secondary, outdent) else {
+            let unit = if insert_spaces { " ".repeat(indent_size) } else { "\t".to_owned() };
+            let Some(mapped) = indent_java_lines(&mut self.document.text, primary, secondary, outdent, &unit, indent_size) else {
                 return false;
             };
             mapped
@@ -513,16 +514,17 @@ impl EditorTab {
                 let line_start = self.document.text[..caret_byte].rfind('\n').map_or(0, |newline| newline + 1);
                 let remove = if self.document.text[line_start..].starts_with('\t') {
                     1
-                } else if self.document.text[line_start..].starts_with("    ") {
-                    4
+                } else if self.document.text[line_start..].starts_with(&" ".repeat(indent_size)) {
+                    indent_size
                 } else {
                     return false;
                 };
                 self.document.text.replace_range(line_start..line_start + remove, "");
                 if caret_byte >= line_start + remove { caret - remove } else { line_start }
             } else {
-                self.document.text.insert_str(caret_byte, "    ");
-                caret + 4
+                let unit = if insert_spaces { " ".repeat(indent_size) } else { "\t".to_owned() };
+                self.document.text.insert_str(caret_byte, &unit);
+                caret + unit.chars().count()
             };
             (new_caret, new_caret)
         };
@@ -575,6 +577,8 @@ impl EditorTab {
         breakpoints: &[u32],
         current_line: Option<u32>,
         diagnostics: &[crate::java::lsp::LanguageDiagnostic],
+        indent_size: usize,
+        insert_spaces: bool,
     ) -> Option<u32> {
         if self.document.text.len() > PAGED_EDITOR_BYTES {
             self.active_snippet_tab_stop = None;
@@ -586,6 +590,8 @@ impl EditorTab {
                 breakpoints,
                 current_line,
                 diagnostics,
+                indent_size,
+                insert_spaces,
             );
         }
         self.page_end = 0;
@@ -647,7 +653,7 @@ impl EditorTab {
         let auto_indented = java
             && allow_edits
             && !self.close_after_save
-            && auto_indent_java_enter(ui, &mut self.document.text, editor_id);
+            && auto_indent_java_enter(ui, &mut self.document.text, editor_id, indent_size, insert_spaces);
         if auto_indented {
             self.document.mark_changed();
         }
@@ -799,6 +805,8 @@ impl EditorTab {
         breakpoints: &[u32],
         current_line: Option<u32>,
         diagnostics: &[crate::java::lsp::LanguageDiagnostic],
+        indent_size: usize,
+        insert_spaces: bool,
     ) -> Option<u32> {
         ui.colored_label(ui.visuals().warn_fg_color,
             "Large file: editing is limited to the visible page. Save writes the complete document.");
@@ -864,7 +872,7 @@ impl EditorTab {
         let auto_indented = super::highlighter::SourceLanguage::for_path(&self.path)
             == super::highlighter::SourceLanguage::Java
             && allow_edits
-            && auto_indent_java_enter(ui, &mut page, editor_id);
+            && auto_indent_java_enter(ui, &mut page, editor_id, indent_size, insert_spaces);
         let mut toggled = None;
         let highlighter = &mut self.highlighter;
         let mut layouter = |ui: &egui::Ui, buffer: &dyn egui::TextBuffer, _width: f32| {
@@ -993,6 +1001,8 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
         .map_or(&[][..], Vec::as_slice);
     let mut editor_command = None;
     let mut breakpoint_action = None;
+    let indent_size = state.settings.java_indent_size.clamp(1, 8);
+    let insert_spaces = state.settings.java_insert_spaces;
     if let Some(tab) = state
         .active_tab
         .and_then(|index| state.editor_tabs.get_mut(index))
@@ -1003,7 +1013,8 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
         let current_line = state.debugger.inspector.selected_frame.and_then(|id| state.debugger.inspector.frames.iter().find(|frame| frame.id == id))
             .filter(|frame| frame.source.as_ref() == Some(&tab.path)).map(|frame| frame.line);
         let revision = tab.document.revision;
-        let toggled = tab.render_editor(ui, !state.quit_approved, &lines, current_line, diagnostics);
+        let toggled = tab.render_editor(ui, !state.quit_approved, &lines, current_line, diagnostics,
+            indent_size, insert_spaces);
         let path = tab.path.clone();
         if tab.document.revision != revision
             && path.extension().is_some_and(|extension| extension == "java")

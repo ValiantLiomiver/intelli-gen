@@ -640,6 +640,8 @@ enum LanguageCommand {
         diagnostics: Vec<LanguageDiagnostic>,
         version: i64,
         rename_to: Option<String>,
+        tab_size: usize,
+        insert_spaces: bool,
     },
     SearchSymbols {
         query: String,
@@ -1338,14 +1340,14 @@ async fn protocol(
                     LanguageCommand::Change { path, text, version } => notify(input, "textDocument/didChange", json!({"textDocument": {"uri": uri(&path)?, "version": version}, "contentChanges": [{"text": text}]})).await?,
                     LanguageCommand::Save(path) => notify(input, "textDocument/didSave", json!({"textDocument": {"uri": uri(&path)?}})).await?,
                     LanguageCommand::Close(path) => notify(input, "textDocument/didClose", json!({"textDocument": {"uri": uri(&path)?}})).await?,
-                    LanguageCommand::Request { command, path, project_root, position, document_end, range, diagnostics, version, rename_to } => {
+                    LanguageCommand::Request { command, path, project_root, position, document_end, range, diagnostics, version, rename_to, tab_size, insert_spaces } => {
                         let id = next_id; next_id += 1;
                         let mut params = json!({"textDocument": {"uri": uri(&path)?}, "position": position});
                         if let Some(new_name) = &rename_to {
                             params["newName"] = json!(new_name);
                         }
                         if command == EditorCommand::DocumentSymbols { params = json!({"textDocument": {"uri": uri(&path)?}}); }
-                        if command == EditorCommand::Format { params = json!({"textDocument": {"uri": uri(&path)?}, "options": {"tabSize": 4, "insertSpaces": true}}); }
+                        if command == EditorCommand::Format { params = json!({"textDocument": {"uri": uri(&path)?}, "options": {"tabSize": tab_size, "insertSpaces": insert_spaces}}); }
                         if command == EditorCommand::OrganizeImports { params = json!({"textDocument": {"uri": uri(&path)?}, "range": {"start": {"line": 0, "character": 0}, "end": document_end}, "context": {"diagnostics": []}}); }
                         if command == EditorCommand::CodeActions { params = json!({"textDocument": {"uri": uri(&path)?}, "range": range, "context": {"diagnostics": diagnostics}}); }
                         if command == EditorCommand::References { params["context"] = json!({"includeDeclaration": true}); }
@@ -2589,6 +2591,8 @@ impl LanguageTool {
                 diagnostics: Vec::new(),
                 version: synced.version,
                 rename_to: None,
+                tab_size: 4,
+                insert_spaces: true,
             })?;
             self.document_symbols_version = Some(synced.version);
             Ok::<(), LspError>(())
@@ -2703,7 +2707,7 @@ impl LanguageTool {
             }
         }
     }
-    pub fn request(&mut self, command: EditorCommand, document: &Document) {
+    pub fn request(&mut self, command: EditorCommand, document: &Document, tab_size: usize, insert_spaces: bool) {
         if command == EditorCommand::CodeActions {
             self.code_actions = None;
             self.code_actions_error = None;
@@ -2735,6 +2739,8 @@ impl LanguageTool {
                 } else { Vec::new() },
                 version: synced.version,
                 rename_to: None,
+                tab_size: tab_size.clamp(1, 8),
+                insert_spaces,
             })
         })();
         if let Err(error) = result {
@@ -2761,6 +2767,8 @@ impl LanguageTool {
                 range: document_line_range(&document.text, position.line), diagnostics: Vec::new(),
                 version: synced.version,
                 rename_to: Some(new_name.trim().to_owned()),
+                tab_size: 4,
+                insert_spaces: true,
             })
         })();
         if let Err(error) = &result { self.summary = error.to_string(); }
