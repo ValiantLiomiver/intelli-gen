@@ -613,7 +613,10 @@ pub fn render(ui: &mut eframe::egui::Ui, state: &mut crate::app::AppState) {
             if let Some(mut config) = selected.clone() { config.id = fresh_id(); config.name.push_str(" copy"); state.run.editor = Some(ConfigurationEditor::new(config)); }
         }
         if ui.add_enabled(can_edit && selected.is_some(), egui::Button::new("Delete")).clicked() { intents.push(AppEvent::Run(RunAction::Delete)); }
-        if ui.add_enabled(selected.is_some() && !state.run.has_workers(), egui::Button::new("Run")).clicked() { intents.push(AppEvent::Run(RunAction::Start)); }
+        let runnable_project = project_model.is_some_and(|model| model.kind != crate::project::ProjectKind::Unknown);
+        if ui.add_enabled(runnable_project && selected.is_some() && !state.run.has_workers(), egui::Button::new("Run"))
+            .on_disabled_hover_text("Open a Maven or Gradle project and select a run configuration")
+            .clicked() { intents.push(AppEvent::Run(RunAction::Start)); }
         if ui.add_enabled(state.run.has_workers(), egui::Button::new("Stop")).clicked() { intents.push(AppEvent::Run(RunAction::Stop)); }
     });
     if let Some(config) = state.run.selected() {
