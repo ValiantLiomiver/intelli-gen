@@ -62,6 +62,7 @@ pub struct AppState {
     pub project_open_generation: u64,
     pub project_opening: bool,
     pub project_tree_loader: crate::project::workspace::ProjectTreeLoader,
+    pub project_tree_generation: u64,
     pub project_tree_loading: bool,
     pub search: crate::search::ProjectSearch,
     pub terminal: crate::terminal::TerminalTool,
@@ -227,6 +228,7 @@ impl IdeaLikeApp {
             project_open_generation: 0,
             project_opening: false,
             project_tree_loader: crate::project::workspace::ProjectTreeLoader::default(),
+            project_tree_generation: 0,
             project_tree_loading: false,
             search: crate::search::ProjectSearch::new(cc.egui_ctx.clone()),
             terminal: crate::terminal::TerminalTool::default(),
@@ -383,6 +385,9 @@ impl eframe::App for IdeaLikeApp {
         }
         for event in self.state.project_tree_loader.poll() {
             match event {
+                crate::project::workspace::ProjectTreeLoadEvent::Refreshed(event) => {
+                    self.state.enqueue(AppEvent::ProjectTreeRefreshed(event));
+                }
                 crate::project::workspace::ProjectTreeLoadEvent::ChildrenLoaded(event) => {
                     self.state
                         .enqueue(AppEvent::ProjectTreeChildrenLoaded(event));

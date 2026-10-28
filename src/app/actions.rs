@@ -340,6 +340,7 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                 retire_maven_watcher(state);
                 retire_project_tree_watcher(state);
                 state.project_tree_watch_generation = state.project_tree_watch_generation.wrapping_add(1);
+                state.project_tree_generation = state.project_tree_generation.wrapping_add(1);
                 state.maven_project_generation = state.maven_project_generation.wrapping_add(1);
                 state.project_tree_loading = false;
                 state.project = Some(project);
@@ -428,6 +429,15 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                     continue;
                 };
                 if path == root {
+                    if state.project_tree.is_none() {
+                        state.project_tree_generation = state.project_tree_generation.wrapping_add(1);
+                        state.project_tree_loading = true;
+                        if let Err(error) = state.project_tree_loader.start(root, state.project_tree_generation) {
+                            state.project_tree_loading = false;
+                            state.project_tree_error = Some(error);
+                        }
+                        continue;
+                    }
                     let request = state.project_tree.as_mut().and_then(|tree| tree.begin_refresh(&root));
                     if let Some(request) = request {
                         state.project_tree_loading = true;
@@ -454,12 +464,34 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                     }
                 }
             }
+            AppEvent::ProjectTreeRefreshed(event) => {
+                if event.generation != state.project_tree_generation
+                    || state.project.as_ref().is_none_or(|project| project.root != event.root)
+                { continue; }
+                state.project_tree_loading = false;
+                match event.result {
+                    Ok(tree) => {
+                        state.project_tree = Some(tree);
+                        state.project_tree_error = None;
+                    }
+                    Err(error) => state.project_tree_error = Some(error),
+                }
+            }
             AppEvent::ProjectTreeChanged(event) => {
                 if event.generation != state.project_tree_watch_generation
                     || state.project.as_ref().is_none_or(|project| project.root != event.root)
                 { continue; }
                 if let Some(error) = event.error {
                     state.project_tree_error = Some(error);
+                    continue;
+                }
+                if state.project_tree.is_none() {
+                    state.project_tree_generation = state.project_tree_generation.wrapping_add(1);
+                    state.project_tree_loading = true;
+                    if let Err(error) = state.project_tree_loader.start(event.root, state.project_tree_generation) {
+                        state.project_tree_loading = false;
+                        state.project_tree_error = Some(error);
+                    }
                     continue;
                 }
                 let Some(tree) = state.project_tree.as_mut() else { continue; };

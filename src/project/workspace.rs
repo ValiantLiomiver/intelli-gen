@@ -182,6 +182,13 @@ fn open_project_path(path: PathBuf) -> Result<OpenedProject, String> {
 }
 
 #[derive(Clone, Debug)]
+pub struct ProjectTreeEvent {
+    pub root: PathBuf,
+    pub generation: u64,
+    pub result: Result<ProjectTree, String>,
+}
+
+#[derive(Clone, Debug)]
 pub struct ProjectTreeChildrenEvent {
     pub root: PathBuf,
     pub parent: PathBuf,
@@ -198,6 +205,7 @@ pub struct ProjectTreeRootValidationEvent {
 
 #[derive(Clone, Debug)]
 pub enum ProjectTreeLoadEvent {
+    Refreshed(ProjectTreeEvent),
     ChildrenLoaded(ProjectTreeChildrenEvent),
     RootValidated(ProjectTreeRootValidationEvent),
 }
@@ -205,6 +213,7 @@ pub enum ProjectTreeLoadEvent {
 pub struct ProjectTreeLoader {
     sender: Sender<ProjectTreeLoadEvent>,
     receiver: Receiver<ProjectTreeLoadEvent>,
+    latest_generation: u64,
     workers: Vec<JoinHandle<()>>,
 }
 
@@ -214,12 +223,35 @@ impl Default for ProjectTreeLoader {
         Self {
             sender,
             receiver,
+            latest_generation: 0,
             workers: Vec::new(),
         }
     }
 }
 
 impl ProjectTreeLoader {
+    pub fn start(&mut self, root: PathBuf, generation: u64) -> Result<(), String> {
+        if generation <= self.latest_generation {
+            return Err("Project-tree generation must increase for each request".into());
+        }
+        let sender = self.sender.clone();
+        let worker_root = root.clone();
+        let worker = thread::Builder::new()
+            .name("project-tree-refresh".into())
+            .spawn(move || {
+                let result = ProjectTree::read(&worker_root).map_err(|error| error.to_string());
+                let _ = sender.send(ProjectTreeLoadEvent::Refreshed(ProjectTreeEvent {
+                    root: worker_root,
+                    generation,
+                    result,
+                }));
+            })
+            .map_err(|error| format!("Cannot start project-tree worker: {error}"))?;
+        self.latest_generation = generation;
+        self.workers.push(worker);
+        Ok(())
+    }
+
     pub fn start_children(
         &mut self,
         root: PathBuf,
@@ -266,7 +298,10 @@ impl ProjectTreeLoader {
     }
 
     pub fn poll(&mut self) -> Vec<ProjectTreeLoadEvent> {
-        let events = self.receiver.try_iter().collect();
+        let events = self.receiver.try_iter().filter(|event| match event {
+            ProjectTreeLoadEvent::Refreshed(event) => event.generation == self.latest_generation,
+            ProjectTreeLoadEvent::ChildrenLoaded(_) | ProjectTreeLoadEvent::RootValidated(_) => true,
+        }).collect();
         let mut active = Vec::new();
         for worker in self.workers.drain(..) {
             if worker.is_finished() {
