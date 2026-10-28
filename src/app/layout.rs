@@ -71,6 +71,15 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
                     ui.close();
                 }
                 ui.separator();
+                if ui.add_enabled(state.editor_tabs.len() > 1, egui::Button::new("Next Tab    Ctrl+Tab")).clicked() {
+                    state.enqueue(AppEvent::NextEditorTab);
+                    ui.close();
+                }
+                if ui.add_enabled(state.editor_tabs.len() > 1, egui::Button::new("Previous Tab    Ctrl+Shift+Tab")).clicked() {
+                    state.enqueue(AppEvent::PreviousEditorTab);
+                    ui.close();
+                }
+                ui.separator();
                 if ui.button("Quit").clicked() {
                     state.enqueue(AppEvent::RequestQuit);
                     ui.close();

@@ -34,6 +34,8 @@ pub enum AppEvent {
     OpenFileAtPosition(PathBuf, crate::java::lsp::Position),
     NavigateBack,
     NavigateForward,
+    NextEditorTab,
+    PreviousEditorTab,
     NewJavaClass(PathBuf),
     CreateJavaClass { directory: PathBuf, name: String, package: String },
     QuickOpenOpen,

@@ -69,6 +69,13 @@ fn move_navigation_history(state: &mut AppState, backwards: bool) {
     open_file_at_position(state, target.path, target.position);
 }
 
+fn select_editor_tab(state: &mut AppState, forward: bool) {
+    let count = state.editor_tabs.len();
+    if count == 0 { return; }
+    let current = state.active_tab.unwrap_or(if forward { count - 1 } else { 0 }).min(count - 1);
+    state.active_tab = Some(if forward { (current + 1) % count } else { (current + count - 1) % count });
+}
+
 pub fn open_project_dialog(state: &mut AppState) {
     if state.quit_approved {
         return;
@@ -98,6 +105,11 @@ pub fn open_file_dialog(state: &mut AppState) {
 pub fn keyboard_shortcuts(ctx: &egui::Context, state: &mut AppState) {
     if state.quit_approved {
         return;
+    }
+    if ctx.input_mut(|input| input.consume_key(egui::Modifiers::CTRL | egui::Modifiers::SHIFT, egui::Key::Tab)) {
+        state.enqueue(AppEvent::PreviousEditorTab);
+    } else if ctx.input_mut(|input| input.consume_key(egui::Modifiers::CTRL, egui::Key::Tab)) {
+        state.enqueue(AppEvent::NextEditorTab);
     }
     for (key, event) in [
         (egui::Key::ArrowLeft, AppEvent::NavigateBack),
@@ -819,6 +831,8 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
             }
             AppEvent::NavigateBack => move_navigation_history(state, true),
             AppEvent::NavigateForward => move_navigation_history(state, false),
+            AppEvent::NextEditorTab => select_editor_tab(state, true),
+            AppEvent::PreviousEditorTab => select_editor_tab(state, false),
             AppEvent::Search(action) => match action {
                 super::events::SearchAction::Open => {
                     state.active_panel = super::ActivePanel::Search;

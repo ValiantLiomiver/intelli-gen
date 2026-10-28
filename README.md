@@ -36,6 +36,7 @@ The command-line link accepts the same optional project or file path: `dist/inte
 | Action | Shortcut |
 | --- | --- |
 | Open project / file | `⇧⌘O` / `⌘O` |
+| Next / previous editor tab | `Ctrl+Tab` / `Ctrl+Shift+Tab` |
 | Go to file | `⌘P` |
 | Find / replace in file | `⌘F` / `⌘R` |
 | Find in project | `⇧⌘F` |
