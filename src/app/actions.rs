@@ -1068,6 +1068,10 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                     module,
                     goal,
                 } => {
+                    if state.pending_run.is_some() {
+                        state.last_error = Some("Finish or cancel the pending Run before starting another build".into());
+                        continue;
+                    }
                     if state.quit_requested
                         || state.maven_view_root.as_ref() != Some(&root)
                         || generation != state.maven_generation
@@ -1169,6 +1173,10 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                     }
                 }
                 super::events::GradleAction::RunTask { root, generation, project_path, task_path } => {
+                    if state.pending_run.is_some() {
+                        state.last_error = Some("Finish or cancel the pending Run before starting another build".into());
+                        continue;
+                    }
                     if state.quit_requested || state.gradle_task_root.as_ref() != Some(&root)
                         || generation != state.gradle_task_generation
                         || state.gradle_selected_project != project_path
