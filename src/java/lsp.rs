@@ -1953,6 +1953,14 @@ pub struct ToolingSnapshot {
     pub debug_error: Option<String>,
 }
 impl LanguageTool {
+    pub fn can_request_for(&self, path: &Path) -> bool {
+        self.session.is_some()
+            && self
+                .root
+                .as_ref()
+                .is_some_and(|root| path.starts_with(root))
+    }
+
     pub fn set_repaint_context(&mut self, context: eframe::egui::Context) {
         self.repaint_context = Some(context);
     }

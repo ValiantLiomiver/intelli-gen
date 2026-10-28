@@ -369,6 +369,8 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
     let diagnostics = active_path.as_ref()
         .and_then(|path| state.language.diagnostics.get(path))
         .map_or(&[][..], Vec::as_slice);
+    let mut editor_command = None;
+    let mut breakpoint_action = None;
     if let Some(tab) = state
         .active_tab
         .and_then(|index| state.editor_tabs.get_mut(index))
@@ -378,14 +380,42 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
         let lines = state.debugger.breakpoints.lines(&tab.path);
         let current_line = state.debugger.inspector.selected_frame.and_then(|id| state.debugger.inspector.frames.iter().find(|frame| frame.id == id))
             .filter(|frame| frame.source.as_ref() == Some(&tab.path)).map(|frame| frame.line);
+        let revision = tab.document.revision;
         let toggled = tab.render_editor(ui, !state.quit_approved, &lines, current_line, diagnostics);
         let path = tab.path.clone();
+        if tab.document.revision != revision
+            && path.extension().is_some_and(|extension| extension == "java")
+            && state.language.can_request_for(&path)
+        {
+            let command = ui.input(|input| {
+                input.events.iter().rev().find_map(|event| match event {
+                    egui::Event::Text(text) if text == "." => {
+                        Some(crate::java::lsp::EditorCommand::Completion)
+                    }
+                    egui::Event::Text(text) if text == "(" || text == "," => {
+                        Some(crate::java::lsp::EditorCommand::SignatureHelp)
+                    }
+                    _ => None,
+                })
+            });
+            editor_command = command;
+        }
         let modified = tab.document.is_dirty();
         if modified { state.debugger.breakpoints.modified.insert(path.clone()); }
         else { state.debugger.breakpoints.modified.remove(&path); }
         if let Some(line) = toggled {
-            state.enqueue(AppEvent::Debugger(crate::app::events::DebuggerAction::ToggleBreakpoint { source: path, line, modified }));
+            breakpoint_action = Some(crate::app::events::DebuggerAction::ToggleBreakpoint {
+                source: path,
+                line,
+                modified,
+            });
         }
+    }
+    if let Some(command) = editor_command {
+        state.enqueue(AppEvent::EditorCommand(command));
+    }
+    if let Some(action) = breakpoint_action {
+        state.enqueue(AppEvent::Debugger(action));
     }
 }
 
