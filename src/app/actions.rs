@@ -98,10 +98,14 @@ pub fn keyboard_shortcuts(ctx: &egui::Context, state: &mut AppState) {
         if ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp)) {
             state.language.move_completion_selection(-1);
         }
-        if ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Enter))
-            && let Some(index) = state.language.completion_selection
-        {
-            state.enqueue(AppEvent::ApplyCompletion(index));
+        if let Some(index) = state.language.completion_selection {
+            let accept = ctx.input_mut(|input| {
+                input.consume_key(egui::Modifiers::NONE, egui::Key::Enter)
+                    || input.consume_key(egui::Modifiers::NONE, egui::Key::Tab)
+            });
+            if accept {
+                state.enqueue(AppEvent::ApplyCompletion(index));
+            }
         }
         if ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
             state.language.dismiss_completion();
