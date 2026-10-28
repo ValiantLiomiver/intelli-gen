@@ -112,6 +112,40 @@ enum JavaPairEdit {
     InsertedPair,
 }
 
+fn auto_delete_java_pair(ui: &egui::Ui, text: &mut String, editor_id: egui::Id) -> bool {
+    if ui.memory(|memory| memory.focused()) != Some(editor_id) {
+        return false;
+    }
+    let Some(mut state) = egui::text_edit::TextEditState::load(ui.ctx(), editor_id) else {
+        return false;
+    };
+    let Some(range) = state.cursor.char_range() else { return false; };
+    if range.primary != range.secondary {
+        return false;
+    }
+    let caret: usize = range.primary.index.into();
+    if caret == 0 || caret >= text.chars().count() {
+        return false;
+    }
+    let caret_byte = byte_index(text, caret);
+    let Some(previous) = text[..caret_byte].chars().next_back() else { return false; };
+    let Some(next) = text[caret_byte..].chars().next() else { return false; };
+    if !matches!((previous, next), ('(', ')') | ('{', '}') | ('[', ']') | ('"', '"') | ('\'', '\'')) {
+        return false;
+    }
+    if !ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Backspace)) {
+        return false;
+    }
+    let start = caret_byte - previous.len_utf8();
+    let end = caret_byte + next.len_utf8();
+    text.replace_range(start..end, "");
+    state.cursor.set_char_range(Some(egui::text::CCursorRange::one(
+        egui::text::CCursor::new(caret - 1),
+    )));
+    state.store(ui.ctx(), editor_id);
+    true
+}
+
 fn auto_pair_java_character(ui: &egui::Ui, text: &mut String, editor_id: egui::Id) -> JavaPairEdit {
     if ui.memory(|memory| memory.focused()) != Some(editor_id) {
         return JavaPairEdit::None;
@@ -415,7 +449,12 @@ impl EditorTab {
         });
         let language = super::highlighter::SourceLanguage::for_path(&self.path);
         let java = language == super::highlighter::SourceLanguage::Java;
-        let pair_edit = if java && allow_edits && !self.close_after_save {
+        let auto_deleted_pair = java && allow_edits && !self.close_after_save
+            && auto_delete_java_pair(ui, &mut self.document.text, editor_id);
+        if auto_deleted_pair {
+            self.document.mark_changed();
+        }
+        let pair_edit = if java && allow_edits && !self.close_after_save && !auto_deleted_pair {
             auto_pair_java_character(ui, &mut self.document.text, editor_id)
         } else {
             JavaPairEdit::None
@@ -454,7 +493,7 @@ impl EditorTab {
                     .layouter(&mut layouter)
                     .show(ui);
                 if output.response.changed() {
-                    if !auto_indented && pair_edit != JavaPairEdit::InsertedPair {
+                    if !auto_indented && !auto_deleted_pair && pair_edit != JavaPairEdit::InsertedPair {
                         self.document.mark_changed();
                     }
                 }
@@ -544,7 +583,10 @@ impl EditorTab {
             .filter(|byte| *byte == b'\n')
             .count() as u32 + 1;
         let mut page = self.document.text[self.page_start..self.page_end].to_owned();
-        let pair_edit = if super::highlighter::SourceLanguage::for_path(&self.path)
+        let auto_deleted_pair = super::highlighter::SourceLanguage::for_path(&self.path)
+            == super::highlighter::SourceLanguage::Java && allow_edits
+            && auto_delete_java_pair(ui, &mut page, editor_id);
+        let pair_edit = if !auto_deleted_pair && super::highlighter::SourceLanguage::for_path(&self.path)
             == super::highlighter::SourceLanguage::Java && allow_edits
         {
             auto_pair_java_character(ui, &mut page, editor_id)
@@ -582,7 +624,7 @@ impl EditorTab {
                     output
                 })
             }).inner.inner;
-        if output.response.changed() || auto_indented || pair_edit == JavaPairEdit::InsertedPair {
+        if output.response.changed() || auto_indented || auto_deleted_pair || pair_edit == JavaPairEdit::InsertedPair {
             self.document.text.replace_range(self.page_start..self.page_end, &page);
             self.page_end = self.page_start + page.len();
             self.document.mark_changed();
