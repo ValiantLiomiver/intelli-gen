@@ -790,7 +790,8 @@ impl BuildTool {
 pub fn render(ui: &mut egui::Ui, state: &mut crate::app::AppState) {
     use crate::app::events::{AppEvent, BuildAction};
     let mut action = None;
-    let available = state.project.as_ref().and_then(|project| project.model.as_ref()).is_some();
+    let available = state.project.as_ref().and_then(|project| project.model.as_ref())
+        .is_some_and(|model| model.kind != crate::project::ProjectKind::Unknown);
     ui.horizontal(|ui| {
         for (label, intent) in [("Build", BuildAction::Build), ("Test", BuildAction::Test), ("Clean", BuildAction::Clean)] {
             if ui.add_enabled(available && !state.build.running(), egui::Button::new(label)).clicked() { action = Some(intent); }

@@ -1354,6 +1354,9 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                         .as_ref()
                         .ok_or("Build discovery has no Maven or Gradle model")?
                         .clone();
+                    if model.kind == crate::project::ProjectKind::Unknown {
+                        return Err("This directory is not a Maven or Gradle project; build actions are unavailable".into());
+                    }
                     let jdk = state.settings.selected_jdk(&project.root, None)?.clone();
                     let executable = match model.kind {
                         crate::project::ProjectKind::Maven => {

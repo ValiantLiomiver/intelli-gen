@@ -199,7 +199,12 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
                 actions::open_file_dialog(state);
             }
             ui.separator();
-            if ui.add_enabled(state.project.as_ref().and_then(|project| project.model.as_ref()).is_some() && !state.build.running(), egui::Button::new("Build")).clicked() {
+            let build_available = state.project.as_ref()
+                .and_then(|project| project.model.as_ref())
+                .is_some_and(|model| model.kind != ProjectKind::Unknown);
+            if ui.add_enabled(build_available && !state.build.running(), egui::Button::new("Build"))
+                .on_disabled_hover_text("Open a Maven or Gradle project to build")
+                .clicked() {
                 state.enqueue(AppEvent::Build(super::events::BuildAction::Build));
             }
             crate::java::run_config::configuration_selector(ui, &mut state.run);
