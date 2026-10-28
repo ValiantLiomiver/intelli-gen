@@ -835,7 +835,9 @@ pub fn render(ui: &mut egui::Ui, state: &mut crate::app::AppState) {
                                 } else {
                                     ui.colored_label(ui.visuals().error_fg_color, &label);
                                 }
-                                if ui.add_enabled(!state.build.running(), egui::Button::new("Run class")).clicked() {
+                                if ui.add_enabled(available && !state.build.running(), egui::Button::new("Run class"))
+                                    .on_disabled_hover_text("Open a Maven or Gradle project to rerun a test")
+                                    .clicked() {
                                     run_test = Some(crate::app::events::BuildAction::RunTest {
                                         class_name: failure.class_name.clone(),
                                         module_root: failure.module_root.clone(),
