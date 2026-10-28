@@ -99,6 +99,16 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
                     ui.close();
                 }
             });
+            ui.menu_button("Navigate", |ui| {
+                if ui.add_enabled(!state.navigation_back.is_empty(), egui::Button::new("Back")).clicked() {
+                    state.enqueue(AppEvent::NavigateBack);
+                    ui.close();
+                }
+                if ui.add_enabled(!state.navigation_forward.is_empty(), egui::Button::new("Forward")).clicked() {
+                    state.enqueue(AppEvent::NavigateForward);
+                    ui.close();
+                }
+            });
             ui.menu_button("Settings", |ui| {
                 ui.label("Java indentation");
                 let mut indentation_changed = false;

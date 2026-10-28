@@ -40,6 +40,7 @@ The command-line link accepts the same optional project or file path: `dist/inte
 | Find / replace in file | `⌘F` / `⌘R` |
 | Find in project | `⇧⌘F` |
 | Go to line | `⌘L` |
+| Navigate to previous / next code location | **Navigate** menu |
 | Reformat Java file | `⌥⌘L` |
 | Organize Java imports | `Ctrl+Alt+O` |
 | Go to Java symbol | `⌘⌥O` |

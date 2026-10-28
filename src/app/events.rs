@@ -32,6 +32,8 @@ pub enum AppEvent {
     OpenFile(PathBuf),
     OpenFileAtLine(PathBuf, usize),
     OpenFileAtPosition(PathBuf, crate::java::lsp::Position),
+    NavigateBack,
+    NavigateForward,
     NewJavaClass(PathBuf),
     CreateJavaClass { directory: PathBuf, name: String, package: String },
     QuickOpenOpen,

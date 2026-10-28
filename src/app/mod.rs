@@ -118,6 +118,8 @@ pub struct AppState {
     pub next_workspace_edit_id: u64,
     pub editor_tabs: Vec<EditorTab>,
     pub active_tab: Option<usize>,
+    pub navigation_back: Vec<NavigationLocation>,
+    pub navigation_forward: Vec<NavigationLocation>,
     pub editor_io: EditorIo,
     pub loading_files: HashSet<PathBuf>,
     pub pending_close: Option<PathBuf>,
@@ -146,6 +148,12 @@ pub struct AppState {
     pub settings_save_error: Option<String>,
     /// Protect unreadable or malformed preferences from being overwritten by defaults.
     pub settings_writable: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NavigationLocation {
+    pub path: PathBuf,
+    pub position: crate::java::lsp::Position,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -323,6 +331,8 @@ impl IdeaLikeApp {
             next_workspace_edit_id: 0,
             editor_tabs: Vec::new(),
             active_tab: None,
+            navigation_back: Vec::new(),
+            navigation_forward: Vec::new(),
             editor_io: EditorIo::new(cc.egui_ctx.clone()),
             loading_files: HashSet::new(),
             pending_close: None,

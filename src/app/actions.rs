@@ -35,6 +35,40 @@ fn open_file_at_position(
     }
 }
 
+fn current_navigation_location(state: &AppState) -> Option<super::NavigationLocation> {
+    let tab = state.active_tab.and_then(|index| state.editor_tabs.get(index))?;
+    Some(super::NavigationLocation { path: tab.path.clone(), position: tab.document.lsp_position() })
+}
+
+fn remember_navigation_origin(state: &mut AppState, target: &super::NavigationLocation) {
+    let Some(current) = current_navigation_location(state) else { return; };
+    if current == *target { return; }
+    if state.navigation_back.last() != Some(&current) {
+        state.navigation_back.push(current);
+        if state.navigation_back.len() > 100 { state.navigation_back.remove(0); }
+    }
+    state.navigation_forward.clear();
+}
+
+fn navigate_to_position(state: &mut AppState, path: PathBuf, position: crate::java::lsp::Position) {
+    let target = super::NavigationLocation { path, position };
+    remember_navigation_origin(state, &target);
+    open_file_at_position(state, target.path, target.position);
+}
+
+fn move_navigation_history(state: &mut AppState, backwards: bool) {
+    let target = if backwards { state.navigation_back.pop() } else { state.navigation_forward.pop() };
+    let Some(target) = target else { return; };
+    if let Some(current) = current_navigation_location(state) {
+        let opposite = if backwards { &mut state.navigation_forward } else { &mut state.navigation_back };
+        if opposite.last() != Some(&current) {
+            opposite.push(current);
+            if opposite.len() > 100 { opposite.remove(0); }
+        }
+    }
+    open_file_at_position(state, target.path, target.position);
+}
+
 pub fn open_project_dialog(state: &mut AppState) {
     if state.quit_approved {
         return;
@@ -370,6 +404,10 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                 let startup_file = opened.open_file;
                 let root = opened.root;
                 let project = opened.project;
+                if state.project.as_ref().is_some_and(|current| current.root != root) {
+                    state.navigation_back.clear();
+                    state.navigation_forward.clear();
+                }
                 state.quick_open.set_project(Some(root.clone()));
                 if state.project.as_ref().map(|project| &project.root) != Some(&root) {
                     state.build.reset();
@@ -759,7 +797,7 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                 state.find_replace.apply(action, tab);
             }
             AppEvent::OpenFileAtLine(path, line) => {
-                open_file_at_position(
+                navigate_to_position(
                     state,
                     path,
                     crate::java::lsp::Position {
@@ -769,8 +807,10 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                 );
             }
             AppEvent::OpenFileAtPosition(path, position) => {
-                open_file_at_position(state, path, position);
+                navigate_to_position(state, path, position);
             }
+            AppEvent::NavigateBack => move_navigation_history(state, true),
+            AppEvent::NavigateForward => move_navigation_history(state, false),
             AppEvent::Search(action) => match action {
                 super::events::SearchAction::Open => {
                     state.active_panel = super::ActivePanel::Search;
