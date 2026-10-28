@@ -124,7 +124,187 @@ pub struct CompletionItem {
     pub insert_text: String,
     pub range: Option<Range>,
     pub additional_edits: Vec<(Range, String)>,
+    pub snippet_selection: Option<(usize, usize)>,
+    pub snippet_final_cursor: Option<usize>,
     pub applicable: bool,
+}
+
+const MAX_COMPLETION_SNIPPET_CHARS: usize = 16 * 1024;
+
+#[derive(Default)]
+struct SnippetExpansion {
+    text: String,
+    tab_stops: std::collections::BTreeMap<u32, (usize, usize)>,
+}
+
+struct SnippetParser {
+    source: Vec<char>,
+    cursor: usize,
+    expansion: SnippetExpansion,
+}
+
+impl SnippetParser {
+    fn parse(source: &str) -> Option<SnippetExpansion> {
+        if source.chars().count() > MAX_COMPLETION_SNIPPET_CHARS {
+            return None;
+        }
+        let mut parser = Self {
+            source: source.chars().collect(),
+            cursor: 0,
+            expansion: SnippetExpansion::default(),
+        };
+        parser.sequence(false)?;
+        (parser.cursor == parser.source.len()).then_some(parser.expansion)
+    }
+
+    fn sequence(&mut self, nested: bool) -> Option<()> {
+        while let Some(character) = self.source.get(self.cursor).copied() {
+            match character {
+                '}' if nested => {
+                    self.cursor += 1;
+                    return Some(());
+                }
+                '\\' => {
+                    self.cursor += 1;
+                    let escaped = self.source.get(self.cursor).copied()?;
+                    if !matches!(escaped, '$' | '}' | '\\' | ',' | '|') {
+                        return None;
+                    }
+                    self.expansion.text.push(escaped);
+                    self.cursor += 1;
+                }
+                '$' => self.placeholder()?,
+                _ => {
+                    self.expansion.text.push(character);
+                    self.cursor += 1;
+                }
+            }
+        }
+        (!nested).then_some(())
+    }
+
+    fn placeholder(&mut self) -> Option<()> {
+        self.cursor += 1;
+        if self.source.get(self.cursor) == Some(&'{') {
+            self.cursor += 1;
+            return self.braced_placeholder();
+        }
+        if self.source.get(self.cursor).is_some_and(char::is_ascii_digit) {
+            let index = self.number()?;
+            let position = self.expansion.text.chars().count();
+            self.record_stop(index, position, position);
+            return Some(());
+        }
+        if self
+            .source
+            .get(self.cursor)
+            .is_some_and(|character| character.is_ascii_alphabetic() || *character == '_')
+        {
+            while self.source.get(self.cursor).is_some_and(|character| {
+                character.is_ascii_alphanumeric() || *character == '_'
+            }) {
+                self.cursor += 1;
+            }
+            return Some(());
+        }
+        self.expansion.text.push('$');
+        Some(())
+    }
+
+    fn braced_placeholder(&mut self) -> Option<()> {
+        let start = self.cursor;
+        while self.source.get(self.cursor).is_some_and(|character| {
+            character.is_ascii_alphanumeric() || *character == '_'
+        }) {
+            self.cursor += 1;
+        }
+        if start == self.cursor {
+            return None;
+        }
+        let token: String = self.source[start..self.cursor].iter().collect();
+        let numeric = token.parse::<u32>().ok();
+        let marker = *self.source.get(self.cursor)?;
+        match marker {
+            '}' => {
+                self.cursor += 1;
+                if let Some(index) = numeric {
+                    let position = self.expansion.text.chars().count();
+                    self.record_stop(index, position, position);
+                }
+                Some(())
+            }
+            ':' => {
+                self.cursor += 1;
+                let start = self.expansion.text.chars().count();
+                self.sequence(true)?;
+                let end = self.expansion.text.chars().count();
+                if let Some(index) = numeric {
+                    self.record_stop(index, start, end);
+                }
+                Some(())
+            }
+            '|' if numeric.is_some() => {
+                self.cursor += 1;
+                let start = self.expansion.text.chars().count();
+                self.choice_list()?;
+                let end = self.expansion.text.chars().count();
+                self.record_stop(numeric?, start, end);
+                Some(())
+            }
+            _ => None,
+        }
+    }
+
+    fn choice_list(&mut self) -> Option<()> {
+        let mut first_choice = true;
+        let mut found_end = false;
+        while let Some(character) = self.source.get(self.cursor).copied() {
+            if character == '|' && self.source.get(self.cursor + 1) == Some(&'}') {
+                self.cursor += 2;
+                found_end = true;
+                break;
+            }
+            if character == '\\' {
+                self.cursor += 1;
+                let escaped = self.source.get(self.cursor).copied()?;
+                if !matches!(escaped, '$' | '}' | '\\' | ',' | '|') {
+                    return None;
+                }
+                if first_choice {
+                    self.expansion.text.push(escaped);
+                }
+                self.cursor += 1;
+            } else if character == ',' {
+                first_choice = false;
+                self.cursor += 1;
+            } else {
+                if matches!(character, '$' | '}') {
+                    return None;
+                }
+                if first_choice {
+                    self.expansion.text.push(character);
+                }
+                self.cursor += 1;
+            }
+        }
+        found_end.then_some(())
+    }
+
+    fn number(&mut self) -> Option<u32> {
+        let start = self.cursor;
+        while self
+            .source
+            .get(self.cursor)
+            .is_some_and(char::is_ascii_digit)
+        {
+            self.cursor += 1;
+        }
+        self.source[start..self.cursor].iter().collect::<String>().parse().ok()
+    }
+
+    fn record_stop(&mut self, index: u32, start: usize, end: usize) {
+        self.expansion.tab_stops.entry(index).or_insert((start, end));
+    }
 }
 #[derive(Clone, Debug)]
 pub struct SignatureInformation {
@@ -1024,7 +1204,7 @@ async fn protocol(
                 "textDocument": {"synchronization": {"didSave": true}, "publishDiagnostics": {"versionSupport": true},
                 "documentSymbol": {"hierarchicalDocumentSymbolSupport": true},
                 "codeAction": {"codeActionLiteralSupport": {"codeActionKind": {"valueSet": ["quickfix", "refactor", "source"]}}},
-                "completion": {"completionItem": {"snippetSupport": false, "resolveSupport": {"properties": []}}},
+                "completion": {"completionItem": {"snippetSupport": true, "resolveSupport": {"properties": []}}},
                 "signatureHelp": {"signatureInformation": {"documentationFormat": ["plaintext"]}},
                 "hover": {"contentFormat": ["plaintext"]}, "definition": {"linkSupport": true},
                 "implementation": {"linkSupport": true},
@@ -1371,6 +1551,28 @@ async fn deliver_response(request: Pending, result: &Value, events: &LanguageEve
                         .or_else(|| item["insertText"].as_str())
                         .unwrap_or(&label)
                         .to_owned();
+                    let is_snippet = item["insertTextFormat"].as_u64() == Some(2);
+                    let expansion = is_snippet.then(|| SnippetParser::parse(&insert_text)).flatten();
+                    let snippet_supported = !is_snippet || expansion.is_some();
+                    let (insert_text, snippet_selection, snippet_final_cursor) = if is_snippet {
+                        match expansion {
+                            Some(expansion) => {
+                        let first_tab_stop = expansion
+                            .tab_stops
+                            .iter()
+                                    .find(|(index, _)| **index > 0)
+                                    .map(|(_, range)| *range);
+                        let final_cursor = expansion
+                            .tab_stops
+                            .get(&0)
+                            .map(|(start, _)| *start);
+                                (expansion.text, first_tab_stop, final_cursor)
+                            }
+                            None => (String::new(), None, None),
+                        }
+                    } else {
+                        (insert_text, None, None)
+                    };
                     let raw_additional = item["additionalTextEdits"].as_array();
                     let additional_edits: Vec<_> = raw_additional
                         .into_iter()
@@ -1391,8 +1593,10 @@ async fn deliver_response(request: Pending, result: &Value, events: &LanguageEve
                         insert_text,
                         range,
                         additional_edits,
+                        snippet_selection,
+                        snippet_final_cursor,
                         applicable: valid_edits
-                            && item["insertTextFormat"].as_u64() != Some(2)
+                            && snippet_supported
                             && item.get("command").is_none_or(Value::is_null),
                     })
                 })
@@ -2707,7 +2911,7 @@ impl LanguageTool {
         &mut self,
         index: usize,
         document: &mut Document,
-    ) -> Result<(), LspError> {
+    ) -> Result<Option<(usize, usize)>, LspError> {
         let (path, version, position, items) = self
             .completion
             .as_ref()
@@ -2724,6 +2928,7 @@ impl LanguageTool {
         }
         let item = items
             .get(index)
+            .cloned()
             .ok_or_else(|| LspError("Completion no longer exists".into()))?;
         if !item.applicable {
             return Err(LspError(
@@ -2736,9 +2941,18 @@ impl LanguageTool {
         let mut edits = item.additional_edits.clone();
         edits.push((range, item.insert_text.clone()));
         document.apply_lsp_edits(&edits).map_err(LspError)?;
+        let selection = if item.snippet_selection.is_some() || item.snippet_final_cursor.is_some() {
+            let insertion_end = document.character_index();
+            let insertion_start = insertion_end.saturating_sub(item.insert_text.chars().count());
+            item.snippet_selection
+                .or_else(|| item.snippet_final_cursor.map(|cursor| (cursor, cursor)))
+                .map(|(start, end)| (insertion_start + start, insertion_start + end))
+        } else {
+            None
+        };
         self.completion = None;
         self.completion_selection = None;
-        Ok(())
+        Ok(selection)
     }
 
     pub fn apply_code_action(&mut self, index: usize, document: &mut Document) -> Result<String, LspError> {

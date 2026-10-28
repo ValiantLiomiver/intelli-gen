@@ -900,7 +900,8 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                     .and_then(|index| state.editor_tabs.get_mut(index))
                 {
                     match state.language.apply_completion(index, &mut tab.document) {
-                        Ok(()) => tab.restore_document_cursor(),
+                        Ok(Some((start, end))) => tab.select_char_range(start, end),
+                        Ok(None) => tab.restore_document_cursor(),
                         Err(error) => state.language.summary = error.to_string(),
                     }
                 }
