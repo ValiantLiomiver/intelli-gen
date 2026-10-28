@@ -648,8 +648,18 @@ async fn read_messages(
                     LspError(error.to_string())
                 }
             })?;
-            serde_json::from_slice(&body)
-                .map_err(|error| LspError(format!("Invalid LSP JSON: {error}")))
+            serde_json::from_slice(&body).map_err(|error| {
+                if error.is_eof() {
+                    LspError(format!(
+                        "JDT LS sent an incomplete JSON message ({} bytes; line {}, column {})",
+                        body.len(),
+                        error.line(),
+                        error.column()
+                    ))
+                } else {
+                    LspError(format!("Invalid LSP JSON: {error}"))
+                }
+            })
         }
         .await;
         let failed = next.is_err();
@@ -2775,8 +2785,22 @@ pub fn render(ui: &mut eframe::egui::Ui, state: &mut crate::app::AppState) {
             }
         }
     });
-    ui.small(&state.language.summary);
     let mut events = Vec::new();
+    ui.small(&state.language.summary);
+    if state
+        .language
+        .summary
+        .starts_with("Java intelligence unavailable:")
+        && !state.language.has_workers()
+        && !state.language.has_pending_start()
+        && !state.pending_language_restart
+        && ui
+            .small_button("Retry Java intelligence")
+            .on_hover_text("Restart JDT LS and retry the connection")
+            .clicked()
+    {
+        events.push(AppEvent::RestartLanguage);
+    }
     if let Some(warning) = &state.language.lombok_warning {
         ui.colored_label(ui.visuals().warn_fg_color, warning);
         if ui.small_button("Restart Java intelligence after resolving Lombok").clicked() {
