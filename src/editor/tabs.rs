@@ -708,6 +708,9 @@ impl EditorTab {
             });
         if snippet_changed && let Some(previous_length) = snippet_length_before_edit {
             self.adjust_snippet_tab_stops(previous_length);
+            if self.sync_active_snippet_mirrors() {
+                ui.ctx().request_repaint();
+            }
         }
         if let Some(active) = self.active_snippet_tab_stop
             && let Some((_, ranges)) = self.snippet_tab_stops.get(active)
@@ -743,11 +746,11 @@ impl EditorTab {
         }
     }
 
-    fn sync_active_snippet_mirrors(&mut self) {
-        let Some(active_group) = self.active_snippet_tab_stop else { return; };
-        let Some((active_index, active_ranges)) = self.snippet_tab_stops.get(active_group) else { return; };
-        if *active_index == 0 { return; }
-        let Some((active_start, active_end)) = active_ranges.first().copied() else { return; };
+    fn sync_active_snippet_mirrors(&mut self) -> bool {
+        let Some(active_group) = self.active_snippet_tab_stop else { return false; };
+        let Some((active_index, active_ranges)) = self.snippet_tab_stops.get(active_group) else { return false; };
+        if *active_index == 0 { return false; }
+        let Some((active_start, active_end)) = active_ranges.first().copied() else { return false; };
         let replacement: String = self.document.text.chars()
             .skip(active_start)
             .take(active_end.saturating_sub(active_start))
@@ -755,6 +758,7 @@ impl EditorTab {
         let mut mirrors: Vec<_> = active_ranges.iter().copied().enumerate().skip(1).collect();
         mirrors.sort_by_key(|(_, (start, _))| std::cmp::Reverse(*start));
         let mut cursor_shift = 0isize;
+        let mut changed = false;
         for (range_index, (start, end)) in mirrors {
             let existing: String = self.document.text.chars().skip(start).take(end.saturating_sub(start)).collect();
             if existing == replacement { continue; }
@@ -777,12 +781,14 @@ impl EditorTab {
                     }
                 }
             }
-            self.document.mark_changed();
+            changed = true;
         }
         if cursor_shift != 0 {
             let cursor = (self.document.character_index() as isize + cursor_shift).max(0) as usize;
             self.document.set_cursor(cursor);
         }
+        if changed { self.document.mark_changed(); }
+        changed
     }
 
     /// Edit a bounded page while retaining the complete document in Document::text.
