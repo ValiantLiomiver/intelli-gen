@@ -700,6 +700,13 @@ impl EditorTab {
         if snippet_changed && let Some(previous_length) = snippet_length_before_edit {
             self.adjust_snippet_tab_stops(previous_length);
         }
+        if let Some(active) = self.active_snippet_tab_stop
+            && let Some((start, end)) = self.snippet_tab_stops.get(active)
+            && !(*start..=*end).contains(&self.document.character_index())
+        {
+            self.active_snippet_tab_stop = None;
+            self.snippet_tab_stops.clear();
+        }
         toggled
     }
 
