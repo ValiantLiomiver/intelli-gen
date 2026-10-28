@@ -64,13 +64,15 @@ impl ProjectTree {
         })
     }
 
-    pub fn refresh(&mut self, path: &Path) -> Result<(), ProjectError> {
-        if path == self.root {
-            self.entries = read_visible_entries(&self.root, &self.root)?;
-        } else {
-            invalidate(&mut self.entries, path);
+    pub fn begin_refresh(&mut self, path: &Path) -> Option<u64> {
+        let entry = find_entry_mut(&mut self.entries, path)?;
+        if !entry.directory || entry.symlink {
+            return None;
         }
-        Ok(())
+        let request = NEXT_TREE_REQUEST.fetch_add(1, Ordering::Relaxed);
+        entry.loading_request = Some(request);
+        entry.error = None;
+        Some(request)
     }
 
     pub fn read_children(workspace: &Path, path: &Path, request: u64) -> Result<ProjectTreeChildren, String> {
@@ -278,20 +280,6 @@ fn compact_package(workspace: &Path, entry: &mut TreeEntry) {
                 entry.error = Some(error.to_string());
                 return;
             }
-        }
-    }
-}
-
-fn invalidate(entries: &mut [TreeEntry], path: &Path) {
-    for entry in entries {
-        if entry.path == path && entry.directory {
-            entry.children = None;
-            entry.loading_request = None;
-            entry.error = None;
-            return;
-        }
-        if let Some(children) = &mut entry.children {
-            invalidate(children, path);
         }
     }
 }

@@ -415,22 +415,31 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                 save_settings(state);
             }
             AppEvent::RefreshProjectTree(path) => {
-                let Some(project) = &state.project else {
+                let Some(root) = state.project.as_ref().map(|project| project.root.clone()) else {
                     continue;
                 };
-                if path == project.root {
+                if path == root {
                     state.project_tree_generation = state.project_tree_generation.wrapping_add(1);
                     state.project_tree_loading = true;
                     if let Err(error) = state
                         .project_tree_loader
-                        .start(path, state.project_tree_generation)
+                        .start(root, state.project_tree_generation)
                     {
                         state.project_tree_loading = false;
                         state.project_tree_error = Some(error);
                     }
-                } else if let Some(tree) = &mut state.project_tree {
-                    if let Err(error) = tree.refresh(&path) {
-                        state.project_tree_error = Some(error.to_string());
+                } else if let Some(request) = state
+                    .project_tree
+                    .as_mut()
+                    .and_then(|tree| tree.begin_refresh(&path))
+                {
+                    if let Err(error) = state.project_tree_loader.start_children(
+                        root,
+                        path.clone(),
+                        request,
+                    ) && let Some(tree) = &mut state.project_tree
+                    {
+                        tree.apply_children(&path, request, Err(error));
                     }
                 }
             }
