@@ -48,7 +48,7 @@ The command-line link accepts the same optional project or file path: `dist/inte
 | Go to definition / find references | `F12` / `Shift+F12` |
 | Rename Java symbol | `Shift+F6` |
 | Toggle Java line comment | `⌘/` |
-| Indent / outdent selected Java lines | `Tab` / `⇧Tab` |
+| Indent Java code / selected lines | `Tab` / `⇧Tab` |
 | Java quick fixes | `⌥↩` |
 | Go to type definition | `⇧⌘B` |
 | Go to implementation | `⌥⌘B` |

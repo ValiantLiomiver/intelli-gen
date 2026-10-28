@@ -433,14 +433,35 @@ impl EditorTab {
         if context.memory(|memory| memory.focused()) != Some(editor_id) { return false; }
         let Some(mut state) = egui::text_edit::TextEditState::load(context, editor_id) else { return false; };
         let Some(range) = state.cursor.char_range() else { return false; };
-        if range.primary == range.secondary { return false; }
         let base = if paged { self.document.text[..self.page_start].chars().count() } else { 0 };
         let primary_local: usize = range.primary.index.into();
         let secondary_local: usize = range.secondary.index.into();
-        let primary = base + primary_local;
-        let secondary = base + secondary_local;
-        let Some((primary, secondary)) = indent_java_lines(&mut self.document.text, primary, secondary, outdent) else {
-            return false;
+        let (primary, secondary) = if primary_local != secondary_local {
+            let primary = base + primary_local;
+            let secondary = base + secondary_local;
+            let Some(mapped) = indent_java_lines(&mut self.document.text, primary, secondary, outdent) else {
+                return false;
+            };
+            mapped
+        } else {
+            let caret = base + primary_local;
+            let caret_byte = byte_index(&self.document.text, caret);
+            let new_caret = if outdent {
+                let line_start = self.document.text[..caret_byte].rfind('\n').map_or(0, |newline| newline + 1);
+                let remove = if self.document.text[line_start..].starts_with('\t') {
+                    1
+                } else if self.document.text[line_start..].starts_with("    ") {
+                    4
+                } else {
+                    return false;
+                };
+                self.document.text.replace_range(line_start..line_start + remove, "");
+                if caret_byte >= line_start + remove { caret - remove } else { line_start }
+            } else {
+                self.document.text.insert_str(caret_byte, "    ");
+                caret + 4
+            };
+            (new_caret, new_caret)
         };
         self.document.mark_changed();
         if paged {
