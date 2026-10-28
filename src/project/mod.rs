@@ -7,6 +7,7 @@ pub mod maven;
 pub mod maven_view;
 pub mod maven_watch;
 pub mod tree;
+pub mod tree_watch;
 pub mod workspace;
 
 use std::fmt;

@@ -338,8 +338,9 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                 state.maven_cache_loader.cancel();
                 state.gradle_task_loader.cancel();
                 retire_maven_watcher(state);
+                retire_project_tree_watcher(state);
+                state.project_tree_watch_generation = state.project_tree_watch_generation.wrapping_add(1);
                 state.maven_project_generation = state.maven_project_generation.wrapping_add(1);
-                state.project_tree_generation = state.project_tree_generation.wrapping_add(1);
                 state.project_tree_loading = false;
                 state.project = Some(project);
                 if let Some(path) = startup_file {
@@ -411,6 +412,14 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                         state.project_tree_error = Some(error);
                     }
                 }
+                if let Some(project) = &state.project {
+                    match crate::project::tree_watch::ProjectTreeWatcher::start(
+                        project.root.clone(), state.project_tree_watch_generation,
+                    ) {
+                        Ok(watcher) => state.project_tree_watcher = Some(watcher),
+                        Err(error) => state.project_tree_error = Some(error),
+                    }
+                }
                 state.settings.remember_project(root);
                 save_settings(state);
             }
@@ -419,14 +428,16 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                     continue;
                 };
                 if path == root {
-                    state.project_tree_generation = state.project_tree_generation.wrapping_add(1);
-                    state.project_tree_loading = true;
-                    if let Err(error) = state
-                        .project_tree_loader
-                        .start(root, state.project_tree_generation)
-                    {
-                        state.project_tree_loading = false;
-                        state.project_tree_error = Some(error);
+                    let request = state.project_tree.as_mut().and_then(|tree| tree.begin_refresh(&root));
+                    if let Some(request) = request {
+                        state.project_tree_loading = true;
+                        if let Err(error) = state.project_tree_loader.start_children(root.clone(), root.clone(), request) {
+                            state.project_tree_loading = false;
+                            if let Some(tree) = &mut state.project_tree {
+                                tree.apply_children(&root, request, Err(error.clone()));
+                            }
+                            state.project_tree_error = Some(error);
+                        }
                     }
                 } else if let Some(request) = state
                     .project_tree
@@ -443,22 +454,30 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                     }
                 }
             }
-            AppEvent::ProjectTreeRefreshed(event) => {
-                if event.generation != state.project_tree_generation
-                    || state
-                        .project
-                        .as_ref()
-                        .is_none_or(|project| project.root != event.root)
-                {
+            AppEvent::ProjectTreeChanged(event) => {
+                if event.generation != state.project_tree_watch_generation
+                    || state.project.as_ref().is_none_or(|project| project.root != event.root)
+                { continue; }
+                if let Some(error) = event.error {
+                    state.project_tree_error = Some(error);
                     continue;
                 }
-                state.project_tree_loading = false;
-                match event.result {
-                    Ok(tree) => {
-                        state.project_tree = Some(tree);
-                        state.project_tree_error = None;
+                let Some(tree) = state.project_tree.as_mut() else { continue; };
+                let targets = if event.rescan || event.paths.is_empty() {
+                    tree.begin_refresh_all_expanded()
+                } else {
+                    tree.begin_watched_refreshes(&event.paths)
+                };
+                if targets.iter().any(|(parent, _)| parent == &event.root) {
+                    state.project_tree_loading = true;
+                }
+                for (parent, request) in targets {
+                    if let Err(error) = state.project_tree_loader.start_children(event.root.clone(), parent.clone(), request)
+                        && let Some(tree) = &mut state.project_tree
+                    {
+                        tree.apply_children(&parent, request, Err(error));
+                        if parent == event.root { state.project_tree_loading = false; }
                     }
-                    Err(error) => state.project_tree_error = Some(error),
                 }
             }
             AppEvent::LoadProjectTreeChildren { path, request } => {
@@ -491,6 +510,10 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                     .as_ref()
                     .is_some_and(|project| project.root == event.root)
                 {
+                    if event.parent == event.root {
+                        state.project_tree_loading = false;
+                        state.project_tree_error = event.result.as_ref().err().cloned();
+                    }
                     if let Some(tree) = &mut state.project_tree {
                         tree.apply_children(&event.parent, event.request, event.result);
                     }
@@ -1603,6 +1626,13 @@ fn retire_maven_watcher(state: &mut AppState) {
     if let Some(mut watcher) = state.maven_pom_watcher.take() {
         watcher.request_cancel();
         state.retiring_maven_watchers.push(watcher);
+    }
+}
+
+fn retire_project_tree_watcher(state: &mut AppState) {
+    if let Some(mut watcher) = state.project_tree_watcher.take() {
+        watcher.request_cancel();
+        state.retiring_project_tree_watchers.push(watcher);
     }
 }
 

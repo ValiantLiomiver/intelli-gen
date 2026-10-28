@@ -15,9 +15,9 @@ pub enum AppEvent {
         kind: crate::project::ProjectKind,
     },
     ProjectOpenCompleted(crate::project::workspace::ProjectOpenEvent),
-    ProjectTreeRefreshed(crate::project::workspace::ProjectTreeEvent),
     ProjectTreeChildrenLoaded(crate::project::workspace::ProjectTreeChildrenEvent),
     ProjectTreeRootValidated(crate::project::workspace::ProjectTreeRootValidationEvent),
+    ProjectTreeChanged(crate::project::tree_watch::ProjectTreeWatchEvent),
     ValidateProjectTreeRoot {
         request: u64,
     },

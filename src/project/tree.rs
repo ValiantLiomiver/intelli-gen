@@ -15,6 +15,7 @@ pub struct ProjectTree {
     pub root: PathBuf,
     entries: Vec<TreeEntry>,
     root_error: Option<String>,
+    root_loading_request: Option<u64>,
     root_validation_request: Option<u64>,
     next_root_validation: Instant,
 }
@@ -59,12 +60,19 @@ impl ProjectTree {
             entries: read_visible_entries(&root, &root)?,
             root,
             root_error: None,
+            root_loading_request: None,
             root_validation_request: None,
             next_root_validation: Instant::now() + Duration::from_secs(1),
         })
     }
 
     pub fn begin_refresh(&mut self, path: &Path) -> Option<u64> {
+        if path == self.root {
+            let request = NEXT_TREE_REQUEST.fetch_add(1, Ordering::Relaxed);
+            self.root_loading_request = Some(request);
+            self.root_error = None;
+            return Some(request);
+        }
         let entry = find_entry_mut(&mut self.entries, path)?;
         if !entry.directory || entry.symlink {
             return None;
@@ -104,6 +112,19 @@ impl ProjectTree {
         request: u64,
         result: Result<ProjectTreeChildren, String>,
     ) {
+        if parent == self.root {
+            if self.root_loading_request != Some(request) { return; }
+            self.root_loading_request = None;
+            match result {
+                Ok(children) if children.parent == parent && children.request == request => {
+                    self.root_error = None;
+                    self.entries = merge_entries(std::mem::take(&mut self.entries), children.entries);
+                }
+                Ok(_) => self.root_error = Some("Project-tree response did not match its request".into()),
+                Err(error) => self.root_error = Some(error),
+            }
+            return;
+        }
         let Some(entry) = find_entry_mut(&mut self.entries, parent) else { return; };
         if entry.loading_request != Some(request) { return; }
         entry.loading_request = None;
@@ -115,6 +136,42 @@ impl ProjectTree {
             Ok(_) => entry.error = Some("Project-tree response did not match its request".into()),
             Err(error) => entry.error = Some(error),
         }
+    }
+
+    /// Select root or already-expanded directory listings affected by watcher paths.
+    pub fn begin_watched_refreshes(&mut self, paths: &[PathBuf]) -> Vec<(PathBuf, u64)> {
+        let mut targets = Vec::new();
+        for changed in paths {
+            let parent = changed.parent().unwrap_or(&self.root);
+            let mut candidate = parent;
+            let mut found = None;
+            while candidate.starts_with(&self.root) {
+                if candidate == self.root {
+                    found = Some(self.root.clone());
+                    break;
+                }
+                if find_entry(&self.entries, candidate).is_some_and(|entry| entry.children.is_some()) {
+                    found = Some(candidate.to_path_buf());
+                    break;
+                }
+                let Some(next) = candidate.parent() else { break; };
+                candidate = next;
+            }
+            if let Some(path) = found && !targets.iter().any(|(target, _)| target == &path) {
+                if let Some(request) = self.begin_refresh(&path) {
+                    targets.push((path, request));
+                }
+            }
+        }
+        targets
+    }
+
+    pub fn begin_refresh_all_expanded(&mut self) -> Vec<(PathBuf, u64)> {
+        let mut paths = vec![self.root.clone()];
+        collect_expanded_paths(&self.entries, &mut paths);
+        paths.into_iter().filter_map(|path| {
+            self.begin_refresh(&path).map(|request| (path, request))
+        }).collect()
     }
 
     pub fn render(&mut self, ui: &mut egui::Ui) -> Vec<TreeAction> {
@@ -292,6 +349,40 @@ fn find_entry_mut<'a>(entries: &'a mut [TreeEntry], path: &Path) -> Option<&'a m
         }
     }
     None
+}
+
+fn find_entry<'a>(entries: &'a [TreeEntry], path: &Path) -> Option<&'a TreeEntry> {
+    for entry in entries {
+        if entry.path == path { return Some(entry); }
+        if let Some(found) = entry.children.as_deref().and_then(|children| find_entry(children, path)) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+fn merge_entries(previous: Vec<TreeEntry>, mut refreshed: Vec<TreeEntry>) -> Vec<TreeEntry> {
+    for entry in &mut refreshed {
+        if let Some(old) = previous.iter().find(|old| {
+            old.path == entry.path && old.directory && entry.directory && !old.symlink && !entry.symlink
+        }) {
+            entry.children = old.children.clone();
+            entry.loading_request = old.loading_request;
+            entry.error = old.error.clone();
+        }
+    }
+    refreshed
+}
+
+fn collect_expanded_paths(entries: &[TreeEntry], paths: &mut Vec<PathBuf>) {
+    for entry in entries {
+        if entry.directory && !entry.symlink && entry.children.is_some() {
+            paths.push(entry.path.clone());
+            if let Some(children) = &entry.children {
+                collect_expanded_paths(children, paths);
+            }
+        }
+    }
 }
 
 fn context_menu(ui: &mut egui::Ui, path: &Path, directory: bool, symlink: bool, actions: &mut Vec<TreeAction>) {

@@ -62,7 +62,6 @@ pub struct AppState {
     pub project_open_generation: u64,
     pub project_opening: bool,
     pub project_tree_loader: crate::project::workspace::ProjectTreeLoader,
-    pub project_tree_generation: u64,
     pub project_tree_loading: bool,
     pub search: crate::search::ProjectSearch,
     pub terminal: crate::terminal::TerminalTool,
@@ -72,6 +71,9 @@ pub struct AppState {
     pub maven_cache_loader: MavenCacheLoader,
     pub maven_pom_watcher: Option<crate::project::maven_watch::MavenPomWatcher>,
     pub retiring_maven_watchers: Vec<crate::project::maven_watch::MavenPomWatcher>,
+    pub project_tree_watcher: Option<crate::project::tree_watch::ProjectTreeWatcher>,
+    pub retiring_project_tree_watchers: Vec<crate::project::tree_watch::ProjectTreeWatcher>,
+    pub project_tree_watch_generation: u64,
     pub maven_project_generation: u64,
     pub maven_view: Option<MavenView>,
     pub maven_view_root: Option<PathBuf>,
@@ -225,7 +227,6 @@ impl IdeaLikeApp {
             project_open_generation: 0,
             project_opening: false,
             project_tree_loader: crate::project::workspace::ProjectTreeLoader::default(),
-            project_tree_generation: 0,
             project_tree_loading: false,
             search: crate::search::ProjectSearch::new(cc.egui_ctx.clone()),
             terminal: crate::terminal::TerminalTool::default(),
@@ -235,6 +236,9 @@ impl IdeaLikeApp {
             maven_cache_loader: MavenCacheLoader::default(),
             maven_pom_watcher: None,
             retiring_maven_watchers: Vec::new(),
+            project_tree_watcher: None,
+            retiring_project_tree_watchers: Vec::new(),
+            project_tree_watch_generation: 0,
             maven_project_generation: 0,
             maven_view: None,
             maven_view_root: None,
@@ -340,6 +344,8 @@ impl eframe::App for IdeaLikeApp {
                     .as_ref()
                     .is_some_and(crate::project::maven_watch::MavenPomWatcher::has_worker)
                 || !self.state.retiring_maven_watchers.is_empty()
+                || self.state.project_tree_watcher.as_ref().is_some_and(crate::project::tree_watch::ProjectTreeWatcher::has_worker)
+                || !self.state.retiring_project_tree_watchers.is_empty()
                 || self.state.language.has_workers()
                 || self.state.run.has_workers()
                 || self.state.debugger.has_workers()
@@ -377,9 +383,6 @@ impl eframe::App for IdeaLikeApp {
         }
         for event in self.state.project_tree_loader.poll() {
             match event {
-                crate::project::workspace::ProjectTreeLoadEvent::Refreshed(event) => {
-                    self.state.enqueue(AppEvent::ProjectTreeRefreshed(event));
-                }
                 crate::project::workspace::ProjectTreeLoadEvent::ChildrenLoaded(event) => {
                     self.state
                         .enqueue(AppEvent::ProjectTreeChildrenLoaded(event));
@@ -421,9 +424,13 @@ impl eframe::App for IdeaLikeApp {
         for event in pom_events {
             self.state.enqueue(AppEvent::MavenPomsChanged(event));
         }
+        let tree_events = self.state.project_tree_watcher.as_mut()
+            .map(crate::project::tree_watch::ProjectTreeWatcher::poll).unwrap_or_default();
+        for event in tree_events { self.state.enqueue(AppEvent::ProjectTreeChanged(event)); }
         self.state
             .retiring_maven_watchers
             .retain_mut(|watcher| !watcher.reap());
+        self.state.retiring_project_tree_watchers.retain_mut(|watcher| !watcher.reap());
         self.state.run.poll();
         self.state.debugger.poll();
         if let Some((source, line)) = self.state.debugger.inspector.navigation.take() {
@@ -465,6 +472,8 @@ impl eframe::App for IdeaLikeApp {
                 .as_ref()
                 .is_some_and(crate::project::maven_watch::MavenPomWatcher::has_worker)
             || !self.state.retiring_maven_watchers.is_empty()
+            || self.state.project_tree_watcher.as_ref().is_some_and(crate::project::tree_watch::ProjectTreeWatcher::has_worker)
+            || !self.state.retiring_project_tree_watchers.is_empty()
             || self.state.language.has_workers()
             || self.state.language.has_pending_start()
             || self.state.run.has_workers()
@@ -501,9 +510,11 @@ impl eframe::App for IdeaLikeApp {
             if let Some(watcher) = &mut self.state.maven_pom_watcher {
                 watcher.request_cancel();
             }
+            if let Some(watcher) = &mut self.state.project_tree_watcher { watcher.request_cancel(); }
             for watcher in &mut self.state.retiring_maven_watchers {
                 watcher.request_cancel();
             }
+            for watcher in &mut self.state.retiring_project_tree_watchers { watcher.request_cancel(); }
             self.state.run.cancel();
             self.state.debugger.cancel();
             // Keep the JDT-owned adapter alive until disconnect/terminateDebuggee
@@ -530,6 +541,8 @@ impl eframe::App for IdeaLikeApp {
                     .as_ref()
                     .is_some_and(crate::project::maven_watch::MavenPomWatcher::has_worker)
                 || !self.state.retiring_maven_watchers.is_empty()
+                || self.state.project_tree_watcher.as_ref().is_some_and(crate::project::tree_watch::ProjectTreeWatcher::has_worker)
+                || !self.state.retiring_project_tree_watchers.is_empty()
                 || self.state.language.has_workers()
                 || self.state.run.has_workers()
                 || self.state.debugger.has_workers()
