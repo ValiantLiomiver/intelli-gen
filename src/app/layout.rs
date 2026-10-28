@@ -208,14 +208,21 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
                 state.enqueue(AppEvent::Build(super::events::BuildAction::Build));
             }
             crate::java::run_config::configuration_selector(ui, &mut state.run);
-            if ui.add_enabled(state.run.selected().is_some() && !state.run.has_workers(), egui::Button::new("Run")).clicked() {
+            if ui.add_enabled(build_available && state.run.selected().is_some() && !state.run.has_workers(), egui::Button::new("Run"))
+                .on_disabled_hover_text("Open a Maven or Gradle project and select a run configuration")
+                .clicked() {
                 state.enqueue(AppEvent::Run(super::events::RunAction::Start));
             }
             if ui.button("Configurations…").clicked() { state.enqueue(AppEvent::ShowPanel(ActivePanel::Run)); }
-            let debug_enabled = state.run.selected().is_some() && !state.debugger.has_workers()
+            let debug_enabled = build_available && state.run.selected().is_some() && !state.debugger.has_workers()
                 && state.language.tooling.debug_bundle.is_some() && !state.pending_language_restart;
+            let debug_hint = if !build_available {
+                "Open a Maven or Gradle project to debug"
+            } else {
+                "Install the bundled Java Debug Server or choose a valid plugin JAR override in Settings, and select a run configuration"
+            };
             if ui.add_enabled(debug_enabled, egui::Button::new("Debug"))
-                .on_disabled_hover_text("Install the bundled Java Debug Server or choose a valid plugin JAR override in Settings, and select a run configuration").clicked() {
+                .on_disabled_hover_text(debug_hint).clicked() {
                 state.enqueue(AppEvent::Debugger(super::events::DebuggerAction::Start));
             }
             if let Some(project) = &state.project {
