@@ -4,7 +4,7 @@ use std::ffi::OsString;
 use std::fmt;
 use std::path::{Component, Path, PathBuf};
 use std::process::{ExitStatus, Stdio};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use eframe::egui;
 use tokio::io::{AsyncRead, AsyncReadExt};
@@ -52,10 +52,48 @@ pub enum BuildEvent {
     Output { stderr: bool, text: String },
     Diagnostic(BuildDiagnostic),
     Tests(diagnostics::TestSummary),
+    TestFailures(Vec<TestFailure>),
     Finished {
         exit_code: Option<i32>, elapsed: Duration, cancelled: bool,
         jdk: String, error: Option<String>,
     },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TestFailure {
+    pub class_name: String,
+    pub test_name: String,
+    pub message: String,
+}
+
+#[derive(serde::Deserialize)]
+struct XmlTestReport {
+    #[serde(rename = "@name")]
+    name: Option<String>,
+    #[serde(rename = "testsuite", default)]
+    suites: Vec<XmlTestReport>,
+    #[serde(rename = "testcase", default)]
+    cases: Vec<XmlTestCase>,
+}
+
+#[derive(serde::Deserialize)]
+struct XmlTestCase {
+    #[serde(rename = "@classname")]
+    class_name: Option<String>,
+    #[serde(rename = "@name")]
+    name: Option<String>,
+    #[serde(rename = "failure", default)]
+    failures: Vec<XmlTestMessage>,
+    #[serde(rename = "error", default)]
+    errors: Vec<XmlTestMessage>,
+}
+
+#[derive(serde::Deserialize)]
+struct XmlTestMessage {
+    #[serde(rename = "@message")]
+    message: Option<String>,
+    #[serde(rename = "$text")]
+    text: Option<String>,
 }
 
 #[derive(Debug)]
@@ -251,6 +289,7 @@ fn validate_module(root: &Path, module: &Path) -> Result<(), String> {
 async fn run(program: PathBuf, args: Vec<OsString>, project: ProjectModel, jdk_installation: JdkInstallation,
     module: Option<PathBuf>, events: mpsc::Sender<BuildEvent>, mut cancellation: watch::Receiver<bool>) {
     let start = Instant::now();
+    let started_at = SystemTime::now();
     let jdk = format!("{} — {}", jdk_installation.label(), jdk_installation.home.display());
     let mut cancelled = false;
     let result: Result<ExitStatus, String> = async {
@@ -305,7 +344,112 @@ async fn run(program: PathBuf, args: Vec<OsString>, project: ProjectModel, jdk_i
         Ok(status) => (status.code(), None),
         Err(error) => (None, Some(error)),
     };
+    if !cancelled {
+        let failures = collect_test_failures(&project, started_at);
+        if !failures.is_empty() {
+            let _ = events.send(BuildEvent::TestFailures(failures)).await;
+        }
+    }
     let _ = events.send(BuildEvent::Finished { exit_code, elapsed: start.elapsed(), cancelled, jdk, error }).await;
+}
+
+const MAX_TEST_REPORT_FILES: usize = 256;
+const MAX_TEST_REPORT_BYTES: u64 = 1024 * 1024;
+const MAX_TEST_REPORT_TOTAL_BYTES: u64 = 16 * 1024 * 1024;
+const MAX_TEST_FAILURES: usize = 1000;
+
+fn collect_test_failures(project: &ProjectModel, started_at: SystemTime) -> Vec<TestFailure> {
+    let mut modules = vec![project.root.clone()];
+    modules.extend(project.modules.iter().map(|module| {
+        if module.root.is_absolute() { module.root.clone() } else { project.root.join(&module.root) }
+    }));
+    modules.sort();
+    modules.dedup();
+
+    let mut report_files = Vec::new();
+    for module in modules {
+        match project.kind {
+            ProjectKind::Maven => {
+                for directory in ["target/surefire-reports", "target/failsafe-reports"] {
+                    add_test_report_files(&module.join(directory), started_at, &mut report_files);
+                }
+            }
+            ProjectKind::Gradle => {
+                let results = module.join("build/test-results");
+                add_test_report_files(&results, started_at, &mut report_files);
+                if let Ok(entries) = std::fs::read_dir(&results) {
+                    for entry in entries.flatten() {
+                        if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                            add_test_report_files(&entry.path(), started_at, &mut report_files);
+                        }
+                    }
+                }
+            }
+            ProjectKind::Unknown => return Vec::new(),
+        }
+        if report_files.len() >= MAX_TEST_REPORT_FILES { break; }
+    }
+    report_files.sort();
+    report_files.dedup();
+
+    let mut total_bytes = 0u64;
+    let mut failures = Vec::new();
+    for path in report_files.into_iter().take(MAX_TEST_REPORT_FILES) {
+        let Ok(metadata) = std::fs::metadata(&path) else { continue; };
+        if metadata.len() > MAX_TEST_REPORT_BYTES
+            || total_bytes.saturating_add(metadata.len()) > MAX_TEST_REPORT_TOTAL_BYTES
+        {
+            continue;
+        }
+        total_bytes = total_bytes.saturating_add(metadata.len());
+        let Ok(xml) = std::fs::read_to_string(path) else { continue; };
+        let Ok(report) = quick_xml::de::from_str::<XmlTestReport>(&xml) else { continue; };
+        append_test_failures(&report, None, &mut failures);
+        if failures.len() >= MAX_TEST_FAILURES { break; }
+    }
+    failures.truncate(MAX_TEST_FAILURES);
+    failures
+}
+
+fn add_test_report_files(directory: &Path, started_at: SystemTime, output: &mut Vec<PathBuf>) {
+    if output.len() >= MAX_TEST_REPORT_FILES { return; }
+    let Ok(entries) = std::fs::read_dir(directory) else { return; };
+    for entry in entries.flatten() {
+        if output.len() >= MAX_TEST_REPORT_FILES { break; }
+        if !entry.file_type().is_ok_and(|kind| kind.is_file())
+            || entry.path().extension().is_none_or(|extension| extension != "xml")
+        {
+            continue;
+        }
+        let Ok(metadata) = entry.metadata() else { continue; };
+        if metadata.len() <= MAX_TEST_REPORT_BYTES
+            && metadata.modified().is_ok_and(|modified| modified >= started_at)
+        {
+            output.push(entry.path());
+        }
+    }
+}
+
+fn append_test_failures(report: &XmlTestReport, inherited_class: Option<&str>, output: &mut Vec<TestFailure>) {
+    for case in &report.cases {
+        let class_name = case.class_name.as_deref().or(report.name.as_deref()).or(inherited_class)
+            .unwrap_or("Unknown test class");
+        for (kind, messages) in [("Failure", &case.failures), ("Error", &case.errors)] {
+            for detail in messages {
+                let message = detail.message.as_deref().or(detail.text.as_deref()).unwrap_or(kind);
+                output.push(TestFailure {
+                    class_name: class_name.chars().take(256).collect(),
+                    test_name: case.name.as_deref().unwrap_or("Unknown test").chars().take(256).collect(),
+                    message: message.chars().take(1024).collect(),
+                });
+                if output.len() >= MAX_TEST_FAILURES { return; }
+            }
+        }
+    }
+    for suite in &report.suites {
+        append_test_failures(suite, report.name.as_deref().or(inherited_class), output);
+        if output.len() >= MAX_TEST_FAILURES { return; }
+    }
 }
 
 fn terminate_group(pid: Option<u32>) {
@@ -384,6 +528,7 @@ pub struct BuildTool {
     pub output: VecDeque<(bool, String)>,
     pub diagnostics: Vec<BuildDiagnostic>,
     pub test_summary: Option<diagnostics::TestSummary>,
+    pub test_failures: Vec<TestFailure>,
     pub summary: String,
     pub selected_jdk: String,
     started: Option<Instant>,
@@ -406,6 +551,7 @@ impl BuildTool {
         self.output.clear();
         self.diagnostics.clear();
         self.test_summary = None;
+        self.test_failures.clear();
         self.summary.clear();
         self.selected_jdk.clear();
         self.started = None;
@@ -446,6 +592,7 @@ impl BuildTool {
         self.output.clear();
         self.diagnostics.clear();
         self.test_summary = None;
+        self.test_failures.clear();
         self.summary = summary;
         self.selected_jdk = label;
         self.handle = Some(handle);
@@ -494,6 +641,12 @@ impl BuildTool {
                     total.passed = total.passed.saturating_add(summary.passed);
                     total.failed = total.failed.saturating_add(summary.failed);
                     total.skipped = total.skipped.saturating_add(summary.skipped);
+                }
+                BuildEvent::TestFailures(failures) => {
+                    for failure in failures {
+                        if self.test_failures.len() >= MAX_TEST_FAILURES { break; }
+                        self.test_failures.push(failure);
+                    }
                 }
                 BuildEvent::Finished { exit_code, elapsed, cancelled, jdk, error } => {
                     self.successful_completion = exit_code == Some(0) && !cancelled && error.is_none();
@@ -546,6 +699,26 @@ pub fn render(ui: &mut egui::Ui, state: &mut crate::app::AppState) {
                 summary.total, summary.passed, summary.failed, summary.skipped
             ),
         );
+    }
+    if !state.build.test_failures.is_empty() {
+        egui::CollapsingHeader::new(format!("Failed tests ({})", state.build.test_failures.len()))
+            .default_open(true)
+            .show(ui, |ui| {
+                egui::ScrollArea::vertical()
+                    .id_salt("build_test_failures")
+                    .max_height(120.0)
+                    .show(ui, |ui| {
+                        for failure in &state.build.test_failures {
+                            ui.colored_label(
+                                ui.visuals().error_fg_color,
+                                format!("{}.{}", failure.class_name, failure.test_name),
+                            );
+                            if !failure.message.is_empty() {
+                                ui.small(&failure.message);
+                            }
+                        }
+                    });
+            });
     }
     let mut navigation = None;
     if !state.build.diagnostics.is_empty() {
