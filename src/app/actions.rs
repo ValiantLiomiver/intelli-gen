@@ -71,6 +71,21 @@ pub fn keyboard_shortcuts(ctx: &egui::Context, state: &mut AppState) {
     if ctx.input_mut(|input| input.consume_key(egui::Modifiers::ALT, egui::Key::Enter)) {
         state.enqueue(AppEvent::EditorCommand(crate::java::lsp::EditorCommand::CodeActions));
     }
+    let comment_editor = state.active_tab.and_then(|index| state.editor_tabs.get(index))
+        .filter(|tab| tab.path.extension().is_some_and(|extension| extension == "java"))
+        .map(|tab| if tab.document.text.len() > crate::editor::document::PAGED_EDITOR_BYTES {
+            egui::Id::new(("paged_source_editor", &tab.path))
+        } else {
+            egui::Id::new(("source_editor", &tab.path))
+        });
+    if comment_editor.is_some_and(|id| ctx.memory(|memory| memory.focused() == Some(id)))
+        && ctx.input_mut(|input| {
+            input.consume_key(egui::Modifiers::COMMAND, egui::Key::Slash)
+                || input.consume_key(egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, egui::Key::Slash)
+        })
+    {
+        state.enqueue(AppEvent::ToggleJavaLineComment);
+    }
     let completion_editor = state
         .active_tab
         .and_then(|index| state.editor_tabs.get(index))
@@ -867,6 +882,11 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                         Ok(()) => tab.restore_document_cursor(),
                         Err(error) => state.language.summary = error.to_string(),
                     }
+                }
+            }
+            AppEvent::ToggleJavaLineComment => {
+                if let Some(tab) = state.active_tab.and_then(|index| state.editor_tabs.get_mut(index)) {
+                    tab.toggle_java_line_comment(context);
                 }
             }
             AppEvent::ApplyCodeAction(index) => {

@@ -12,6 +12,72 @@ fn byte_index(text: &str, character_index: usize) -> usize {
         .map_or(text.len(), |(byte, _)| byte)
 }
 
+fn toggle_line_comment(text: &mut String, start: usize, end: usize) -> Option<(usize, usize)> {
+    let char_count = text.chars().count();
+    let start_byte = byte_index(text, start.min(char_count));
+    let end_byte = byte_index(text, end.min(char_count));
+    let last_byte = if start_byte < end_byte && text[..end_byte].ends_with('\n') {
+        end_byte - 1
+    } else {
+        end_byte
+    };
+    let first_line = text[..start_byte].rfind('\n').map_or(0, |newline| newline + 1);
+    let last_line = text[..last_byte].rfind('\n').map_or(0, |newline| newline + 1);
+    let mut line_starts = Vec::new();
+    let mut line_start = first_line;
+    loop {
+        line_starts.push(line_start);
+        if line_start >= last_line { break; }
+        let Some(newline) = text[line_start..].find('\n') else { break; };
+        line_start += newline + 1;
+    }
+    let lines: Vec<_> = line_starts.iter().map(|line_start| {
+        let line_end = text[*line_start..].find('\n').map_or(text.len(), |newline| *line_start + newline);
+        let content_end = if text.as_bytes().get(line_end.wrapping_sub(1)) == Some(&b'\r') { line_end - 1 } else { line_end };
+        let indent_end = *line_start + text[*line_start..content_end].bytes()
+            .take_while(|byte| matches!(byte, b' ' | b'\t')).count();
+        (*line_start, content_end, indent_end)
+    }).collect();
+    let nonblank: Vec<_> = lines.iter().filter(|(start, end, _)| !text[*start..*end].trim().is_empty()).collect();
+    let all_commented = !nonblank.is_empty() && nonblank.iter().all(|(line_start, line_end, indent_end)| {
+        text[*indent_end..*line_end].starts_with("//")
+    });
+    let mut edits = Vec::new();
+    for (_, line_end, indent_end) in &lines {
+        if all_commented {
+            let content = &text[*indent_end..*line_end];
+            if content.starts_with("//") {
+                let remove_end = if content.as_bytes().get(2) == Some(&b' ') { indent_end + 3 } else { indent_end + 2 };
+                edits.push((*indent_end, remove_end, String::new()));
+            }
+        } else {
+            let line_is_blank = text[*indent_end..*line_end].trim().is_empty();
+            edits.push((*indent_end, *indent_end, if line_is_blank { "//".into() } else { "// ".into() }));
+        }
+    }
+    if edits.is_empty() { return None; }
+    let map_position = |position: usize| {
+        let mut shift: isize = 0;
+        for (edit_start, edit_end, replacement) in &edits {
+            if position < *edit_start { break; }
+            if position < *edit_end {
+                return (*edit_start as isize + shift + replacement.len() as isize).max(0) as usize;
+            }
+            shift += replacement.len() as isize - (*edit_end - *edit_start) as isize;
+        }
+        (position as isize + shift).max(0) as usize
+    };
+    let mapped_start = map_position(start_byte);
+    let mapped_end = map_position(end_byte);
+    for (edit_start, edit_end, replacement) in edits.into_iter().rev() {
+        text.replace_range(edit_start..edit_end, &replacement);
+    }
+    Some((
+        text[..mapped_start.min(text.len())].chars().count(),
+        text[..mapped_end.min(text.len())].chars().count(),
+    ))
+}
+
 fn java_completion_trigger(document: &Document, events: &[egui::Event]) -> Option<crate::java::lsp::EditorCommand> {
     let text_events = events.iter().filter_map(|event| match event {
         egui::Event::Text(text) | egui::Event::Paste(text) => Some(text.as_str()),
@@ -209,6 +275,49 @@ impl EditorTab {
 
     pub fn restore_document_cursor(&mut self) {
         self.pending_character_index = Some(self.document.character_index());
+    }
+
+    pub fn toggle_java_line_comment(&mut self, context: &egui::Context) -> bool {
+        if self.close_after_save || !self.path.extension().is_some_and(|extension| extension == "java") {
+            return false;
+        }
+        let paged = self.document.text.len() > PAGED_EDITOR_BYTES;
+        let editor_id = if paged {
+            egui::Id::new(("paged_source_editor", &self.path))
+        } else {
+            egui::Id::new(("source_editor", &self.path))
+        };
+        if context.memory(|memory| memory.focused()) != Some(editor_id) {
+            return false;
+        }
+        let Some(mut state) = egui::text_edit::TextEditState::load(context, editor_id) else {
+            return false;
+        };
+        let Some(range) = state.cursor.char_range() else { return false; };
+        let base = if paged { self.document.text[..self.page_start].chars().count() } else { 0 };
+        let primary = base + usize::from(range.primary.index);
+        let secondary = base + usize::from(range.secondary.index);
+        let Some((primary, secondary)) = toggle_line_comment(&mut self.document.text, primary, secondary) else {
+            return false;
+        };
+        self.document.mark_changed();
+        if paged {
+            let target = (self.page_start + EDITOR_PAGE_BYTES).min(self.document.text.len());
+            self.page_end = if target == self.document.text.len() {
+                target
+            } else {
+                self.document.text[..target].rfind('\n').map_or(target, |newline| newline + 1)
+            };
+            while !self.document.text.is_char_boundary(self.page_end) { self.page_end -= 1; }
+        }
+        let base = if paged { self.document.text[..self.page_start].chars().count() } else { 0 };
+        state.cursor.set_char_range(Some(egui::text::CCursorRange::two(
+            egui::text::CCursor::new(primary.saturating_sub(base)),
+            egui::text::CCursor::new(secondary.saturating_sub(base)),
+        )));
+        state.store(context, editor_id);
+        self.page_cursor = None;
+        true
     }
 
     pub fn refresh_after_workspace_edit(&mut self) {
