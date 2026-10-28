@@ -99,6 +99,12 @@ pub enum AppEvent {
 pub enum BuildAction {
     Build,
     Test,
+    RunTest {
+        class_name: String,
+        module_root: PathBuf,
+        test_task: String,
+        integration: bool,
+    },
     Clean,
     Cancel,
 }

@@ -1274,10 +1274,32 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                         }
                         crate::project::ProjectKind::Unknown => None,
                     };
-                    let task = match action {
-                        BuildAction::Build => BuildTask::Build,
-                        BuildAction::Test => BuildTask::Test,
-                        BuildAction::Clean => BuildTask::Clean,
+                    let (task, module, test_task, test_filter) = match action {
+                        BuildAction::Build => (BuildTask::Build, None, None, None),
+                        BuildAction::Test => (BuildTask::Test, None, None, None),
+                        BuildAction::Clean => (BuildTask::Clean, None, None, None),
+                        BuildAction::RunTest { class_name, module_root, test_task, integration } => {
+                            if model.kind == crate::project::ProjectKind::Maven {
+                                let module = if module_root == model.root {
+                                    None
+                                } else {
+                                    Some(module_root.strip_prefix(&model.root)
+                                        .map_err(|_| "The test module is outside the Maven reactor")?.to_path_buf())
+                                };
+                                (BuildTask::Test, module, Some(if integration { "verify".into() } else { "test".into() }), Some(class_name))
+                            } else if model.kind == crate::project::ProjectKind::Gradle {
+                                let task_path = if module_root == model.root {
+                                    format!(":{test_task}")
+                                } else {
+                                    let module = model.modules.iter().find(|module| module.root == module_root)
+                                        .ok_or("The test module is no longer part of this Gradle project")?;
+                                    format!("{}:{test_task}", module.name)
+                                };
+                                (BuildTask::Test, None, Some(task_path), Some(class_name))
+                            } else {
+                                return Err("Open a Maven or Gradle project to rerun a test".into());
+                            }
+                        }
                         BuildAction::Cancel => unreachable!(),
                     };
                     Ok((
@@ -1285,6 +1307,9 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                             project: model,
                             task,
                             jdk,
+                            module,
+                            test_task,
+                            test_filter,
                         },
                         executable,
                     ))
