@@ -136,6 +136,7 @@ pub struct OpenedProject {
     pub project: Project,
     pub tree: Result<ProjectTree, String>,
     pub open_file: Option<PathBuf>,
+    pub editor_config: super::editor_config::ProjectEditorConfig,
 }
 
 #[derive(Clone, Debug)]
@@ -178,7 +179,8 @@ fn open_project_path(path: PathBuf) -> Result<OpenedProject, String> {
     };
     let project = discovery::discover(&root);
     let tree = super::tree::ProjectTree::read(&root).map_err(|error| error.to_string());
-    Ok(OpenedProject { root, project, tree, open_file })
+    let editor_config = super::editor_config::ProjectEditorConfig::load(&root);
+    Ok(OpenedProject { root, project, tree, open_file, editor_config })
 }
 
 #[derive(Clone, Debug)]

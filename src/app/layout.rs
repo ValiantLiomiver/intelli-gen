@@ -120,6 +120,13 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
             });
             ui.menu_button("Settings", |ui| {
                 ui.label("Java indentation");
+                if let (Some(project), Some(tab)) = (&state.project, state.active_tab.and_then(|index| state.editor_tabs.get(index))) {
+                    let style = state.project_editor_config.style_for(&project.root, &tab.path);
+                    if style.indent_size.flatten().is_some() || style.insert_spaces.flatten().is_some() {
+                        let (size, spaces) = state.java_indent_settings(&tab.path);
+                        ui.weak(format!("Project .editorconfig: {size} {}", if spaces { "spaces" } else { "tabs" }));
+                    }
+                }
                 let mut indentation_changed = false;
                 indentation_changed |= ui.add(egui::Slider::new(&mut state.settings.java_indent_size, 1..=8).text("Indent size")).changed();
                 indentation_changed |= ui.checkbox(&mut state.settings.java_insert_spaces, "Insert spaces").changed();

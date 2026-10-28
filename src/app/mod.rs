@@ -58,6 +58,7 @@ impl ActivePanel {
 
 pub struct AppState {
     pub project: Option<Project>,
+    pub project_editor_config: crate::project::editor_config::ProjectEditorConfig,
     pub project_open_loader: crate::project::workspace::ProjectOpenLoader,
     pub project_open_generation: u64,
     pub project_opening: bool,
@@ -240,6 +241,14 @@ impl AppState {
     pub fn enqueue(&mut self, event: AppEvent) {
         self.events.push(event);
     }
+
+    pub fn java_indent_settings(&self, path: &std::path::Path) -> (usize, bool) {
+        let style = self.project.as_ref().map(|project| {
+            self.project_editor_config.style_for(&project.root, path)
+        }).unwrap_or_default();
+        (style.indent_size.flatten().unwrap_or(self.settings.java_indent_size).clamp(1, 16),
+            style.insert_spaces.flatten().unwrap_or(self.settings.java_insert_spaces))
+    }
 }
 
 pub struct IdeaLikeApp {
@@ -272,6 +281,7 @@ impl IdeaLikeApp {
         });
         let mut state = AppState {
             project: None,
+            project_editor_config: crate::project::editor_config::ProjectEditorConfig::default(),
             project_open_loader: crate::project::workspace::ProjectOpenLoader::default(),
             project_open_generation: 0,
             project_opening: false,

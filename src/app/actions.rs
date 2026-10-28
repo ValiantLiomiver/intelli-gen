@@ -424,6 +424,7 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                 let startup_file = opened.open_file;
                 let root = opened.root;
                 let project = opened.project;
+                state.project_editor_config = opened.editor_config;
                 if state.project.as_ref().is_some_and(|current| current.root != root) {
                     state.navigation_back.clear();
                     state.navigation_forward.clear();
@@ -937,8 +938,9 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
             AppEvent::RequestQuit => state.quit_requested = true,
             AppEvent::EditorCompleted(completion) => editor_completed(state, completion),
             AppEvent::EditorCommand(command) => {
-                let tab_size = state.settings.java_indent_size.clamp(1, 8);
-                let insert_spaces = state.settings.java_insert_spaces;
+                let (tab_size, insert_spaces) = state.active_tab.and_then(|index| state.editor_tabs.get(index))
+                    .map(|tab| state.java_indent_settings(&tab.path))
+                    .unwrap_or((state.settings.java_indent_size.clamp(1, 8), state.settings.java_insert_spaces));
                 state.language.sync_documents(&state.editor_tabs);
                 if let Some(tab) = state
                     .active_tab
@@ -1006,8 +1008,9 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                 }
             }
             AppEvent::IndentJava { outdent } => {
-                let indent_size = state.settings.java_indent_size.clamp(1, 8);
-                let insert_spaces = state.settings.java_insert_spaces;
+                let (indent_size, insert_spaces) = state.active_tab.and_then(|index| state.editor_tabs.get(index))
+                    .map(|tab| state.java_indent_settings(&tab.path))
+                    .unwrap_or((state.settings.java_indent_size.clamp(1, 8), state.settings.java_insert_spaces));
                 if let Some(tab) = state.active_tab.and_then(|index| state.editor_tabs.get_mut(index)) {
                     tab.indent_java_selection(context, outdent, indent_size, insert_spaces);
                 }

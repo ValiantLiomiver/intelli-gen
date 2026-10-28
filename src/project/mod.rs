@@ -1,4 +1,5 @@
 pub mod discovery;
+pub mod editor_config;
 pub mod gradle;
 pub mod gradle_tasks;
 pub mod kind;

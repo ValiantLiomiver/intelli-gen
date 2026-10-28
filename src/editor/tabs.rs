@@ -1001,8 +1001,9 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
         .map_or(&[][..], Vec::as_slice);
     let mut editor_command = None;
     let mut breakpoint_action = None;
-    let indent_size = state.settings.java_indent_size.clamp(1, 8);
-    let insert_spaces = state.settings.java_insert_spaces;
+    let (indent_size, insert_spaces) = state.active_tab.and_then(|index| state.editor_tabs.get(index))
+        .map(|tab| state.java_indent_settings(&tab.path))
+        .unwrap_or((state.settings.java_indent_size.clamp(1, 8), state.settings.java_insert_spaces));
     if let Some(tab) = state
         .active_tab
         .and_then(|index| state.editor_tabs.get_mut(index))
