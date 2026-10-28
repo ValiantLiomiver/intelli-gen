@@ -56,6 +56,7 @@ pub enum AppEvent {
     RenameSymbolConfirm(String),
     ApplyCompletion(usize),
     ToggleJavaLineComment,
+    IndentJavaSelection { outdent: bool },
     ApplyCodeAction(usize),
     Language(crate::java::lsp::LanguageUpdate),
     RestartLanguage,

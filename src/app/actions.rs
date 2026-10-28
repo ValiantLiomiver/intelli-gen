@@ -126,6 +126,35 @@ pub fn keyboard_shortcuts(ctx: &egui::Context, state: &mut AppState) {
             state.language.dismiss_completion();
         }
     }
+    let indent_target = state.active_tab.and_then(|index| state.editor_tabs.get(index))
+        .filter(|tab| tab.path.extension().is_some_and(|extension| extension == "java"))
+        .map(|tab| {
+            let editor_id = if tab.document.text.len() > crate::editor::document::PAGED_EDITOR_BYTES {
+                egui::Id::new(("paged_source_editor", &tab.path))
+            } else {
+                egui::Id::new(("source_editor", &tab.path))
+            };
+            let has_selection = egui::text_edit::TextEditState::load(ctx, editor_id)
+                .and_then(|state| state.cursor.char_range())
+                .is_some_and(|range| range.primary != range.secondary);
+            (editor_id, has_selection)
+        });
+    if indent_target.is_some_and(|(id, has_selection)| {
+        has_selection && ctx.memory(|memory| memory.focused() == Some(id))
+    }) {
+        let outdent = ctx.input_mut(|input| {
+            if input.consume_key(egui::Modifiers::SHIFT, egui::Key::Tab) {
+                Some(true)
+            } else if input.consume_key(egui::Modifiers::NONE, egui::Key::Tab) {
+                Some(false)
+            } else {
+                None
+            }
+        });
+        if let Some(outdent) = outdent {
+            state.enqueue(AppEvent::IndentJavaSelection { outdent });
+        }
+    }
     if ctx.input_mut(|input| {
         input.consume_key(
             egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
@@ -887,6 +916,11 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
             AppEvent::ToggleJavaLineComment => {
                 if let Some(tab) = state.active_tab.and_then(|index| state.editor_tabs.get_mut(index)) {
                     tab.toggle_java_line_comment(context);
+                }
+            }
+            AppEvent::IndentJavaSelection { outdent } => {
+                if let Some(tab) = state.active_tab.and_then(|index| state.editor_tabs.get_mut(index)) {
+                    tab.indent_java_selection(context, outdent);
                 }
             }
             AppEvent::ApplyCodeAction(index) => {
