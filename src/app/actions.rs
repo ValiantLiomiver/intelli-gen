@@ -1,5 +1,5 @@
 use eframe::egui;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use super::events::{AppEvent, MavenAction};
@@ -35,6 +35,47 @@ fn open_file_at_position(
     }
 }
 
+fn current_navigation_location(state: &AppState) -> Option<super::NavigationLocation> {
+    let tab = state.active_tab.and_then(|index| state.editor_tabs.get(index))?;
+    Some(super::NavigationLocation { path: tab.path.clone(), position: tab.document.lsp_position() })
+}
+
+fn remember_navigation_origin(state: &mut AppState, target: &super::NavigationLocation) {
+    let Some(current) = current_navigation_location(state) else { return; };
+    if current == *target { return; }
+    if state.navigation_back.last() != Some(&current) {
+        state.navigation_back.push(current);
+        if state.navigation_back.len() > 100 { state.navigation_back.remove(0); }
+    }
+    state.navigation_forward.clear();
+}
+
+fn navigate_to_position(state: &mut AppState, path: PathBuf, position: crate::java::lsp::Position) {
+    let target = super::NavigationLocation { path, position };
+    remember_navigation_origin(state, &target);
+    open_file_at_position(state, target.path, target.position);
+}
+
+fn move_navigation_history(state: &mut AppState, backwards: bool) {
+    let target = if backwards { state.navigation_back.pop() } else { state.navigation_forward.pop() };
+    let Some(target) = target else { return; };
+    if let Some(current) = current_navigation_location(state) {
+        let opposite = if backwards { &mut state.navigation_forward } else { &mut state.navigation_back };
+        if opposite.last() != Some(&current) {
+            opposite.push(current);
+            if opposite.len() > 100 { opposite.remove(0); }
+        }
+    }
+    open_file_at_position(state, target.path, target.position);
+}
+
+fn select_editor_tab(state: &mut AppState, forward: bool) {
+    let count = state.editor_tabs.len();
+    if count == 0 { return; }
+    let current = state.active_tab.unwrap_or(if forward { count - 1 } else { 0 }).min(count - 1);
+    state.active_tab = Some(if forward { (current + 1) % count } else { (current + count - 1) % count });
+}
+
 pub fn open_project_dialog(state: &mut AppState) {
     if state.quit_approved {
         return;
@@ -65,26 +106,57 @@ pub fn keyboard_shortcuts(ctx: &egui::Context, state: &mut AppState) {
     if state.quit_approved {
         return;
     }
+    if ctx.input_mut(|input| input.consume_key(egui::Modifiers::CTRL | egui::Modifiers::SHIFT, egui::Key::Tab)) {
+        state.enqueue(AppEvent::PreviousEditorTab);
+    } else if ctx.input_mut(|input| input.consume_key(egui::Modifiers::CTRL, egui::Key::Tab)) {
+        state.enqueue(AppEvent::NextEditorTab);
+    }
+    for (key, event) in [
+        (egui::Key::ArrowLeft, AppEvent::NavigateBack),
+        (egui::Key::ArrowRight, AppEvent::NavigateForward),
+    ] {
+        if ctx.input_mut(|input| input.consume_key(egui::Modifiers::CTRL | egui::Modifiers::ALT, key)) {
+            state.enqueue(event);
+        }
+    }
     if ctx.input_mut(|input| input.consume_key(egui::Modifiers::SHIFT, egui::Key::F6)) {
         state.enqueue(AppEvent::RenameSymbolOpen);
     }
     if ctx.input_mut(|input| input.consume_key(egui::Modifiers::ALT, egui::Key::Enter)) {
         state.enqueue(AppEvent::EditorCommand(crate::java::lsp::EditorCommand::CodeActions));
     }
+    let comment_editor = state.active_tab.and_then(|index| state.editor_tabs.get(index))
+        .filter(|tab| tab.path.extension().is_some_and(|extension| extension == "java"))
+        .map(|tab| if tab.document.text.len() > crate::editor::document::PAGED_EDITOR_BYTES {
+            egui::Id::new(("paged_source_editor", &tab.path))
+        } else {
+            egui::Id::new(("source_editor", &tab.path))
+        });
+    if comment_editor.is_some_and(|id| ctx.memory(|memory| memory.focused() == Some(id)))
+        && ctx.input_mut(|input| {
+            input.consume_key(egui::Modifiers::COMMAND, egui::Key::Slash)
+                || input.consume_key(egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, egui::Key::Slash)
+        })
+    {
+        state.enqueue(AppEvent::ToggleJavaLineComment);
+    }
     let completion_editor = state
         .active_tab
         .and_then(|index| state.editor_tabs.get(index))
         .and_then(|tab| {
             let is_current = state.language.completion.as_ref().is_some_and(
-                |(path, _, _, items)| {
-                    path == &tab.path && items.iter().any(|item| item.applicable)
+                |(path, version, position, items)| {
+                    path == &tab.path
+                        && *position == tab.document.lsp_position()
+                        && state.language.is_document_current(path, *version, &tab.document.text)
+                        && items.iter().any(|item| item.applicable)
                 },
             );
             is_current.then(|| {
                 if tab.document.text.len() > crate::editor::document::PAGED_EDITOR_BYTES {
-                    egui::Id::unique(("paged_source_editor", &tab.path))
+                    egui::Id::new(("paged_source_editor", &tab.path))
                 } else {
-                    egui::Id::unique(("source_editor", &tab.path))
+                    egui::Id::new(("source_editor", &tab.path))
                 }
             })
         });
@@ -95,13 +167,68 @@ pub fn keyboard_shortcuts(ctx: &egui::Context, state: &mut AppState) {
         if ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp)) {
             state.language.move_completion_selection(-1);
         }
-        if ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Enter))
-            && let Some(index) = state.language.completion_selection
-        {
-            state.enqueue(AppEvent::ApplyCompletion(index));
+        if let Some(index) = state.language.completion_selection {
+            let accept = ctx.input_mut(|input| {
+                input.consume_key(egui::Modifiers::NONE, egui::Key::Enter)
+                    || input.consume_key(egui::Modifiers::NONE, egui::Key::Tab)
+            });
+            if accept {
+                state.enqueue(AppEvent::ApplyCompletion(index));
+            }
         }
         if ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
             state.language.dismiss_completion();
+        }
+    }
+    let snippet_editor = state
+        .active_tab
+        .and_then(|index| state.editor_tabs.get(index))
+        .filter(|tab| tab.has_snippet_tab_stops())
+        .map(|tab| {
+            if tab.document.text.len() > crate::editor::document::PAGED_EDITOR_BYTES {
+                egui::Id::new(("paged_source_editor", &tab.path))
+            } else {
+                egui::Id::new(("source_editor", &tab.path))
+            }
+        });
+    let snippet_direction = if snippet_editor.is_some_and(|id| ctx.memory(|memory| memory.focused() == Some(id))) {
+        ctx.input_mut(|input| {
+            if input.consume_key(egui::Modifiers::SHIFT, egui::Key::Tab) {
+                Some(true)
+            } else if input.consume_key(egui::Modifiers::NONE, egui::Key::Tab) {
+                Some(false)
+            } else {
+                None
+            }
+        })
+    } else {
+        None
+    };
+    if let Some(backward) = snippet_direction {
+        if let Some(tab) = state.active_tab.and_then(|index| state.editor_tabs.get_mut(index)) {
+            tab.advance_snippet_tab_stop(backward);
+        }
+    }
+    let indent_target = state.active_tab.and_then(|index| state.editor_tabs.get(index))
+        .filter(|tab| tab.path.extension().is_some_and(|extension| extension == "java"))
+        .filter(|_| snippet_direction.is_none())
+        .map(|tab| if tab.document.text.len() > crate::editor::document::PAGED_EDITOR_BYTES {
+                egui::Id::new(("paged_source_editor", &tab.path))
+            } else {
+                egui::Id::new(("source_editor", &tab.path))
+            });
+    if indent_target.is_some_and(|id| ctx.memory(|memory| memory.focused() == Some(id))) {
+        let outdent = ctx.input_mut(|input| {
+            if input.consume_key(egui::Modifiers::SHIFT, egui::Key::Tab) {
+                Some(true)
+            } else if input.consume_key(egui::Modifiers::NONE, egui::Key::Tab) {
+                Some(false)
+            } else {
+                None
+            }
+        });
+        if let Some(outdent) = outdent {
+            state.enqueue(AppEvent::IndentJava { outdent });
         }
     }
     if ctx.input_mut(|input| {
@@ -261,6 +388,7 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
         }
         match event {
             AppEvent::OpenProject(path) => {
+                state.pending_run = None;
                 state.quick_open.cancel();
                 state.symbol_search.close();
                 state.new_java_class = None;
@@ -268,6 +396,7 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                 state.rename_symbol = None;
                 state.pending_rename_request = None;
                 state.pending_workspace_edits.clear();
+                state.pending_workspace_replacements.clear();
                 state.project_open_generation = state.project_open_generation.wrapping_add(1);
                 state.project_opening = true;
                 state.status = format!("Opening {}…", path.display());
@@ -295,9 +424,17 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                 let startup_file = opened.open_file;
                 let root = opened.root;
                 let project = opened.project;
+                state.project_editor_config = opened.editor_config;
+                if state.project.as_ref().is_some_and(|current| current.root != root) {
+                    state.navigation_back.clear();
+                    state.navigation_forward.clear();
+                }
                 state.quick_open.set_project(Some(root.clone()));
                 if state.project.as_ref().map(|project| &project.root) != Some(&root) {
                     state.build.reset();
+                }
+                if state.pending_run.as_ref().is_some_and(|pending| pending.root != root) {
+                    state.pending_run = None;
                 }
                 state.run.begin_project_load();
                 state.run_configuration_generation =
@@ -338,8 +475,10 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                 state.maven_cache_loader.cancel();
                 state.gradle_task_loader.cancel();
                 retire_maven_watcher(state);
-                state.maven_project_generation = state.maven_project_generation.wrapping_add(1);
+                retire_project_tree_watcher(state);
+                state.project_tree_watch_generation = state.project_tree_watch_generation.wrapping_add(1);
                 state.project_tree_generation = state.project_tree_generation.wrapping_add(1);
+                state.maven_project_generation = state.maven_project_generation.wrapping_add(1);
                 state.project_tree_loading = false;
                 state.project = Some(project);
                 if let Some(path) = startup_file {
@@ -411,38 +550,61 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                         state.project_tree_error = Some(error);
                     }
                 }
+                if let Some(project) = &state.project {
+                    match crate::project::tree_watch::ProjectTreeWatcher::start(
+                        project.root.clone(), state.project_tree_watch_generation,
+                    ) {
+                        Ok(watcher) => state.project_tree_watcher = Some(watcher),
+                        Err(error) => state.project_tree_error = Some(error),
+                    }
+                }
                 state.settings.remember_project(root);
                 save_settings(state);
             }
             AppEvent::RefreshProjectTree(path) => {
-                let Some(project) = &state.project else {
+                let Some(root) = state.project.as_ref().map(|project| project.root.clone()) else {
                     continue;
                 };
-                if path == project.root {
-                    state.project_tree_generation = state.project_tree_generation.wrapping_add(1);
-                    state.project_tree_loading = true;
-                    if let Err(error) = state
-                        .project_tree_loader
-                        .start(path, state.project_tree_generation)
-                    {
-                        state.project_tree_loading = false;
-                        state.project_tree_error = Some(error);
+                if path == root {
+                    if state.project_tree.is_none() {
+                        state.project_tree_generation = state.project_tree_generation.wrapping_add(1);
+                        state.project_tree_loading = true;
+                        if let Err(error) = state.project_tree_loader.start(root, state.project_tree_generation) {
+                            state.project_tree_loading = false;
+                            state.project_tree_error = Some(error);
+                        }
+                        continue;
                     }
-                } else if let Some(tree) = &mut state.project_tree {
-                    if let Err(error) = tree.refresh(&path) {
-                        state.project_tree_error = Some(error.to_string());
+                    let request = state.project_tree.as_mut().and_then(|tree| tree.begin_refresh(&root));
+                    if let Some(request) = request {
+                        state.project_tree_loading = true;
+                        if let Err(error) = state.project_tree_loader.start_children(root.clone(), root.clone(), request) {
+                            state.project_tree_loading = false;
+                            if let Some(tree) = &mut state.project_tree {
+                                tree.apply_children(&root, request, Err(error.clone()));
+                            }
+                            state.project_tree_error = Some(error);
+                        }
+                    }
+                } else if let Some(request) = state
+                    .project_tree
+                    .as_mut()
+                    .and_then(|tree| tree.begin_refresh(&path))
+                {
+                    if let Err(error) = state.project_tree_loader.start_children(
+                        root,
+                        path.clone(),
+                        request,
+                    ) && let Some(tree) = &mut state.project_tree
+                    {
+                        tree.apply_children(&path, request, Err(error));
                     }
                 }
             }
             AppEvent::ProjectTreeRefreshed(event) => {
                 if event.generation != state.project_tree_generation
-                    || state
-                        .project
-                        .as_ref()
-                        .is_none_or(|project| project.root != event.root)
-                {
-                    continue;
-                }
+                    || state.project.as_ref().is_none_or(|project| project.root != event.root)
+                { continue; }
                 state.project_tree_loading = false;
                 match event.result {
                     Ok(tree) => {
@@ -450,6 +612,44 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                         state.project_tree_error = None;
                     }
                     Err(error) => state.project_tree_error = Some(error),
+                }
+            }
+            AppEvent::ProjectTreeChanged(event) => {
+                if event.generation != state.project_tree_watch_generation
+                    || state.project.as_ref().is_none_or(|project| project.root != event.root)
+                { continue; }
+                if let Some(error) = event.error {
+                    state.project_tree_error = Some(error);
+                    continue;
+                }
+                if let Some(editor_config) = event.editor_config {
+                    state.project_editor_config = editor_config;
+                }
+                if state.project_tree.is_none() {
+                    state.project_tree_generation = state.project_tree_generation.wrapping_add(1);
+                    state.project_tree_loading = true;
+                    if let Err(error) = state.project_tree_loader.start(event.root, state.project_tree_generation) {
+                        state.project_tree_loading = false;
+                        state.project_tree_error = Some(error);
+                    }
+                    continue;
+                }
+                let Some(tree) = state.project_tree.as_mut() else { continue; };
+                let targets = if event.rescan || event.paths.is_empty() {
+                    tree.begin_refresh_all_expanded()
+                } else {
+                    tree.begin_watched_refreshes(&event.paths)
+                };
+                if targets.iter().any(|(parent, _)| parent == &event.root) {
+                    state.project_tree_loading = true;
+                }
+                for (parent, request) in targets {
+                    if let Err(error) = state.project_tree_loader.start_children(event.root.clone(), parent.clone(), request)
+                        && let Some(tree) = &mut state.project_tree
+                    {
+                        tree.apply_children(&parent, request, Err(error));
+                        if parent == event.root { state.project_tree_loading = false; }
+                    }
                 }
             }
             AppEvent::LoadProjectTreeChildren { path, request } => {
@@ -482,6 +682,10 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                     .as_ref()
                     .is_some_and(|project| project.root == event.root)
                 {
+                    if event.parent == event.root {
+                        state.project_tree_loading = false;
+                        state.project_tree_error = event.result.as_ref().err().cloned();
+                    }
                     if let Some(tree) = &mut state.project_tree {
                         tree.apply_children(&event.parent, event.request, event.result);
                     }
@@ -617,7 +821,7 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                 state.find_replace.apply(action, tab);
             }
             AppEvent::OpenFileAtLine(path, line) => {
-                open_file_at_position(
+                navigate_to_position(
                     state,
                     path,
                     crate::java::lsp::Position {
@@ -627,8 +831,12 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                 );
             }
             AppEvent::OpenFileAtPosition(path, position) => {
-                open_file_at_position(state, path, position);
+                navigate_to_position(state, path, position);
             }
+            AppEvent::NavigateBack => move_navigation_history(state, true),
+            AppEvent::NavigateForward => move_navigation_history(state, false),
+            AppEvent::NextEditorTab => select_editor_tab(state, true),
+            AppEvent::PreviousEditorTab => select_editor_tab(state, false),
             AppEvent::Search(action) => match action {
                 super::events::SearchAction::Open => {
                     state.active_panel = super::ActivePanel::Search;
@@ -644,6 +852,29 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                         state.search.start(project.root.clone(), query);
                     }
                 }
+                super::events::SearchAction::PreviewReplace(query, replacement) => {
+                    if let Some(project) = &state.project {
+                        let project_root = project.root.clone();
+                        let relevant_tabs: Vec<_> = state.editor_tabs.iter()
+                            .filter(|tab| tab.path.starts_with(&project_root))
+                            .collect();
+                        let dirty_tabs: Vec<_> = relevant_tabs.iter()
+                            .filter(|tab| tab.document.is_dirty())
+                            .collect();
+                        let dirty_bytes = dirty_tabs.iter().try_fold(0usize, |total, tab| total.checked_add(tab.document.text.len()));
+                        if dirty_tabs.len() > 200 || dirty_bytes.is_none_or(|bytes| bytes > crate::editor::MAX_WORKSPACE_EDIT_BYTES) {
+                            state.search.message = "Open unsaved files exceed the project replacement limit".into();
+                            return;
+                        }
+                        let open_documents = relevant_tabs.into_iter().map(|tab| crate::search::OpenDocumentSnapshot {
+                            path: tab.document.path.clone(),
+                            revision: tab.document.revision,
+                            text: tab.document.is_dirty().then(|| tab.document.text.clone()),
+                        }).collect();
+                        state.search.start_replace_preview(project_root, query, replacement, open_documents);
+                    }
+                }
+                super::events::SearchAction::ApplyReplace => apply_project_replace(state),
                 super::events::SearchAction::Cancel => state.search.cancel(),
             },
             AppEvent::Terminal(action) => match action {
@@ -680,7 +911,7 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                     save_file(state, &path);
                 }
             }
-            AppEvent::SaveFile(path) => save_file(state, &path),
+            AppEvent::SaveFile(path) => { save_file(state, &path); }
             AppEvent::CloseActiveFile => {
                 if let Some(path) = active_path(state) {
                     close_file(state, &path);
@@ -710,12 +941,15 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
             AppEvent::RequestQuit => state.quit_requested = true,
             AppEvent::EditorCompleted(completion) => editor_completed(state, completion),
             AppEvent::EditorCommand(command) => {
+                let (tab_size, insert_spaces) = state.active_tab.and_then(|index| state.editor_tabs.get(index))
+                    .map(|tab| state.java_indent_settings(&tab.path))
+                    .unwrap_or((state.settings.java_indent_size.clamp(1, 8), state.settings.java_insert_spaces));
                 state.language.sync_documents(&state.editor_tabs);
                 if let Some(tab) = state
                     .active_tab
                     .and_then(|index| state.editor_tabs.get(index))
                 {
-                    state.language.request(command, &tab.document);
+                    state.language.request(command, &tab.document, tab_size, insert_spaces);
                 }
             }
             AppEvent::RenameSymbolOpen => begin_symbol_rename(state),
@@ -733,7 +967,7 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                     state.last_error = Some("The Java source changed; invoke Rename Symbol again".into());
                     continue;
                 }
-                let Some(root) = state.project.as_ref().map(|project| project.root.canonicalize().ok()).flatten() else {
+                let Some(root) = state.project.as_ref().map(|project| project.root.clone()) else {
                     state.last_error = Some("Cannot resolve the open project root".into());
                     continue;
                 };
@@ -750,8 +984,7 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                     state.last_error = Some("Wait for open Java files to synchronize before renaming".into());
                     continue;
                 }
-                let open_versions = synchronized_versions.into_iter()
-                    .map(|(path, version)| (path.canonicalize().unwrap_or(path), version)).collect();
+                let open_versions = synchronized_versions;
                 match state.language.request_rename(&document, dialog.position, new_name) {
                     Ok(()) => state.pending_rename_request = Some(super::PendingRenameRequest {
                         root, generation, source_path: dialog.path, source_revision: dialog.revision,
@@ -766,9 +999,23 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                     .and_then(|index| state.editor_tabs.get_mut(index))
                 {
                     match state.language.apply_completion(index, &mut tab.document) {
-                        Ok(()) => tab.restore_document_cursor(),
+                        Ok(Some(stops)) if !stops.is_empty() => tab.set_snippet_tab_stops(stops),
+                        Ok(Some(_)) | Ok(None) => tab.restore_document_cursor(),
                         Err(error) => state.language.summary = error.to_string(),
                     }
+                }
+            }
+            AppEvent::ToggleJavaLineComment => {
+                if let Some(tab) = state.active_tab.and_then(|index| state.editor_tabs.get_mut(index)) {
+                    tab.toggle_java_line_comment(context);
+                }
+            }
+            AppEvent::IndentJava { outdent } => {
+                let (indent_size, insert_spaces) = state.active_tab.and_then(|index| state.editor_tabs.get(index))
+                    .map(|tab| state.java_indent_settings(&tab.path))
+                    .unwrap_or((state.settings.java_indent_size.clamp(1, 8), state.settings.java_insert_spaces));
+                if let Some(tab) = state.active_tab.and_then(|index| state.editor_tabs.get_mut(index)) {
+                    tab.indent_java_selection(context, outdent, indent_size, insert_spaces);
                 }
             }
             AppEvent::ApplyCodeAction(index) => {
@@ -974,6 +1221,10 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                     module,
                     goal,
                 } => {
+                    if state.pending_run.is_some() {
+                        state.last_error = Some("Finish or cancel the pending Run before starting another build".into());
+                        continue;
+                    }
                     if state.quit_requested
                         || state.maven_view_root.as_ref() != Some(&root)
                         || generation != state.maven_generation
@@ -1075,6 +1326,10 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                     }
                 }
                 super::events::GradleAction::RunTask { root, generation, project_path, task_path } => {
+                    if state.pending_run.is_some() {
+                        state.last_error = Some("Finish or cancel the pending Run before starting another build".into());
+                        continue;
+                    }
                     if state.quit_requested || state.gradle_task_root.as_ref() != Some(&root)
                         || generation != state.gradle_task_generation
                         || state.gradle_selected_project != project_path
@@ -1252,9 +1507,17 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                 use crate::java::build::{BuildRequest, BuildTask};
                 if matches!(action, BuildAction::Cancel) {
                     state.build.cancel();
+                    if state.pending_run.as_ref().is_some_and(|pending| pending.stage == super::PendingRunStage::Building) {
+                        state.pending_run = None;
+                        state.run.summary = "Build cancelled — Run was not started".into();
+                    }
                     continue;
                 }
                 if state.quit_requested {
+                    continue;
+                }
+                if state.pending_run.is_some() {
+                    state.last_error = Some("Finish or cancel the pending Run before starting another build".into());
                     continue;
                 }
                 let request = (|| -> Result<_, String> {
@@ -1264,6 +1527,9 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                         .as_ref()
                         .ok_or("Build discovery has no Maven or Gradle model")?
                         .clone();
+                    if model.kind == crate::project::ProjectKind::Unknown {
+                        return Err("This directory is not a Maven or Gradle project; build actions are unavailable".into());
+                    }
                     let jdk = state.settings.selected_jdk(&project.root, None)?.clone();
                     let executable = match model.kind {
                         crate::project::ProjectKind::Maven => {
@@ -1274,10 +1540,32 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                         }
                         crate::project::ProjectKind::Unknown => None,
                     };
-                    let task = match action {
-                        BuildAction::Build => BuildTask::Build,
-                        BuildAction::Test => BuildTask::Test,
-                        BuildAction::Clean => BuildTask::Clean,
+                    let (task, module, test_task, test_filter) = match action {
+                        BuildAction::Build => (BuildTask::Build, None, None, None),
+                        BuildAction::Test => (BuildTask::Test, None, None, None),
+                        BuildAction::Clean => (BuildTask::Clean, None, None, None),
+                        BuildAction::RunTest { class_name, module_root, test_task, integration } => {
+                            if model.kind == crate::project::ProjectKind::Maven {
+                                let module = if module_root == model.root {
+                                    None
+                                } else {
+                                    Some(module_root.strip_prefix(&model.root)
+                                        .map_err(|_| "The test module is outside the Maven reactor")?.to_path_buf())
+                                };
+                                (BuildTask::Test, module, Some(if integration { "verify".into() } else { "test".into() }), Some(class_name))
+                            } else if model.kind == crate::project::ProjectKind::Gradle {
+                                let task_path = if module_root == model.root {
+                                    format!(":{test_task}")
+                                } else {
+                                    let module = model.modules.iter().find(|module| module.root == module_root)
+                                        .ok_or("The test module is no longer part of this Gradle project")?;
+                                    format!("{}:{test_task}", module.name)
+                                };
+                                (BuildTask::Test, None, Some(task_path), Some(class_name))
+                            } else {
+                                return Err("Open a Maven or Gradle project to rerun a test".into());
+                            }
+                        }
                         BuildAction::Cancel => unreachable!(),
                     };
                     Ok((
@@ -1285,6 +1573,9 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                             project: model,
                             task,
                             jdk,
+                            module,
+                            test_task,
+                            test_filter,
                         },
                         executable,
                     ))
@@ -1308,7 +1599,19 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                     continue;
                 };
                 match action {
-                    RunAction::Stop => state.run.cancel(),
+                    RunAction::Stop => {
+                        if state.pending_run.as_ref().is_some_and(|pending| pending.stage == super::PendingRunStage::Building) {
+                            state.build.cancel();
+                            state.pending_run = None;
+                            state.run.summary = "Build cancelled — Run was not started".into();
+                        } else {
+                            state.pending_run = None;
+                            state.run.cancel();
+                        }
+                    }
+                    RunAction::CancelPendingStart => state.pending_run = None,
+                    RunAction::ConfirmSaveAndRun => confirm_pending_run(state),
+                    RunAction::BuildCompleted(successful) => finish_pending_run_build(state, successful),
                     RunAction::Input(line) => {
                         if let Err(error) = state.run.send_input(&line) {
                             state.run.input_line = line;
@@ -1369,35 +1672,7 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                     RunAction::Start => {
                         state.active_panel = super::ActivePanel::Run;
                         state.settings.show_tool_window = true;
-                        let result = (|| {
-                            let config = state
-                                .run
-                                .selected()
-                                .cloned()
-                                .ok_or_else(|| "Create a run configuration first".to_owned())?;
-                            let model = project
-                                .model
-                                .as_ref()
-                                .filter(|model| model.kind != crate::project::ProjectKind::Unknown)
-                                .ok_or_else(|| "Open a Maven or Gradle project first".to_owned())?;
-                            let jdk = state.settings.run_jdk(&project.root, &config)?;
-                            let resolver = state
-                                .language
-                                .classpath_resolver()
-                                .map_err(|error| error.to_string())?;
-                            state
-                                .run
-                                .start(
-                                    crate::java::run_config::RunService::new(resolver),
-                                    &config,
-                                    model,
-                                    jdk,
-                                )
-                                .map_err(|error| error.to_string())
-                        })();
-                        if let Err(error) = result {
-                            state.run.summary = error;
-                        }
+                        begin_run_flow(state);
                     }
                 }
             }
@@ -1470,6 +1745,8 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
             }
         }
     }
+    advance_pending_run_saves(state);
+    advance_pending_run_launch(state);
     advance_quit(state);
 }
 
@@ -1573,6 +1850,13 @@ fn retire_maven_watcher(state: &mut AppState) {
     }
 }
 
+fn retire_project_tree_watcher(state: &mut AppState) {
+    if let Some(mut watcher) = state.project_tree_watcher.take() {
+        watcher.request_cancel();
+        state.retiring_project_tree_watchers.push(watcher);
+    }
+}
+
 fn cached_maven_view_is_stale(cached: Option<&str>, current: Option<&str>) -> bool {
     matches!((cached, current), (Some(cached), Some(current)) if cached != current)
 }
@@ -1667,29 +1951,246 @@ fn active_path(state: &AppState) -> Option<std::path::PathBuf> {
         .map(|tab| tab.path.clone())
 }
 
-fn save_file(state: &mut AppState, path: &std::path::Path) {
-    let Some(index) = state.editor_tabs.iter().position(|tab| tab.path == path) else {
+fn begin_run_flow(state: &mut AppState) {
+    if state.pending_run.is_some() || state.run.has_workers() {
         return;
+    }
+    if state.build.running() {
+        state.run.summary = "Wait for the current build to finish before running".into();
+        return;
+    }
+    let Some(project) = state.project.as_ref() else {
+        state.run.summary = "Open a Maven or Gradle project first".into();
+        return;
+    };
+    let Some(model) = project.model.as_ref()
+        .filter(|model| model.kind != crate::project::ProjectKind::Unknown).cloned()
+    else {
+        state.run.summary = "Open a Maven or Gradle project first".into();
+        return;
+    };
+    let root = project.root.clone();
+    let Some(config) = state.run.selected().cloned() else {
+        state.run.summary = "Create a run configuration first".into();
+        return;
+    };
+    if let Err(error) = state.language.classpath_resolver() {
+        state.run.summary = error.to_string();
+        return;
+    }
+    let jdk = match state.settings.run_jdk(&root, &config) {
+        Ok(jdk) => jdk.clone(),
+        Err(error) => { state.run.summary = error; return; }
+    };
+    let save_paths: HashSet<_> = state.editor_tabs.iter()
+        .filter(|tab| tab.path.starts_with(&root)
+            && (tab.document.is_dirty() || tab.saving || tab.pending_rename_to.is_some()))
+        .map(|tab| tab.path.clone()).collect();
+    let stage = if save_paths.is_empty() { super::PendingRunStage::Building }
+        else { super::PendingRunStage::ConfirmSave };
+    state.pending_run = Some(super::PendingRun {
+        root,
+        project_generation: state.project_open_generation,
+        configuration_generation: state.run_configuration_generation,
+        model,
+        config,
+        jdk,
+        stage,
+        save_paths,
+    });
+    if state.pending_run.as_ref().is_some_and(|pending| pending.stage == super::PendingRunStage::Building) {
+        start_pending_run_build(state);
+    }
+}
+
+fn confirm_pending_run(state: &mut AppState) {
+    let Some(pending) = state.pending_run.as_mut() else { return; };
+    if pending.stage != super::PendingRunStage::ConfirmSave { return; }
+    pending.stage = super::PendingRunStage::Saving;
+    let paths: Vec<_> = pending.save_paths.iter().cloned().collect();
+    for path in paths {
+        let Some(tab) = state.editor_tabs.iter_mut().find(|tab| tab.path == path) else {
+            state.pending_run = None;
+            state.run.summary = "A project file closed before it could be saved".into();
+            return;
+        };
+        if tab.saving {
+            if tab.document.is_dirty() { tab.save_again = true; }
+            continue;
+        }
+        if !save_file(state, &path) {
+            state.pending_run = None;
+            state.run.summary = "Could not save project files; Run was not started".into();
+            return;
+        }
+    }
+    advance_pending_run_saves(state);
+}
+
+fn advance_pending_run_saves(state: &mut AppState) {
+    let Some(pending) = state.pending_run.as_ref() else { return; };
+    if pending.stage != super::PendingRunStage::Saving { return; }
+    if !run_context_is_current(state, pending) {
+        state.pending_run = None;
+        state.run.summary = "Project or run configuration changed; Run was cancelled".into();
+        return;
+    }
+    let root = pending.root.clone();
+    let newly_dirty: Vec<_> = state.editor_tabs.iter()
+        .filter(|tab| tab.path.starts_with(&root)
+            && (tab.document.is_dirty() || tab.saving || tab.pending_rename_to.is_some()))
+        .map(|tab| tab.path.clone()).collect();
+    if let Some(pending) = state.pending_run.as_mut() {
+        pending.save_paths.extend(newly_dirty);
+    }
+    let Some(pending) = state.pending_run.as_ref() else { return; };
+    let paths: Vec<_> = pending.save_paths.iter().cloned().collect();
+    let mut waiting = false;
+    for path in paths {
+        let Some(tab) = state.editor_tabs.iter().find(|tab| tab.path == path) else {
+            state.pending_run = None;
+            state.run.summary = "A project file closed before it could be saved".into();
+            return;
+        };
+        if tab.saving { waiting = true; continue; }
+        if tab.document.is_dirty() || tab.pending_rename_to.is_some() {
+            if !save_file(state, &path) {
+                state.pending_run = None;
+                state.run.summary = "Could not save project files; Run was not started".into();
+                return;
+            }
+            waiting = true;
+        }
+    }
+    if !waiting {
+        if let Some(pending) = state.pending_run.as_mut() {
+            pending.stage = super::PendingRunStage::Building;
+        }
+        start_pending_run_build(state);
+    }
+}
+
+fn start_pending_run_build(state: &mut AppState) {
+    let Some(pending) = state.pending_run.as_ref() else { return; };
+    if pending.stage != super::PendingRunStage::Building { return; }
+    if !run_context_is_current(state, pending) {
+        state.pending_run = None;
+        state.run.summary = "Project or run configuration changed; Run was cancelled".into();
+        return;
+    }
+    let executable = match pending.model.kind {
+        crate::project::ProjectKind::Maven => state.settings.maven_executable.clone(),
+        crate::project::ProjectKind::Gradle => state.settings.gradle_executable.clone(),
+        crate::project::ProjectKind::Unknown => None,
+    };
+    let request = crate::java::build::BuildRequest {
+        project: pending.model.clone(),
+        task: crate::java::build::BuildTask::Build,
+        jdk: pending.jdk.clone(),
+        module: None,
+        test_task: None,
+        test_filter: None,
+    };
+    match state.build.start(request, executable.as_deref()) {
+        Ok(()) => {
+            state.status = state.build.summary.clone();
+            state.enqueue(AppEvent::ShowPanel(super::ActivePanel::Build));
+        }
+        Err(error) => {
+            state.pending_run = None;
+            state.run.summary = format!("Build could not start: {error}");
+        }
+    }
+}
+
+fn finish_pending_run_build(state: &mut AppState, successful: bool) {
+    let Some(pending) = state.pending_run.as_ref() else { return; };
+    if pending.stage != super::PendingRunStage::Building { return; }
+    if !successful {
+        state.pending_run = None;
+        state.run.summary = "Build failed or was cancelled — Run was not started".into();
+        return;
+    }
+    if !run_context_is_current(state, &pending) {
+        state.pending_run = None;
+        state.run.summary = "Project or run configuration changed; Run was cancelled".into();
+        return;
+    }
+    if let Some(pending) = state.pending_run.as_mut() {
+        pending.stage = super::PendingRunStage::Launching;
+    }
+    advance_pending_run_launch(state);
+}
+
+fn advance_pending_run_launch(state: &mut AppState) {
+    let Some(pending) = state.pending_run.as_ref() else { return; };
+    if pending.stage != super::PendingRunStage::Launching { return; }
+    if !run_context_is_current(state, pending) {
+        state.pending_run = None;
+        state.run.summary = "Project or run configuration changed; Run was cancelled".into();
+        return;
+    }
+    if state.pending_language_restart { return; }
+    let resolver = match state.language.classpath_resolver() {
+        Ok(resolver) => resolver,
+        Err(error) if error.to_string().contains("Wait for Java intelligence to start") => {
+            if state.language.has_pending_start() || state.language.has_workers() {
+                state.run.summary = "Build finished; waiting for Java intelligence…".into();
+                return;
+            }
+            state.pending_run = None;
+            state.run.summary = error.to_string();
+            return;
+        }
+        Err(error) => {
+            state.pending_run = None;
+            state.run.summary = error.to_string();
+            return;
+        }
+    };
+    let pending = state.pending_run.take().expect("pending run checked above");
+    if let Err(error) = state.run.start(
+        crate::java::run_config::RunService::new(resolver),
+        &pending.config,
+        &pending.model,
+        &pending.jdk,
+    ) {
+        state.run.summary = error.to_string();
+    }
+}
+
+fn run_context_is_current(state: &AppState, pending: &super::PendingRun) -> bool {
+    state.project.as_ref().is_some_and(|project| project.root == pending.root)
+        && state.project_open_generation == pending.project_generation
+        && state.run_configuration_generation == pending.configuration_generation
+        && state.run.selected() == Some(&pending.config)
+}
+
+fn save_file(state: &mut AppState, path: &std::path::Path) -> bool {
+    let Some(index) = state.editor_tabs.iter().position(|tab| tab.path == path) else {
+        return false;
     };
     let tab = &mut state.editor_tabs[index];
     if tab.saving {
         tab.save_again = true;
-        return;
+        return true;
     }
     if !tab.document.is_dirty() && tab.pending_rename_to.is_none() {
         if tab.close_after_save {
             remove_tab(state, path);
         }
-        return;
+        return true;
     }
     match state.editor_io.save(tab.document.clone(), tab.pending_rename_to.clone()) {
         Ok(()) => {
             tab.saving = true;
             state.status = format!("Saving {}…", path.display());
+            true
         }
         Err(error) => {
             tab.close_after_save = false;
-            state.last_error = Some(error);
+            state.last_error = Some(error.clone());
+            false
         }
     }
 }
@@ -1760,7 +2261,7 @@ fn begin_workspace_rename(
         state.language.summary = "Discarded stale Java rename result".into();
         return;
     }
-    if state.project.as_ref().is_none_or(|project| project.root.canonicalize().ok().as_deref() != Some(&snapshot.root)) {
+    if state.project.as_ref().is_none_or(|project| project.root != snapshot.root) {
         state.last_error = Some("The project changed before rename completed".into());
         return;
     }
@@ -1835,7 +2336,7 @@ fn finish_workspace_rename(
 ) {
     let Some(pending) = state.pending_workspace_edits.remove(&request) else { return; };
     if !state.language.accepts_generation(pending.generation)
-        || state.project.as_ref().is_none_or(|project| project.root.canonicalize().ok().as_deref() != Some(&pending.root))
+        || state.project.as_ref().is_none_or(|project| project.root != pending.root)
     {
         state.language.summary = "Discarded stale Java rename result".into();
         return;
@@ -1896,7 +2397,7 @@ fn finish_workspace_rename(
             }
         };
         if let Some(destination) = &file.rename_to {
-            if !destination.starts_with(&pending.root) || destination.exists() {
+            if !destination.starts_with(&pending.root) {
                 state.last_error = Some(format!("Rename destination is unavailable: {}", destination.display()));
                 return;
             }
@@ -1929,10 +2430,238 @@ fn finish_workspace_rename(
     state.language.summary = format!("Rename applied to {changed} file(s)");
 }
 
+fn apply_project_replace(state: &mut AppState) {
+    if !state.pending_workspace_replacements.is_empty() || !state.pending_workspace_edits.is_empty() {
+        state.search.message = "Wait for the current workspace edit to finish".into();
+        return;
+    }
+    let Some(project) = &state.project else {
+        state.search.message = "Open a project before replacing files".into();
+        return;
+    };
+    let Some(query) = state.search.preview_query.clone() else {
+        state.search.message = "Run a fresh replacement preview first".into();
+        return;
+    };
+    let Some(replacement) = state.search.preview_replacement.clone() else {
+        state.search.message = "Run a fresh replacement preview first".into();
+        return;
+    };
+    let selected_count = state.search.replace_files.iter().filter(|file| file.selected).count();
+    if selected_count == 0 {
+        state.search.message = "Select at least one file to replace".into();
+        return;
+    }
+    if selected_count > 200 {
+        state.search.message = "Select no more than 200 files at once".into();
+        return;
+    }
+    let root = project.root.clone();
+    let mut paths = HashSet::new();
+    let mut open_revisions = HashMap::new();
+    let mut closed_paths = Vec::new();
+    for file in state.search.replace_files.iter().filter(|file| file.selected) {
+        if !file.path.starts_with(&root) || !paths.insert(file.path.clone()) {
+            state.search.message = "The preview contains an invalid or duplicate workspace path".into();
+            return;
+        }
+        let tab = state.editor_tabs.iter().find(|tab| tab.path == file.path);
+        match (file.open_revision, tab) {
+            (Some(revision), Some(tab))
+                if tab.document.revision == revision
+                    && (file.recheck_disk || tab.document.text == file.source_text)
+                    && !tab.saving
+                    && !tab.close_after_save =>
+            {
+                open_revisions.insert(file.path.clone(), revision);
+            }
+            (Some(_), _) => {
+                state.search.message = format!("{} changed or closed since preview; run the preview again", file.path.display());
+                return;
+            }
+            (None, Some(_)) => {
+                state.search.message = format!("{} opened since preview; run the preview again", file.path.display());
+                return;
+            }
+            (None, None) => closed_paths.push(file.path.clone()),
+        }
+    }
+    let files = state.search.take_selected_replace_files().into_iter().map(|file| {
+        super::PendingWorkspaceReplaceFile {
+            path: file.path,
+            source_text: Some(file.source_text),
+            open_revision: file.open_revision,
+            recheck_disk: file.recheck_disk,
+            match_count: file.match_count,
+        }
+    }).collect();
+    state.next_workspace_edit_id = state.next_workspace_edit_id.wrapping_add(1).max(1);
+    let request = state.next_workspace_edit_id;
+    state.pending_workspace_replacements.insert(request, super::PendingWorkspaceReplace {
+        root,
+        project_generation: state.project_open_generation,
+        query,
+        replacement,
+        files,
+        open_revisions,
+    });
+    if closed_paths.is_empty() {
+        finish_workspace_replace_load(state, request, Ok(Vec::new()));
+    } else if let Err(error) = state.editor_io.load_many(request, closed_paths) {
+        state.pending_workspace_replacements.remove(&request);
+        state.search.message = format!("Cannot load replacement targets: {error}");
+    } else {
+        state.search.message = "Loading selected files for replacement…".into();
+    }
+}
+
+fn finish_workspace_replace_load(
+    state: &mut AppState,
+    request: u64,
+    result: Result<Vec<crate::editor::Document>, String>,
+) {
+    let Some(mut pending) = state.pending_workspace_replacements.remove(&request) else { return; };
+    if state.project_open_generation != pending.project_generation
+        || state.project.as_ref().is_none_or(|project| project.root != pending.root)
+    {
+        return;
+    }
+    let loaded = match result {
+        Ok(documents) => documents,
+        Err(error) => {
+            state.search.message = format!("Cannot load replacement targets: {error}");
+            return;
+        }
+    };
+    let mut loaded: HashMap<_, _> = loaded.into_iter().map(|document| (document.path.clone(), document)).collect();
+    let mut targets = Vec::with_capacity(pending.files.len());
+    for file in &mut pending.files {
+        let document = if let Some(revision) = file.open_revision {
+            let Some(tab) = state.editor_tabs.iter().find(|tab| tab.path == file.path)
+                .filter(|tab| tab.document.revision == revision && !tab.saving && !tab.close_after_save)
+            else {
+                state.search.message = format!("{} changed while loading targets; run the preview again", file.path.display());
+                return;
+            };
+            tab.document.clone()
+        } else {
+            if state.editor_tabs.iter().any(|tab| tab.path == file.path) {
+                state.search.message = format!("{} opened while loading targets; run the preview again", file.path.display());
+                return;
+            }
+            let Some(document) = loaded.remove(&file.path) else {
+                state.search.message = format!("Replacement target was not loaded: {}", file.path.display());
+                return;
+            };
+            document
+        };
+        let Some(expected_text) = file.source_text.take() else {
+            state.search.message = format!("Replacement preview for {} was already consumed", file.path.display());
+            return;
+        };
+        targets.push(crate::editor::WorkspaceReplaceTarget {
+            document,
+            expected_text,
+            expected_matches: file.match_count,
+            recheck_disk: file.recheck_disk,
+        });
+    }
+    if !loaded.is_empty() {
+        state.search.message = "Replacement targets changed while loading; run the preview again".into();
+        return;
+    }
+    let query = pending.query.text.clone();
+    let replacement = pending.replacement.clone();
+    let case_sensitive = pending.query.case_sensitive;
+    state.pending_workspace_replacements.insert(request, pending);
+    if let Err(error) = state.editor_io.replace_many(
+        request,
+        targets,
+        query,
+        replacement,
+        case_sensitive,
+    ) {
+        state.pending_workspace_replacements.remove(&request);
+        state.search.message = format!("Cannot prepare project replacement: {error}");
+    } else {
+        state.search.message = "Preparing replacements; editor files remain unsaved…".into();
+    }
+}
+
+fn finish_workspace_replace(
+    state: &mut AppState,
+    request: u64,
+    result: Result<Vec<(crate::editor::Document, usize)>, String>,
+) {
+    let Some(pending) = state.pending_workspace_replacements.remove(&request) else { return; };
+    if state.project_open_generation != pending.project_generation
+        || state.project.as_ref().is_none_or(|project| project.root != pending.root)
+    {
+        return;
+    }
+    let replacements = match result {
+        Ok(replacements) => replacements,
+        Err(error) => {
+            state.search.message = error;
+            return;
+        }
+    };
+    for file in &pending.files {
+        match pending.open_revisions.get(&file.path) {
+            Some(revision) if state.editor_tabs.iter().any(|tab| tab.path == file.path
+                && tab.document.revision == *revision && !tab.saving && !tab.close_after_save) => {}
+            Some(_) => {
+                state.search.message = format!("{} changed before replacement could be applied; no files were changed", file.path.display());
+                return;
+            }
+            None if state.editor_tabs.iter().any(|tab| tab.path == file.path) => {
+                state.search.message = format!("{} opened before replacement could be applied; no files were changed", file.path.display());
+                return;
+            }
+            None => {}
+        }
+    }
+    if replacements.len() != pending.files.len() {
+        state.search.message = "Replacement worker returned an incomplete result; no files were changed".into();
+        return;
+    }
+    let mut total_matches = 0usize;
+    for (document, count) in &replacements {
+        if !document.path.starts_with(&pending.root)
+            || !pending.files.iter().any(|file| file.path == document.path)
+        {
+            state.search.message = "Replacement worker returned a file outside the preview; no files were changed".into();
+            return;
+        }
+        total_matches = total_matches.saturating_add(*count);
+    }
+    let changed_files = replacements.len();
+    for (document, _) in replacements {
+        if let Some(tab) = state.editor_tabs.iter_mut().find(|tab| tab.path == document.path) {
+            tab.document = document;
+            tab.refresh_after_workspace_edit();
+        } else {
+            state.editor_tabs.push(EditorTab::new(document));
+        }
+    }
+    state.active_tab = state.editor_tabs.len().checked_sub(1);
+    state.last_error = None;
+    state.search.clear_replace_preview();
+    state.search.message = format!("Replaced {total_matches} matches in {changed_files} files; changes are unsaved");
+    state.status = "Project replacement applied to editor buffers; save changed files to keep the edits".into();
+}
+
 fn editor_completed(state: &mut AppState, completion: EditorCompletion) {
     match completion {
         EditorCompletion::LoadedMany { request, result } => {
-            finish_workspace_rename(state, request, result);
+            if state.pending_workspace_replacements.contains_key(&request) {
+                finish_workspace_replace_load(state, request, result);
+            } else {
+                finish_workspace_rename(state, request, result);
+            }
+        }
+        EditorCompletion::ReplacedMany { request, result } => {
+            finish_workspace_replace(state, request, result);
         }
         EditorCompletion::Loaded {
             requested_path,
@@ -1986,6 +2715,11 @@ fn editor_completed(state: &mut AppState, completion: EditorCompletion) {
                     tab.document.saved_text = snapshot;
                     let mut current_path = path.clone();
                     if saved_path != path {
+                        if let Some(pending) = state.pending_run.as_mut() {
+                            if pending.save_paths.remove(&path) {
+                                pending.save_paths.insert(saved_path.clone());
+                            }
+                        }
                         state.debugger.rename_breakpoint_source(&path, saved_path.clone());
                         tab.path = saved_path.clone();
                         tab.document.path = saved_path.clone();
@@ -2010,13 +2744,22 @@ fn editor_completed(state: &mut AppState, completion: EditorCompletion) {
                     if close {
                         remove_tab(state, &current_path);
                     } else if save_again && dirty {
-                        save_file(state, &current_path);
+                        if !save_file(state, &current_path)
+                            && state.pending_run.as_ref().is_some_and(|pending| pending.save_paths.contains(&current_path))
+                        {
+                            state.pending_run = None;
+                            state.run.summary = "Could not save project files; Run was not started".into();
+                        }
                     } else if state.pending_close.as_deref() == Some(current_path.as_path()) && !dirty {
                         remove_tab(state, &current_path);
                     }
                 }
                 Err(error) => {
                     tab.close_after_save = false;
+                    if state.pending_run.as_ref().is_some_and(|pending| pending.save_paths.contains(&path)) {
+                        state.pending_run = None;
+                        state.run.summary = "Saving project files failed; Run was not started".into();
+                    }
                     state.last_error = Some(error);
                 }
             }

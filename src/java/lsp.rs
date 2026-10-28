@@ -124,7 +124,214 @@ pub struct CompletionItem {
     pub insert_text: String,
     pub range: Option<Range>,
     pub additional_edits: Vec<(Range, String)>,
+    pub snippet_tab_stops: Option<Vec<(u32, Vec<(usize, usize)>)>>,
     pub applicable: bool,
+}
+
+const MAX_COMPLETION_SNIPPET_CHARS: usize = 16 * 1024;
+
+#[derive(Default)]
+struct SnippetExpansion {
+    text: String,
+    tab_stops: std::collections::BTreeMap<u32, Vec<(usize, usize)>>,
+}
+
+struct SnippetParser {
+    source: Vec<char>,
+    cursor: usize,
+    expansion: SnippetExpansion,
+}
+
+impl SnippetParser {
+    fn parse(source: &str) -> Option<SnippetExpansion> {
+        if source.chars().count() > MAX_COMPLETION_SNIPPET_CHARS {
+            return None;
+        }
+        let mut parser = Self {
+            source: source.chars().collect(),
+            cursor: 0,
+            expansion: SnippetExpansion::default(),
+        };
+        parser.sequence(false)?;
+        if parser.cursor != parser.source.len() {
+            return None;
+        }
+        if !parser.expansion.tab_stops.is_empty()
+            && !parser.expansion.tab_stops.contains_key(&0)
+        {
+            let end = parser.expansion.text.chars().count();
+            parser.expansion.tab_stops.insert(0, vec![(end, end)]);
+        }
+        Some(parser.expansion)
+    }
+
+    fn sequence(&mut self, nested: bool) -> Option<()> {
+        while let Some(character) = self.source.get(self.cursor).copied() {
+            match character {
+                '}' if nested => {
+                    self.cursor += 1;
+                    return Some(());
+                }
+                '\\' => {
+                    self.cursor += 1;
+                    let escaped = self.source.get(self.cursor).copied()?;
+                    if !matches!(escaped, '$' | '}' | '\\' | ',' | '|') {
+                        return None;
+                    }
+                    self.expansion.text.push(escaped);
+                    self.cursor += 1;
+                }
+                '$' => self.placeholder()?,
+                _ => {
+                    self.expansion.text.push(character);
+                    self.cursor += 1;
+                }
+            }
+        }
+        (!nested).then_some(())
+    }
+
+    fn placeholder(&mut self) -> Option<()> {
+        self.cursor += 1;
+        if self.source.get(self.cursor) == Some(&'{') {
+            self.cursor += 1;
+            return self.braced_placeholder();
+        }
+        if self.source.get(self.cursor).is_some_and(char::is_ascii_digit) {
+            let index = self.number()?;
+            let position = self.expansion.text.chars().count();
+            let default = self.previous_stop_text(index);
+            let start = position;
+            if let Some(default) = default {
+                self.expansion.text.push_str(&default);
+            }
+            self.record_stop(index, start, self.expansion.text.chars().count());
+            return Some(());
+        }
+        if self
+            .source
+            .get(self.cursor)
+            .is_some_and(|character| character.is_ascii_alphabetic() || *character == '_')
+        {
+            while self.source.get(self.cursor).is_some_and(|character| {
+                character.is_ascii_alphanumeric() || *character == '_'
+            }) {
+                self.cursor += 1;
+            }
+            return Some(());
+        }
+        self.expansion.text.push('$');
+        Some(())
+    }
+
+    fn braced_placeholder(&mut self) -> Option<()> {
+        let start = self.cursor;
+        while self.source.get(self.cursor).is_some_and(|character| {
+            character.is_ascii_alphanumeric() || *character == '_'
+        }) {
+            self.cursor += 1;
+        }
+        if start == self.cursor {
+            return None;
+        }
+        let token: String = self.source[start..self.cursor].iter().collect();
+        let numeric = token.parse::<u32>().ok();
+        let marker = *self.source.get(self.cursor)?;
+        match marker {
+            '}' => {
+                self.cursor += 1;
+                if let Some(index) = numeric {
+                    let start = self.expansion.text.chars().count();
+                    if let Some(default) = self.previous_stop_text(index) {
+                        self.expansion.text.push_str(&default);
+                    }
+                    self.record_stop(index, start, self.expansion.text.chars().count());
+                }
+                Some(())
+            }
+            ':' => {
+                if numeric.is_some_and(|index| self.expansion.tab_stops.contains_key(&index)) {
+                    return None;
+                }
+                self.cursor += 1;
+                let start = self.expansion.text.chars().count();
+                self.sequence(true)?;
+                let end = self.expansion.text.chars().count();
+                if let Some(index) = numeric {
+                    self.record_stop(index, start, end);
+                }
+                Some(())
+            }
+            '|' if numeric.is_some() => {
+                if numeric.is_some_and(|index| self.expansion.tab_stops.contains_key(&index)) {
+                    return None;
+                }
+                self.cursor += 1;
+                let start = self.expansion.text.chars().count();
+                self.choice_list()?;
+                let end = self.expansion.text.chars().count();
+                self.record_stop(numeric?, start, end);
+                Some(())
+            }
+            _ => None,
+        }
+    }
+
+    fn choice_list(&mut self) -> Option<()> {
+        let mut first_choice = true;
+        let mut found_end = false;
+        while let Some(character) = self.source.get(self.cursor).copied() {
+            if character == '|' && self.source.get(self.cursor + 1) == Some(&'}') {
+                self.cursor += 2;
+                found_end = true;
+                break;
+            }
+            if character == '\\' {
+                self.cursor += 1;
+                let escaped = self.source.get(self.cursor).copied()?;
+                if !matches!(escaped, '$' | '}' | '\\' | ',' | '|') {
+                    return None;
+                }
+                if first_choice {
+                    self.expansion.text.push(escaped);
+                }
+                self.cursor += 1;
+            } else if character == ',' {
+                first_choice = false;
+                self.cursor += 1;
+            } else {
+                if matches!(character, '$' | '}') {
+                    return None;
+                }
+                if first_choice {
+                    self.expansion.text.push(character);
+                }
+                self.cursor += 1;
+            }
+        }
+        found_end.then_some(())
+    }
+
+    fn number(&mut self) -> Option<u32> {
+        let start = self.cursor;
+        while self
+            .source
+            .get(self.cursor)
+            .is_some_and(char::is_ascii_digit)
+        {
+            self.cursor += 1;
+        }
+        self.source[start..self.cursor].iter().collect::<String>().parse().ok()
+    }
+
+    fn record_stop(&mut self, index: u32, start: usize, end: usize) {
+        self.expansion.tab_stops.entry(index).or_default().push((start, end));
+    }
+
+    fn previous_stop_text(&self, index: u32) -> Option<String> {
+        let (start, end) = *self.expansion.tab_stops.get(&index)?.first()?;
+        Some(self.expansion.text.chars().skip(start).take(end - start).collect())
+    }
 }
 #[derive(Clone, Debug)]
 pub struct SignatureInformation {
@@ -433,6 +640,8 @@ enum LanguageCommand {
         diagnostics: Vec<LanguageDiagnostic>,
         version: i64,
         rename_to: Option<String>,
+        tab_size: usize,
+        insert_spaces: bool,
     },
     SearchSymbols {
         query: String,
@@ -648,8 +857,18 @@ async fn read_messages(
                     LspError(error.to_string())
                 }
             })?;
-            serde_json::from_slice(&body)
-                .map_err(|error| LspError(format!("Invalid LSP JSON: {error}")))
+            serde_json::from_slice(&body).map_err(|error| {
+                if error.is_eof() {
+                    LspError(format!(
+                        "JDT LS sent an incomplete JSON message ({} bytes; line {}, column {})",
+                        body.len(),
+                        error.line(),
+                        error.column()
+                    ))
+                } else {
+                    LspError(format!("Invalid LSP JSON: {error}"))
+                }
+            })
         }
         .await;
         let failed = next.is_err();
@@ -1014,7 +1233,7 @@ async fn protocol(
                 "textDocument": {"synchronization": {"didSave": true}, "publishDiagnostics": {"versionSupport": true},
                 "documentSymbol": {"hierarchicalDocumentSymbolSupport": true},
                 "codeAction": {"codeActionLiteralSupport": {"codeActionKind": {"valueSet": ["quickfix", "refactor", "source"]}}},
-                "completion": {"completionItem": {"snippetSupport": false, "resolveSupport": {"properties": []}}},
+                "completion": {"completionItem": {"snippetSupport": true, "resolveSupport": {"properties": []}}},
                 "signatureHelp": {"signatureInformation": {"documentationFormat": ["plaintext"]}},
                 "hover": {"contentFormat": ["plaintext"]}, "definition": {"linkSupport": true},
                 "implementation": {"linkSupport": true},
@@ -1121,14 +1340,14 @@ async fn protocol(
                     LanguageCommand::Change { path, text, version } => notify(input, "textDocument/didChange", json!({"textDocument": {"uri": uri(&path)?, "version": version}, "contentChanges": [{"text": text}]})).await?,
                     LanguageCommand::Save(path) => notify(input, "textDocument/didSave", json!({"textDocument": {"uri": uri(&path)?}})).await?,
                     LanguageCommand::Close(path) => notify(input, "textDocument/didClose", json!({"textDocument": {"uri": uri(&path)?}})).await?,
-                    LanguageCommand::Request { command, path, project_root, position, document_end, range, diagnostics, version, rename_to } => {
+                    LanguageCommand::Request { command, path, project_root, position, document_end, range, diagnostics, version, rename_to, tab_size, insert_spaces } => {
                         let id = next_id; next_id += 1;
                         let mut params = json!({"textDocument": {"uri": uri(&path)?}, "position": position});
                         if let Some(new_name) = &rename_to {
                             params["newName"] = json!(new_name);
                         }
                         if command == EditorCommand::DocumentSymbols { params = json!({"textDocument": {"uri": uri(&path)?}}); }
-                        if command == EditorCommand::Format { params = json!({"textDocument": {"uri": uri(&path)?}, "options": {"tabSize": 4, "insertSpaces": true}}); }
+                        if command == EditorCommand::Format { params = json!({"textDocument": {"uri": uri(&path)?}, "options": {"tabSize": tab_size, "insertSpaces": insert_spaces}}); }
                         if command == EditorCommand::OrganizeImports { params = json!({"textDocument": {"uri": uri(&path)?}, "range": {"start": {"line": 0, "character": 0}, "end": document_end}, "context": {"diagnostics": []}}); }
                         if command == EditorCommand::CodeActions { params = json!({"textDocument": {"uri": uri(&path)?}, "range": range, "context": {"diagnostics": diagnostics}}); }
                         if command == EditorCommand::References { params["context"] = json!({"includeDeclaration": true}); }
@@ -1361,6 +1580,25 @@ async fn deliver_response(request: Pending, result: &Value, events: &LanguageEve
                         .or_else(|| item["insertText"].as_str())
                         .unwrap_or(&label)
                         .to_owned();
+                    let is_snippet = item["insertTextFormat"].as_u64() == Some(2);
+                    let expansion = is_snippet.then(|| SnippetParser::parse(&insert_text)).flatten();
+                    let snippet_supported = !is_snippet || expansion.is_some();
+                    let (insert_text, snippet_tab_stops) = if is_snippet {
+                        match expansion {
+                            Some(expansion) => {
+                                let mut tab_stops: Vec<_> = expansion
+                                    .tab_stops
+                                    .into_iter()
+                                    .map(|(index, ranges)| (index, ranges))
+                                    .collect();
+                                tab_stops.sort_by_key(|(index, _)| (*index == 0, *index));
+                                (expansion.text, Some(tab_stops))
+                            }
+                            None => (String::new(), None),
+                        }
+                    } else {
+                        (insert_text, None)
+                    };
                     let raw_additional = item["additionalTextEdits"].as_array();
                     let additional_edits: Vec<_> = raw_additional
                         .into_iter()
@@ -1381,8 +1619,9 @@ async fn deliver_response(request: Pending, result: &Value, events: &LanguageEve
                         insert_text,
                         range,
                         additional_edits,
+                        snippet_tab_stops,
                         applicable: valid_edits
-                            && item["insertTextFormat"].as_u64() != Some(2)
+                            && snippet_supported
                             && item.get("command").is_none_or(Value::is_null),
                     })
                 })
@@ -1645,10 +1884,15 @@ fn parse_rename_workspace_edits(
                 let new_path = file_path(&Value::String(new_uri.to_owned())).ok_or("JDT LS returned a non-file rename destination")?;
                 let parent = new_path.parent().ok_or("Rename destination has no parent")?.canonicalize().map_err(|error| format!("Cannot resolve rename destination directory: {error}"))?;
                 let destination = parent.join(new_path.file_name().ok_or("Rename destination has no filename")?);
+                let destination_exists = match std::fs::symlink_metadata(&destination) {
+                    Ok(_) => true,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+                    Err(error) => return Err(format!("Cannot inspect rename destination {}: {error}", destination.display())),
+                };
                 if !old_path.starts_with(&root) || parent != old_path.parent().unwrap_or(Path::new(""))
                     || old_path.extension().is_none_or(|ext| ext != "java")
                     || destination.extension().is_none_or(|ext| ext != "java")
-                    || std::fs::symlink_metadata(&destination).is_ok()
+                    || destination_exists
                 { return Err("Java source rename must stay in the same project directory and cannot overwrite a file".into()); }
                 resource_renames.push((old_path, destination));
             } else {
@@ -1886,6 +2130,8 @@ pub struct LanguageTool {
     pub diagnostics: HashMap<PathBuf, Vec<LanguageDiagnostic>>,
     pub summary: String,
     pub lombok_warning: Option<String>,
+    lombok_cache_check: Option<std::sync::mpsc::Receiver<(u64, PathBuf, bool)>>,
+    lombok_restart_requested: bool,
     pub code_actions: Option<(PathBuf, i64, Position, Vec<CodeActionItem>)>,
     pub code_actions_error: Option<(PathBuf, i64, String)>,
     pub completion: Option<(PathBuf, i64, Position, Vec<CompletionItem>)>,
@@ -1953,6 +2199,14 @@ pub struct ToolingSnapshot {
     pub debug_error: Option<String>,
 }
 impl LanguageTool {
+    pub fn can_request_for(&self, path: &Path) -> bool {
+        self.session.is_some()
+            && self
+                .root
+                .as_ref()
+                .is_some_and(|root| path.starts_with(root))
+    }
+
     pub fn set_repaint_context(&mut self, context: eframe::egui::Context) {
         self.repaint_context = Some(context);
     }
@@ -2104,6 +2358,8 @@ impl LanguageTool {
             .checked_add(1)
             .expect("Language generation exhausted");
         self.pending_start = None;
+        self.lombok_cache_check = None;
+        self.lombok_restart_requested = false;
         self.pending_maven_files.clear();
         self.maven_import_requested = false;
         self.symbol_query_pending = None;
@@ -2122,7 +2378,52 @@ impl LanguageTool {
     pub fn has_pending_start(&self) -> bool {
         self.pending_start.is_some()
     }
+    pub fn check_lombok_after_successful_build(&mut self) {
+        if self.lombok_warning.is_none() || self.lombok_cache_check.is_some() {
+            return;
+        }
+        let Some(root) = self.root.clone() else { return; };
+        let generation = self.generation;
+        let (sender, receiver) = std::sync::mpsc::channel();
+        self.lombok_cache_check = Some(receiver);
+        let repaint_context = self.repaint_context.clone();
+        if std::thread::Builder::new()
+            .name("lombok-cache-check".into())
+            .spawn(move || {
+                let available = crate::java::lsp_config::project_lombok_agent_is_cached(&root);
+                if sender.send((generation, root, available)).is_ok()
+                    && let Some(context) = repaint_context
+                {
+                    context.request_repaint();
+                }
+            })
+            .is_err()
+        {
+            self.lombok_cache_check = None;
+        }
+    }
+    pub fn take_lombok_restart_request(&mut self) -> bool {
+        std::mem::take(&mut self.lombok_restart_requested)
+    }
     pub fn poll(&mut self) -> Vec<LanguageUpdate> {
+        if let Some(receiver) = self.lombok_cache_check.take() {
+            match receiver.try_recv() {
+                Ok((generation, root, available)) => {
+                    if available
+                        && generation == self.generation
+                        && self.root.as_ref() == Some(&root)
+                        && self.lombok_warning.is_some()
+                    {
+                        self.lombok_restart_requested = true;
+                        self.summary = "Lombok dependency is cached; restarting Java intelligence…".into();
+                    }
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    self.lombok_cache_check = Some(receiver);
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {}
+            }
+        }
         if let Some(receiver) = self.tooling_rx.take() {
             match receiver.try_recv() {
                 Ok(snapshot) => self.tooling = snapshot,
@@ -2148,7 +2449,7 @@ impl LanguageTool {
                     ) {
                         Ok(session) => {
                             self.lombok_warning = (config.lombok_declared && config.lombok_agent.is_none()).then(||
-                                "Lombok is declared, but its JAR is not in the local Maven/Gradle cache. Resolve the dependency, then restart Java intelligence.".to_owned()
+                                "Lombok is declared, but its JAR is not in the local Maven/Gradle cache. Resolve it with a successful build or restart Java intelligence after resolving it elsewhere.".to_owned()
                             );
                             self.session = Some(session);
                         }
@@ -2290,6 +2591,8 @@ impl LanguageTool {
                 diagnostics: Vec::new(),
                 version: synced.version,
                 rename_to: None,
+                tab_size: 4,
+                insert_spaces: true,
             })?;
             self.document_symbols_version = Some(synced.version);
             Ok::<(), LspError>(())
@@ -2404,7 +2707,7 @@ impl LanguageTool {
             }
         }
     }
-    pub fn request(&mut self, command: EditorCommand, document: &Document) {
+    pub fn request(&mut self, command: EditorCommand, document: &Document, tab_size: usize, insert_spaces: bool) {
         if command == EditorCommand::CodeActions {
             self.code_actions = None;
             self.code_actions_error = None;
@@ -2436,6 +2739,8 @@ impl LanguageTool {
                 } else { Vec::new() },
                 version: synced.version,
                 rename_to: None,
+                tab_size: tab_size.clamp(1, 8),
+                insert_spaces,
             })
         })();
         if let Err(error) = result {
@@ -2462,6 +2767,8 @@ impl LanguageTool {
                 range: document_line_range(&document.text, position.line), diagnostics: Vec::new(),
                 version: synced.version,
                 rename_to: Some(new_name.trim().to_owned()),
+                tab_size: 4,
+                insert_spaces: true,
             })
         })();
         if let Err(error) = &result { self.summary = error.to_string(); }
@@ -2635,7 +2942,7 @@ impl LanguageTool {
         &mut self,
         index: usize,
         document: &mut Document,
-    ) -> Result<(), LspError> {
+    ) -> Result<Option<Vec<(u32, Vec<(usize, usize)>)>>, LspError> {
         let (path, version, position, items) = self
             .completion
             .as_ref()
@@ -2652,6 +2959,7 @@ impl LanguageTool {
         }
         let item = items
             .get(index)
+            .cloned()
             .ok_or_else(|| LspError("Completion no longer exists".into()))?;
         if !item.applicable {
             return Err(LspError(
@@ -2664,9 +2972,22 @@ impl LanguageTool {
         let mut edits = item.additional_edits.clone();
         edits.push((range, item.insert_text.clone()));
         document.apply_lsp_edits(&edits).map_err(LspError)?;
+        let tab_stops = if let Some(tab_stops) = item.snippet_tab_stops {
+            let insertion_end = document.character_index();
+            let insertion_start = insertion_end.saturating_sub(item.insert_text.chars().count());
+            Some(tab_stops.into_iter()
+                .map(|(index, ranges)| {
+                    (index, ranges.into_iter()
+                        .map(|(start, end)| (insertion_start + start, insertion_start + end))
+                        .collect())
+                })
+                .collect())
+        } else {
+            None
+        };
         self.completion = None;
         self.completion_selection = None;
-        Ok(())
+        Ok(tab_stops)
     }
 
     pub fn apply_code_action(&mut self, index: usize, document: &mut Document) -> Result<String, LspError> {
@@ -2739,6 +3060,16 @@ fn maven_import_arguments(root_pom_uri: &str) -> Value {
 pub fn render(ui: &mut eframe::egui::Ui, state: &mut crate::app::AppState) {
     use crate::app::events::AppEvent;
     use eframe::egui;
+    let stale_completion = state.language.completion.as_ref().is_some_and(|(path, version, position, _)| {
+        state.active_tab.and_then(|index| state.editor_tabs.get(index)).is_none_or(|tab| {
+            &tab.path != path
+                || tab.document.lsp_position() != *position
+                || !state.language.is_document_current(path, *version, &tab.document.text)
+        })
+    });
+    if stale_completion {
+        state.language.dismiss_completion();
+    }
     let java = state
         .active_tab
         .and_then(|index| state.editor_tabs.get(index))
@@ -2767,8 +3098,22 @@ pub fn render(ui: &mut eframe::egui::Ui, state: &mut crate::app::AppState) {
             }
         }
     });
-    ui.small(&state.language.summary);
     let mut events = Vec::new();
+    ui.small(&state.language.summary);
+    if state
+        .language
+        .summary
+        .starts_with("Java intelligence unavailable:")
+        && !state.language.has_workers()
+        && !state.language.has_pending_start()
+        && !state.pending_language_restart
+        && ui
+            .small_button("Retry Java intelligence")
+            .on_hover_text("Restart JDT LS and retry the connection")
+            .clicked()
+    {
+        events.push(AppEvent::RestartLanguage);
+    }
     if let Some(warning) = &state.language.lombok_warning {
         ui.colored_label(ui.visuals().warn_fg_color, warning);
         if ui.small_button("Restart Java intelligence after resolving Lombok").clicked() {

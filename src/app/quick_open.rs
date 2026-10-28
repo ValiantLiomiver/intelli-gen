@@ -24,7 +24,7 @@ pub struct QuickOpen {
     visible: bool,
     focus_query: bool,
     loading: bool,
-    truncated: bool,
+    warning: Option<String>,
     error: Option<String>,
     generation: Arc<AtomicU64>,
     sender: mpsc::Sender<QuickOpenEvent>,
@@ -37,7 +37,7 @@ enum QuickOpenEvent {
     Indexed {
         generation: u64,
         root: PathBuf,
-        result: Result<(Vec<Entry>, bool), String>,
+        result: Result<(Vec<Entry>, Option<String>), String>,
     },
     Matched {
         generation: u64,
@@ -61,7 +61,7 @@ impl Default for QuickOpen {
             visible: false,
             focus_query: false,
             loading: false,
-            truncated: false,
+            warning: None,
             error: None,
             generation: Arc::new(AtomicU64::new(0)),
             search_generation: Arc::new(AtomicU64::new(0)),
@@ -84,6 +84,7 @@ impl QuickOpen {
         self.files = Arc::new(Vec::new());
         self.matches.clear();
         self.last_query = "\0".into();
+        self.warning = None;
     }
 
     pub fn open(&mut self) {
@@ -115,6 +116,7 @@ impl QuickOpen {
         self.files = Arc::new(Vec::new());
         self.matches.clear();
         self.last_query = "\0".into();
+        self.warning = None;
     }
 
     fn cancel_index(&mut self) {
@@ -133,6 +135,7 @@ impl QuickOpen {
         self.loading = true;
         self.pending_root = Some(root);
         self.error = None;
+        self.warning = None;
         match thread::Builder::new()
             .name("quick-open-index".into())
             .spawn(move || {
@@ -165,10 +168,10 @@ impl QuickOpen {
                     self.loading = false;
                     self.pending_root = None;
                     match result {
-                        Ok((entries, truncated)) => {
+                        Ok((entries, warning)) => {
                             self.files = Arc::new(entries);
                             self.indexed_root = Some(root);
-                            self.truncated = truncated;
+                            self.warning = warning;
                             self.last_query = "\0".into();
                             self.update_matches();
                         }
@@ -260,8 +263,8 @@ impl QuickOpen {
                 } else if self.matches.is_empty() {
                     ui.weak("No matching files");
                 }
-                if self.truncated {
-                    ui.weak("File index limit reached; results may be incomplete.");
+                if let Some(warning) = &self.warning {
+                    ui.weak(warning);
                 }
                 egui::ScrollArea::vertical()
                     .max_height(330.0)
@@ -350,7 +353,15 @@ fn index_files(
     root: &Path,
     generation: &AtomicU64,
     expected: u64,
-) -> Result<(Vec<Entry>, bool), String> {
+) -> Result<(Vec<Entry>, Option<String>), String> {
+    let metadata = std::fs::metadata(root)
+        .map_err(|error| format!("Cannot open project directory {}: {error}", root.display()))?;
+    if !metadata.is_dir() {
+        return Err(format!(
+            "Project path is not a directory: {}",
+            root.display()
+        ));
+    }
     let mut walker = ignore::WalkBuilder::new(root);
     walker
         .follow_links(false)
@@ -363,12 +374,22 @@ fn index_files(
             )
         });
     let mut files = Vec::new();
-    let mut truncated = false;
+    let mut warning = None;
     for entry in walker.build() {
         if generation.load(Ordering::Acquire) != expected {
-            return Ok((Vec::new(), false));
+            return Ok((Vec::new(), None));
         }
-        let entry = entry.map_err(|error| format!("Cannot index project files: {error}"))?;
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                if warning.is_none() {
+                    warning = Some(format!(
+                        "Some project files could not be indexed ({error}); results may be incomplete."
+                    ));
+                }
+                continue;
+            }
+        };
         if entry.file_type().is_some_and(|kind| kind.is_file()) {
             let path = entry.into_path();
             let display = path
@@ -389,13 +410,13 @@ fn index_files(
                 filename,
             });
             if files.len() >= 100_000 {
-                truncated = true;
+                warning = Some("File index limit reached; results may be incomplete.".into());
                 break;
             }
         }
     }
     files.sort_by(|left, right| left.path.cmp(&right.path));
-    Ok((files, truncated))
+    Ok((files, warning))
 }
 
 fn fuzzy_score(path: &str, filename: &str, query: &str) -> Option<i64> {

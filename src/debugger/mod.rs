@@ -135,13 +135,18 @@ pub fn render(ui: &mut eframe::egui::Ui, state: &mut crate::app::AppState) {
     let ready=state.debugger.controller().is_some_and(|controller| controller.epoch==epoch);
     let stopped=ready && epoch%2==1 && matches!(state.debugger.state,DebugState::Stopped) && !state.debugger.inspector.control_pending;
     let running=ready && epoch%2==0 && matches!(state.debugger.state,DebugState::Running) && !state.debugger.inspector.control_pending;
+    let supported_project = state.project.as_ref()
+        .and_then(|project| project.model.as_ref())
+        .is_some_and(|model| model.kind != crate::project::ProjectKind::Unknown);
     let mut actions=Vec::new();
     let error_fg = ui.visuals().error_fg_color;
     ui.horizontal_wrapped(|ui| {
         crate::java::run_config::configuration_selector(ui, &mut state.run);
-        let enabled = state.run.selected().is_some() && !state.debugger.has_workers()
+        let enabled = supported_project && state.run.selected().is_some() && !state.debugger.has_workers()
             && state.language.tooling.debug_bundle.is_some() && !state.pending_language_restart;
-        if ui.add_enabled(enabled, egui::Button::new("Debug")).clicked() { actions.push(Action::Start); }
+        let hint = if supported_project { "Select a run configuration and configure Java Debug Server" }
+            else { "Open a Maven or Gradle project to debug" };
+        if ui.add_enabled(enabled, egui::Button::new("Debug")).on_disabled_hover_text(hint).clicked() { actions.push(Action::Start); }
         if ui.add_enabled(state.debugger.has_workers(), egui::Button::new("Stop debug")).clicked() { actions.push(Action::Stop); }
         if ui.add_enabled(stopped, egui::Button::new("Refresh threads")).clicked() {
             actions.push(Action::Inspect{epoch,selection,request:Request::Threads});

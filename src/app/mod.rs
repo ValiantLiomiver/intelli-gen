@@ -5,6 +5,7 @@ mod finder;
 mod go_to_line;
 pub mod layout;
 mod quick_open;
+mod problems;
 mod symbol_search;
 
 use std::collections::{HashMap, HashSet};
@@ -28,16 +29,18 @@ pub enum ActivePanel {
     Terminal,
     Git,
     Debugger,
+    Problems,
 }
 
 impl ActivePanel {
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::Build,
         Self::Run,
         Self::Search,
         Self::Terminal,
         Self::Git,
         Self::Debugger,
+        Self::Problems,
     ];
 
     pub fn title(self) -> &'static str {
@@ -48,12 +51,14 @@ impl ActivePanel {
             Self::Terminal => "Terminal",
             Self::Git => "Git",
             Self::Debugger => "Debugger",
+            Self::Problems => "Problems",
         }
     }
 }
 
 pub struct AppState {
     pub project: Option<Project>,
+    pub project_editor_config: crate::project::editor_config::ProjectEditorConfig,
     pub project_open_loader: crate::project::workspace::ProjectOpenLoader,
     pub project_open_generation: u64,
     pub project_opening: bool,
@@ -68,6 +73,9 @@ pub struct AppState {
     pub maven_cache_loader: MavenCacheLoader,
     pub maven_pom_watcher: Option<crate::project::maven_watch::MavenPomWatcher>,
     pub retiring_maven_watchers: Vec<crate::project::maven_watch::MavenPomWatcher>,
+    pub project_tree_watcher: Option<crate::project::tree_watch::ProjectTreeWatcher>,
+    pub retiring_project_tree_watchers: Vec<crate::project::tree_watch::ProjectTreeWatcher>,
+    pub project_tree_watch_generation: u64,
     pub maven_project_generation: u64,
     pub maven_view: Option<MavenView>,
     pub maven_view_root: Option<PathBuf>,
@@ -92,6 +100,7 @@ pub struct AppState {
     pub gradle_task_error: Option<String>,
     pub gradle_collapsed: bool,
     pub run: crate::java::run_config::RunTool,
+    pub pending_run: Option<PendingRun>,
     pub run_configuration_loader: crate::java::run_config::RunConfigurationLoader,
     pub run_configuration_generation: u64,
     pub language: crate::java::lsp::LanguageTool,
@@ -106,9 +115,12 @@ pub struct AppState {
     pub rename_symbol: Option<RenameSymbolDialog>,
     pub pending_rename_request: Option<PendingRenameRequest>,
     pub pending_workspace_edits: HashMap<u64, PendingWorkspaceRename>,
+    pub pending_workspace_replacements: HashMap<u64, PendingWorkspaceReplace>,
     pub next_workspace_edit_id: u64,
     pub editor_tabs: Vec<EditorTab>,
     pub active_tab: Option<usize>,
+    pub navigation_back: Vec<NavigationLocation>,
+    pub navigation_forward: Vec<NavigationLocation>,
     pub editor_io: EditorIo,
     pub loading_files: HashSet<PathBuf>,
     pub pending_close: Option<PathBuf>,
@@ -137,6 +149,31 @@ pub struct AppState {
     pub settings_save_error: Option<String>,
     /// Protect unreadable or malformed preferences from being overwritten by defaults.
     pub settings_writable: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NavigationLocation {
+    pub path: PathBuf,
+    pub position: crate::java::lsp::Position,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PendingRunStage {
+    ConfirmSave,
+    Saving,
+    Building,
+    Launching,
+}
+
+pub struct PendingRun {
+    pub root: PathBuf,
+    pub project_generation: u64,
+    pub configuration_generation: u64,
+    pub model: crate::project::ProjectModel,
+    pub config: crate::java::run_config::RunConfiguration,
+    pub jdk: crate::java::jdk::JdkInstallation,
+    pub stage: PendingRunStage,
+    pub save_paths: HashSet<PathBuf>,
 }
 
 pub struct NewJavaClassDialog {
@@ -171,6 +208,25 @@ pub struct PendingWorkspaceRename {
     pub files: Vec<crate::java::lsp::WorkspaceFileEdits>,
 }
 
+#[derive(Clone)]
+pub struct PendingWorkspaceReplace {
+    pub root: PathBuf,
+    pub project_generation: u64,
+    pub query: crate::search::SearchQuery,
+    pub replacement: String,
+    pub files: Vec<PendingWorkspaceReplaceFile>,
+    pub open_revisions: HashMap<PathBuf, u64>,
+}
+
+#[derive(Clone)]
+pub struct PendingWorkspaceReplaceFile {
+    pub path: PathBuf,
+    pub source_text: Option<String>,
+    pub open_revision: Option<u64>,
+    pub recheck_disk: bool,
+    pub match_count: usize,
+}
+
 pub struct PendingRenameRequest {
     pub root: PathBuf,
     pub generation: u64,
@@ -184,6 +240,14 @@ pub struct PendingRenameRequest {
 impl AppState {
     pub fn enqueue(&mut self, event: AppEvent) {
         self.events.push(event);
+    }
+
+    pub fn java_indent_settings(&self, path: &std::path::Path) -> (usize, bool) {
+        let style = self.project.as_ref().map(|project| {
+            self.project_editor_config.style_for(&project.root, path)
+        }).unwrap_or_default();
+        (style.indent_size.flatten().unwrap_or(self.settings.java_indent_size).clamp(1, 16),
+            style.insert_spaces.flatten().unwrap_or(self.settings.java_insert_spaces))
     }
 }
 
@@ -217,6 +281,7 @@ impl IdeaLikeApp {
         });
         let mut state = AppState {
             project: None,
+            project_editor_config: crate::project::editor_config::ProjectEditorConfig::default(),
             project_open_loader: crate::project::workspace::ProjectOpenLoader::default(),
             project_open_generation: 0,
             project_opening: false,
@@ -231,6 +296,9 @@ impl IdeaLikeApp {
             maven_cache_loader: MavenCacheLoader::default(),
             maven_pom_watcher: None,
             retiring_maven_watchers: Vec::new(),
+            project_tree_watcher: None,
+            retiring_project_tree_watchers: Vec::new(),
+            project_tree_watch_generation: 0,
             maven_project_generation: 0,
             maven_view: None,
             maven_view_root: None,
@@ -255,6 +323,7 @@ impl IdeaLikeApp {
             gradle_task_error: None,
             gradle_collapsed: false,
             run: crate::java::run_config::RunTool::default(),
+            pending_run: None,
             run_configuration_loader: crate::java::run_config::RunConfigurationLoader::default(),
             run_configuration_generation: 0,
             language: crate::java::lsp::LanguageTool::default(),
@@ -268,9 +337,12 @@ impl IdeaLikeApp {
             rename_symbol: None,
             pending_rename_request: None,
             pending_workspace_edits: HashMap::new(),
+            pending_workspace_replacements: HashMap::new(),
             next_workspace_edit_id: 0,
             editor_tabs: Vec::new(),
             active_tab: None,
+            navigation_back: Vec::new(),
+            navigation_forward: Vec::new(),
             editor_io: EditorIo::new(cc.egui_ctx.clone()),
             loading_files: HashSet::new(),
             pending_close: None,
@@ -336,6 +408,8 @@ impl eframe::App for IdeaLikeApp {
                     .as_ref()
                     .is_some_and(crate::project::maven_watch::MavenPomWatcher::has_worker)
                 || !self.state.retiring_maven_watchers.is_empty()
+                || self.state.project_tree_watcher.as_ref().is_some_and(crate::project::tree_watch::ProjectTreeWatcher::has_worker)
+                || !self.state.retiring_project_tree_watchers.is_empty()
                 || self.state.language.has_workers()
                 || self.state.run.has_workers()
                 || self.state.debugger.has_workers()
@@ -355,6 +429,12 @@ impl eframe::App for IdeaLikeApp {
         self.state.terminal.poll();
         self.state.git.poll();
         self.state.build.poll();
+        if let Some(successful) = self.state.build.take_completion_outcome() {
+            self.state.enqueue(AppEvent::Run(crate::app::events::RunAction::BuildCompleted(successful)));
+        }
+        if self.state.build.take_successful_completion() {
+            self.state.language.check_lombok_after_successful_build();
+        }
         for event in self.state.run_configuration_loader.poll() {
             self.state.enqueue(AppEvent::RunConfigurationsLoaded(event));
         }
@@ -414,9 +494,13 @@ impl eframe::App for IdeaLikeApp {
         for event in pom_events {
             self.state.enqueue(AppEvent::MavenPomsChanged(event));
         }
+        let tree_events = self.state.project_tree_watcher.as_mut()
+            .map(crate::project::tree_watch::ProjectTreeWatcher::poll).unwrap_or_default();
+        for event in tree_events { self.state.enqueue(AppEvent::ProjectTreeChanged(event)); }
         self.state
             .retiring_maven_watchers
             .retain_mut(|watcher| !watcher.reap());
+        self.state.retiring_project_tree_watchers.retain_mut(|watcher| !watcher.reap());
         self.state.run.poll();
         self.state.debugger.poll();
         if let Some((source, line)) = self.state.debugger.inspector.navigation.take() {
@@ -435,7 +519,11 @@ impl eframe::App for IdeaLikeApp {
         for event in self.state.language.poll() {
             self.state.enqueue(AppEvent::Language(event));
         }
-        if self.state.terminal.has_workers()
+        if self.state.language.take_lombok_restart_request() {
+            self.state.pending_language_restart = true;
+        }
+        if self.state.pending_run.is_some()
+            || self.state.terminal.has_workers()
             || self.state.build.has_workers()
             || self.state.project_open_loader.has_workers()
             || self.state.project_tree_loader.has_workers()
@@ -455,6 +543,8 @@ impl eframe::App for IdeaLikeApp {
                 .as_ref()
                 .is_some_and(crate::project::maven_watch::MavenPomWatcher::has_worker)
             || !self.state.retiring_maven_watchers.is_empty()
+            || self.state.project_tree_watcher.as_ref().is_some_and(crate::project::tree_watch::ProjectTreeWatcher::has_worker)
+            || !self.state.retiring_project_tree_watchers.is_empty()
             || self.state.language.has_workers()
             || self.state.language.has_pending_start()
             || self.state.run.has_workers()
@@ -491,9 +581,11 @@ impl eframe::App for IdeaLikeApp {
             if let Some(watcher) = &mut self.state.maven_pom_watcher {
                 watcher.request_cancel();
             }
+            if let Some(watcher) = &mut self.state.project_tree_watcher { watcher.request_cancel(); }
             for watcher in &mut self.state.retiring_maven_watchers {
                 watcher.request_cancel();
             }
+            for watcher in &mut self.state.retiring_project_tree_watchers { watcher.request_cancel(); }
             self.state.run.cancel();
             self.state.debugger.cancel();
             // Keep the JDT-owned adapter alive until disconnect/terminateDebuggee
@@ -520,6 +612,8 @@ impl eframe::App for IdeaLikeApp {
                     .as_ref()
                     .is_some_and(crate::project::maven_watch::MavenPomWatcher::has_worker)
                 || !self.state.retiring_maven_watchers.is_empty()
+                || self.state.project_tree_watcher.as_ref().is_some_and(crate::project::tree_watch::ProjectTreeWatcher::has_worker)
+                || !self.state.retiring_project_tree_watchers.is_empty()
                 || self.state.language.has_workers()
                 || self.state.run.has_workers()
                 || self.state.debugger.has_workers()

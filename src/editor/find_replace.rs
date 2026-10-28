@@ -425,7 +425,7 @@ fn find_range(
     selected.map(|((start, end), wrapped)| (start, end, wrapped))
 }
 
-fn replace_all_text(
+pub(crate) fn replace_all_text(
     text: &str,
     query: &str,
     replacement: &str,

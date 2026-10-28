@@ -23,7 +23,7 @@ cargo run -- /path/to/project-or-file
 1. Open **Settings** and discover or add installed JDKs.
 2. Choose a JDK 25 or newer as the **JDT Language Server runtime** for the bundled server. A custom launcher accepts Java 21 or newer. This runtime starts the language server and is separate from the project's JDK.
 3. Open **Project Structure** and choose the JDK for the project. Intelli-gen preserves build-file compiler targets and toolchains.
-4. Open a Maven or Gradle project. Java completion, navigation, diagnostics, and debugging require the language server and Java Debug Server plugin. Lombok-generated members are supported when the project declares Lombok and its JAR is already cached; restart Java intelligence after resolving the dependency.
+4. Open a Maven or Gradle project. Java completion opens after two identifier characters or immediately after a dot, expands supported Java snippets, synchronizes repeated placeholders as you type, and lets Tab move through fields; navigation, diagnostics, and debugging require the language server and Java Debug Server plugin. Lombok-generated members are supported when the project declares Lombok and its JAR is cached. If a successful build resolves the JAR after project open, Intelli-gen automatically restarts Java intelligence; dependencies resolved outside the IDE still need a manual restart.
 
 Release packaging places pinned Eclipse JDT Language Server and Microsoft Java Debug Server tooling inside the app bundle's resources. For a source build, use **Settings** to select installed tooling when it is not bundled beside the executable. The launcher and debug plugin can each be overridden independently. Intelli-gen does not install Java or other toolchains silently.
 
@@ -36,10 +36,12 @@ The command-line link accepts the same optional project or file path: `dist/inte
 | Action | Shortcut |
 | --- | --- |
 | Open project / file | `⇧⌘O` / `⌘O` |
+| Next / previous editor tab | `Ctrl+Tab` / `Ctrl+Shift+Tab` |
 | Go to file | `⌘P` |
 | Find / replace in file | `⌘F` / `⌘R` |
 | Find in project | `⇧⌘F` |
 | Go to line | `⌘L` |
+| Navigate to previous / next code location | `Ctrl+Alt+←` / `Ctrl+Alt+→` |
 | Reformat Java file | `⌥⌘L` |
 | Organize Java imports | `Ctrl+Alt+O` |
 | Go to Java symbol | `⌘⌥O` |
@@ -47,6 +49,8 @@ The command-line link accepts the same optional project or file path: `dist/inte
 | Complete / parameter info / hover | `Ctrl+Space` / `Ctrl+Shift+Space` / `F1` |
 | Go to definition / find references | `F12` / `Shift+F12` |
 | Rename Java symbol | `Shift+F6` |
+| Toggle Java line comment | `⌘/` |
+| Indent Java code / selected lines; navigate snippet fields | `Tab` / `⇧Tab` |
 | Java quick fixes | `⌥↩` |
 | Go to type definition | `⇧⌘B` |
 | Go to implementation | `⌥⌘B` |
@@ -54,6 +58,6 @@ The command-line link accepts the same optional project or file path: `dist/inte
 
 ## Project scope
 
-The Run Console accepts line input for interactive Java processes.
+The Run Console accepts line input for interactive Java processes. The Build panel summarizes Maven Surefire and Gradle test totals and lists failures from fresh Surefire, Failsafe, and Gradle XML reports; select a failure to open its conventional Java test source and stack-trace line when available, or use **Run class** to rerun that class. The **Problems** tool window combines available Java language-server diagnostics with the latest build diagnostics; selecting a result opens its source location.
 
-The first release targets macOS and Java projects using Maven or Gradle. Use **File → New Java Project…** to create a minimal Maven or Gradle starter locally; it creates no wrapper and downloads no tools. The starter includes a run configuration for `Main`; select an installed JDK before launching. Start, stop, or manage configurations from the **Run** menu. Use a project-tree directory's context menu to create a Java class; an optional package name creates matching subdirectories beneath the selected directory. Files up to 16 MiB are editable; files above 256 KiB use a bounded page editor that keeps the complete document available for save and find/replace. Run configurations can select a Maven/Gradle module or detect one from the main class; the JPMS module name remains a separate launch option. The app also includes project search, an integrated terminal, local Git operations, and a Java debugger. Java language services depend on installed or packaged JDT LS and Java Debug Server tooling; editing and builds remain available if optional Java tooling is unavailable.
+The first release targets macOS and Java projects using Maven or Gradle. Use **File → New Java Project…** to create a minimal Maven or Gradle starter locally; it creates no wrapper and downloads no tools. The starter includes a run configuration for `Main`; select an installed JDK before launching. **Run** builds the project first and asks before saving open project files with unsaved changes; a failed build does not launch the program. Start, stop, or manage configurations from the **Run** menu. Use a project-tree directory's context menu to create a Java class; an optional package name creates matching subdirectories beneath the selected directory. Set Java indentation to 1–8 spaces or tabs in **Settings**; the editor and Java formatter use the same preference. Parent, root, and nested `.editorconfig` files override these choices by file pattern up to the nearest `root=true`. Files up to 16 MiB are editable; files above 256 KiB use a bounded page editor that keeps the complete document available for save and find/replace. **Find in Project** also supports preview-first replacement: review and select matching files before applying edits to editor buffers, then save those files to keep the changes. Run configurations can select a Maven/Gradle module or detect one from the main class; the JPMS module name remains a separate launch option. The app also includes an integrated terminal, local Git operations, and a Java debugger. Java language services depend on installed or packaged JDT LS and Java Debug Server tooling; editing and builds remain available if optional Java tooling is unavailable.

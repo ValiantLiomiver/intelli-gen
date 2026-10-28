@@ -18,6 +18,7 @@ pub enum AppEvent {
     ProjectTreeRefreshed(crate::project::workspace::ProjectTreeEvent),
     ProjectTreeChildrenLoaded(crate::project::workspace::ProjectTreeChildrenEvent),
     ProjectTreeRootValidated(crate::project::workspace::ProjectTreeRootValidationEvent),
+    ProjectTreeChanged(crate::project::tree_watch::ProjectTreeWatchEvent),
     ValidateProjectTreeRoot {
         request: u64,
     },
@@ -31,6 +32,10 @@ pub enum AppEvent {
     OpenFile(PathBuf),
     OpenFileAtLine(PathBuf, usize),
     OpenFileAtPosition(PathBuf, crate::java::lsp::Position),
+    NavigateBack,
+    NavigateForward,
+    NextEditorTab,
+    PreviousEditorTab,
     NewJavaClass(PathBuf),
     CreateJavaClass { directory: PathBuf, name: String, package: String },
     QuickOpenOpen,
@@ -54,6 +59,8 @@ pub enum AppEvent {
     RenameSymbolOpen,
     RenameSymbolConfirm(String),
     ApplyCompletion(usize),
+    ToggleJavaLineComment,
+    IndentJava { outdent: bool },
     ApplyCodeAction(usize),
     Language(crate::java::lsp::LanguageUpdate),
     RestartLanguage,
@@ -99,6 +106,12 @@ pub enum AppEvent {
 pub enum BuildAction {
     Build,
     Test,
+    RunTest {
+        class_name: String,
+        module_root: PathBuf,
+        test_task: String,
+        integration: bool,
+    },
     Clean,
     Cancel,
 }
@@ -138,6 +151,8 @@ pub enum GradleAction {
 pub enum SearchAction {
     Open,
     Run(crate::search::SearchQuery),
+    PreviewReplace(crate::search::SearchQuery, String),
+    ApplyReplace,
     Cancel,
 }
 
@@ -198,6 +213,9 @@ pub enum DebuggerAction {
 #[derive(Clone, Debug)]
 pub enum RunAction {
     Start,
+    ConfirmSaveAndRun,
+    CancelPendingStart,
+    BuildCompleted(bool),
     Stop,
     Input(String),
     Save(crate::java::run_config::RunConfiguration),

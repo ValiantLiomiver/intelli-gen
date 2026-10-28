@@ -35,6 +35,10 @@ pub struct UserSettings {
     /// Used only when a project has no wrapper; values are executable paths, never shell commands.
     pub maven_executable: Option<PathBuf>,
     pub gradle_executable: Option<PathBuf>,
+    /// Java indentation width, clamped to 1..=8 when used in the editor.
+    pub java_indent_size: usize,
+    /// Insert spaces instead of literal tabs for Java indentation.
+    pub java_insert_spaces: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -58,6 +62,8 @@ impl Default for UserSettings {
             project_jdks: Vec::new(),
             maven_executable: None,
             gradle_executable: None,
+            java_indent_size: 4,
+            java_insert_spaces: true,
         }
     }
 }

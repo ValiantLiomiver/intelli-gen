@@ -71,6 +71,15 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
                     ui.close();
                 }
                 ui.separator();
+                if ui.add_enabled(state.editor_tabs.len() > 1, egui::Button::new("Next Tab    Ctrl+Tab")).clicked() {
+                    state.enqueue(AppEvent::NextEditorTab);
+                    ui.close();
+                }
+                if ui.add_enabled(state.editor_tabs.len() > 1, egui::Button::new("Previous Tab    Ctrl+Shift+Tab")).clicked() {
+                    state.enqueue(AppEvent::PreviousEditorTab);
+                    ui.close();
+                }
+                ui.separator();
                 if ui.button("Quit").clicked() {
                     state.enqueue(AppEvent::RequestQuit);
                     ui.close();
@@ -99,7 +108,30 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
                     ui.close();
                 }
             });
+            ui.menu_button("Navigate", |ui| {
+                if ui.add_enabled(!state.navigation_back.is_empty(), egui::Button::new("Back    Ctrl+Alt+←")).clicked() {
+                    state.enqueue(AppEvent::NavigateBack);
+                    ui.close();
+                }
+                if ui.add_enabled(!state.navigation_forward.is_empty(), egui::Button::new("Forward    Ctrl+Alt+→")).clicked() {
+                    state.enqueue(AppEvent::NavigateForward);
+                    ui.close();
+                }
+            });
             ui.menu_button("Settings", |ui| {
+                ui.label("Java indentation");
+                if let (Some(project), Some(tab)) = (&state.project, state.active_tab.and_then(|index| state.editor_tabs.get(index))) {
+                    let style = state.project_editor_config.style_for(&project.root, &tab.path);
+                    if style.indent_size.flatten().is_some() || style.insert_spaces.flatten().is_some() {
+                        let (size, spaces) = state.java_indent_settings(&tab.path);
+                        ui.weak(format!("Project .editorconfig: {size} {}", if spaces { "spaces" } else { "tabs" }));
+                    }
+                }
+                let mut indentation_changed = false;
+                indentation_changed |= ui.add(egui::Slider::new(&mut state.settings.java_indent_size, 1..=8).text("Indent size")).changed();
+                indentation_changed |= ui.checkbox(&mut state.settings.java_insert_spaces, "Insert spaces").changed();
+                if indentation_changed { state.enqueue(AppEvent::SettingsChanged); }
+                ui.separator();
                 actions::jdk_settings_ui(ui, state);
             });
             ui.menu_button("Project Structure", |ui| {
@@ -135,7 +167,7 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
                     && state.run.selected().is_some()
                     && !state.run.loading
                     && !state.run.saving;
-                if ui.add_enabled(can_launch && !state.run.has_workers(), egui::Button::new("Run Selected Configuration")).clicked() {
+                if ui.add_enabled(can_launch && !state.run.has_workers() && state.pending_run.is_none(), egui::Button::new("Run Selected Configuration")).clicked() {
                     state.enqueue(AppEvent::Run(super::events::RunAction::Start));
                     ui.close();
                 }
@@ -148,7 +180,7 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
                     ui.close();
                 }
                 ui.separator();
-                if ui.add_enabled(state.run.has_workers(), egui::Button::new("Stop Run")).clicked() {
+                if ui.add_enabled(state.run.has_workers() || state.pending_run.is_some(), egui::Button::new("Stop Run")).clicked() {
                     state.enqueue(AppEvent::Run(super::events::RunAction::Stop));
                     ui.close();
                 }
@@ -199,18 +231,30 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
                 actions::open_file_dialog(state);
             }
             ui.separator();
-            if ui.add_enabled(state.project.as_ref().and_then(|project| project.model.as_ref()).is_some() && !state.build.running(), egui::Button::new("Build")).clicked() {
+            let build_available = state.project.as_ref()
+                .and_then(|project| project.model.as_ref())
+                .is_some_and(|model| model.kind != ProjectKind::Unknown);
+            if ui.add_enabled(build_available && !state.build.running(), egui::Button::new("Build"))
+                .on_disabled_hover_text("Open a Maven or Gradle project to build")
+                .clicked() {
                 state.enqueue(AppEvent::Build(super::events::BuildAction::Build));
             }
             crate::java::run_config::configuration_selector(ui, &mut state.run);
-            if ui.add_enabled(state.run.selected().is_some() && !state.run.has_workers(), egui::Button::new("Run")).clicked() {
+            if ui.add_enabled(build_available && state.run.selected().is_some() && !state.run.has_workers() && state.pending_run.is_none(), egui::Button::new("Run"))
+                .on_disabled_hover_text("Open a Maven or Gradle project and select a run configuration")
+                .clicked() {
                 state.enqueue(AppEvent::Run(super::events::RunAction::Start));
             }
             if ui.button("Configurations…").clicked() { state.enqueue(AppEvent::ShowPanel(ActivePanel::Run)); }
-            let debug_enabled = state.run.selected().is_some() && !state.debugger.has_workers()
+            let debug_enabled = build_available && state.run.selected().is_some() && !state.debugger.has_workers()
                 && state.language.tooling.debug_bundle.is_some() && !state.pending_language_restart;
+            let debug_hint = if !build_available {
+                "Open a Maven or Gradle project to debug"
+            } else {
+                "Install the bundled Java Debug Server or choose a valid plugin JAR override in Settings, and select a run configuration"
+            };
             if ui.add_enabled(debug_enabled, egui::Button::new("Debug"))
-                .on_disabled_hover_text("Install the bundled Java Debug Server or choose a valid plugin JAR override in Settings, and select a run configuration").clicked() {
+                .on_disabled_hover_text(debug_hint).clicked() {
                 state.enqueue(AppEvent::Debugger(super::events::DebuggerAction::Start));
             }
             if let Some(project) = &state.project {
@@ -416,6 +460,7 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
                     ActivePanel::Search => crate::search::render(ui, state),
                     ActivePanel::Terminal => crate::terminal::render(ui, state),
                     ActivePanel::Git => crate::git::render(ui, state),
+                    ActivePanel::Problems => super::problems::render(ui, state),
                     ActivePanel::Build => crate::java::build::render(ui, state),
                     ActivePanel::Run => crate::java::run_config::render(ui, state),
                     ActivePanel::Debugger => crate::debugger::render(ui, state),
@@ -588,6 +633,26 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
             state.enqueue(AppEvent::RenameSymbolConfirm(new_name));
         } else if cancel {
             state.rename_symbol = None;
+        }
+    }
+    if let Some(pending) = state.pending_run.as_ref()
+        && pending.stage == super::PendingRunStage::ConfirmSave
+    {
+        let file_count = pending.save_paths.len();
+        let mut confirm = false;
+        let mut cancel = false;
+        egui::Modal::new(egui::Id::new("run_save_confirmation_modal")).show(ui.ctx(), |ui| {
+            ui.heading("Save project files before running?");
+            ui.label(format!("{file_count} open project file(s) have unsaved changes."));
+            ui.horizontal(|ui| {
+                confirm = ui.button("Save and Run").clicked();
+                cancel = ui.button("Cancel").clicked();
+            });
+        });
+        if confirm {
+            state.enqueue(AppEvent::Run(super::events::RunAction::ConfirmSaveAndRun));
+        } else if cancel {
+            state.enqueue(AppEvent::Run(super::events::RunAction::CancelPendingStart));
         }
     }
 }

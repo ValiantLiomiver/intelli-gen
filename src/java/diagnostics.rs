@@ -14,6 +14,65 @@ pub struct BuildDiagnostic {
     pub message: String,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TestSummary {
+    pub total: u32,
+    pub passed: u32,
+    pub failed: u32,
+    pub skipped: u32,
+}
+
+fn number_after(text: &str, marker: &str) -> Option<u32> {
+    let value = text.split_once(marker)?.1.trim_start();
+    let digits: String = value.chars().take_while(char::is_ascii_digit).collect();
+    (!digits.is_empty()).then(|| digits.parse().ok()).flatten()
+}
+
+/// Parse aggregate Maven Surefire and Gradle test-task summaries from console output.
+pub fn parse_test_summary(output: &str) -> Option<TestSummary> {
+    let plain = plain_text(output);
+    let text = plain.trim();
+    if text.contains("Tests run:")
+        && !text.contains(" - in ")
+        && !text.contains(" -- in ")
+    {
+        let total = number_after(text, "Tests run:")?;
+        let failures = number_after(text, "Failures:").unwrap_or(0);
+        let errors = number_after(text, "Errors:").unwrap_or(0);
+        let skipped = number_after(text, "Skipped:").unwrap_or(0).min(total);
+        let failed = failures.saturating_add(errors).min(total.saturating_sub(skipped));
+        return Some(TestSummary {
+            total,
+            passed: total.saturating_sub(failed).saturating_sub(skipped),
+            failed,
+            skipped,
+        });
+    }
+
+    let marker = if text.contains(" tests completed") {
+        " tests completed"
+    } else if text.contains(" test completed") {
+        " test completed"
+    } else {
+        return None;
+    };
+    let total = text
+        .split_once(marker)?
+        .0
+        .split_whitespace()
+        .last()?
+        .parse::<u32>()
+        .ok()?;
+    let failed = number_after(text, " failed").unwrap_or(0).min(total);
+    let skipped = number_after(text, " skipped").unwrap_or(0).min(total.saturating_sub(failed));
+    Some(TestSummary {
+        total,
+        passed: total.saturating_sub(failed).saturating_sub(skipped),
+        failed,
+        skipped,
+    })
+}
+
 /// Maven javac: `[ERROR] /path/File.java:[12,8] message`.
 /// Gradle javac: `/path/File.java:12: error: message`.
 pub fn parse(root: &Path, output: &str) -> Option<BuildDiagnostic> {
