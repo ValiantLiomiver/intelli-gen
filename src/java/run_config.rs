@@ -17,7 +17,7 @@ use super::jdk::JdkInstallation;
 use super::lsp::ClasspathResolver;
 use crate::project::ProjectModel;
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunConfiguration {
     pub id: String,
     pub name: String,
@@ -614,10 +614,10 @@ pub fn render(ui: &mut eframe::egui::Ui, state: &mut crate::app::AppState) {
         }
         if ui.add_enabled(can_edit && selected.is_some(), egui::Button::new("Delete")).clicked() { intents.push(AppEvent::Run(RunAction::Delete)); }
         let runnable_project = project_model.is_some_and(|model| model.kind != crate::project::ProjectKind::Unknown);
-        if ui.add_enabled(runnable_project && selected.is_some() && !state.run.has_workers(), egui::Button::new("Run"))
+        if ui.add_enabled(runnable_project && selected.is_some() && !state.run.has_workers() && state.pending_run.is_none(), egui::Button::new("Run"))
             .on_disabled_hover_text("Open a Maven or Gradle project and select a run configuration")
             .clicked() { intents.push(AppEvent::Run(RunAction::Start)); }
-        if ui.add_enabled(state.run.has_workers(), egui::Button::new("Stop")).clicked() { intents.push(AppEvent::Run(RunAction::Stop)); }
+        if ui.add_enabled(state.run.has_workers() || state.pending_run.is_some(), egui::Button::new("Stop")).clicked() { intents.push(AppEvent::Run(RunAction::Stop)); }
     });
     if let Some(config) = state.run.selected() {
         match state.settings.run_jdk(&root, config) {

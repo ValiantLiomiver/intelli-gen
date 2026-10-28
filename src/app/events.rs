@@ -207,6 +207,9 @@ pub enum DebuggerAction {
 #[derive(Clone, Debug)]
 pub enum RunAction {
     Start,
+    ConfirmSaveAndRun,
+    CancelPendingStart,
+    BuildCompleted(bool),
     Stop,
     Input(String),
     Save(crate::java::run_config::RunConfiguration),

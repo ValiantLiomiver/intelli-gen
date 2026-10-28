@@ -646,6 +646,7 @@ pub struct BuildTool {
     cancelling: bool,
     completion_received: bool,
     successful_completion: bool,
+    completion_outcome: Option<bool>,
     origin: Option<PathBuf>,
 }
 impl BuildTool {
@@ -653,6 +654,9 @@ impl BuildTool {
     pub fn has_workers(&self) -> bool { self.running() || !self.retiring.is_empty() }
     pub fn take_successful_completion(&mut self) -> bool {
         std::mem::take(&mut self.successful_completion)
+    }
+    pub fn take_completion_outcome(&mut self) -> Option<bool> {
+        self.completion_outcome.take()
     }
     pub fn reset(&mut self) {
         if let Some(handle) = self.handle.take() {
@@ -669,6 +673,7 @@ impl BuildTool {
         self.cancelling = false;
         self.completion_received = false;
         self.successful_completion = false;
+        self.completion_outcome = None;
         self.origin = None;
     }
     pub fn start(&mut self, request: BuildRequest, executable: Option<&Path>) -> Result<(), BuildError> {
@@ -714,6 +719,7 @@ impl BuildTool {
         self.cancelling = false;
         self.completion_received = false;
         self.successful_completion = false;
+        self.completion_outcome = None;
         self.origin = Some(origin);
     }
     pub fn cancel(&mut self) {
@@ -764,6 +770,7 @@ impl BuildTool {
                 }
                 BuildEvent::Finished { exit_code, elapsed, cancelled, jdk, error } => {
                     self.successful_completion = exit_code == Some(0) && !cancelled && error.is_none();
+                    self.completion_outcome = Some(self.successful_completion);
                     self.selected_jdk = jdk;
                     let summary = if let Some(error) = error { format!("Failed after {:.1}s: {error}", elapsed.as_secs_f32()) }
                         else { format!("{} — exit {} — {:.1}s", if cancelled { "Cancelled" } else { "Finished" },

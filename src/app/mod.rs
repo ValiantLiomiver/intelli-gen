@@ -99,6 +99,7 @@ pub struct AppState {
     pub gradle_task_error: Option<String>,
     pub gradle_collapsed: bool,
     pub run: crate::java::run_config::RunTool,
+    pub pending_run: Option<PendingRun>,
     pub run_configuration_loader: crate::java::run_config::RunConfigurationLoader,
     pub run_configuration_generation: u64,
     pub language: crate::java::lsp::LanguageTool,
@@ -145,6 +146,25 @@ pub struct AppState {
     pub settings_save_error: Option<String>,
     /// Protect unreadable or malformed preferences from being overwritten by defaults.
     pub settings_writable: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PendingRunStage {
+    ConfirmSave,
+    Saving,
+    Building,
+    Launching,
+}
+
+pub struct PendingRun {
+    pub root: PathBuf,
+    pub project_generation: u64,
+    pub configuration_generation: u64,
+    pub model: crate::project::ProjectModel,
+    pub config: crate::java::run_config::RunConfiguration,
+    pub jdk: crate::java::jdk::JdkInstallation,
+    pub stage: PendingRunStage,
+    pub save_paths: HashSet<PathBuf>,
 }
 
 pub struct NewJavaClassDialog {
@@ -285,6 +305,7 @@ impl IdeaLikeApp {
             gradle_task_error: None,
             gradle_collapsed: false,
             run: crate::java::run_config::RunTool::default(),
+            pending_run: None,
             run_configuration_loader: crate::java::run_config::RunConfigurationLoader::default(),
             run_configuration_generation: 0,
             language: crate::java::lsp::LanguageTool::default(),
@@ -388,6 +409,9 @@ impl eframe::App for IdeaLikeApp {
         self.state.terminal.poll();
         self.state.git.poll();
         self.state.build.poll();
+        if let Some(successful) = self.state.build.take_completion_outcome() {
+            self.state.enqueue(AppEvent::Run(crate::app::events::RunAction::BuildCompleted(successful)));
+        }
         if self.state.build.take_successful_completion() {
             self.state.language.check_lombok_after_successful_build();
         }
@@ -478,7 +502,8 @@ impl eframe::App for IdeaLikeApp {
         if self.state.language.take_lombok_restart_request() {
             self.state.pending_language_restart = true;
         }
-        if self.state.terminal.has_workers()
+        if self.state.pending_run.is_some()
+            || self.state.terminal.has_workers()
             || self.state.build.has_workers()
             || self.state.project_open_loader.has_workers()
             || self.state.project_tree_loader.has_workers()

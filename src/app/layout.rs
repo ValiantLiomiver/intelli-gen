@@ -135,7 +135,7 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
                     && state.run.selected().is_some()
                     && !state.run.loading
                     && !state.run.saving;
-                if ui.add_enabled(can_launch && !state.run.has_workers(), egui::Button::new("Run Selected Configuration")).clicked() {
+                if ui.add_enabled(can_launch && !state.run.has_workers() && state.pending_run.is_none(), egui::Button::new("Run Selected Configuration")).clicked() {
                     state.enqueue(AppEvent::Run(super::events::RunAction::Start));
                     ui.close();
                 }
@@ -148,7 +148,7 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
                     ui.close();
                 }
                 ui.separator();
-                if ui.add_enabled(state.run.has_workers(), egui::Button::new("Stop Run")).clicked() {
+                if ui.add_enabled(state.run.has_workers() || state.pending_run.is_some(), egui::Button::new("Stop Run")).clicked() {
                     state.enqueue(AppEvent::Run(super::events::RunAction::Stop));
                     ui.close();
                 }
@@ -208,7 +208,7 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
                 state.enqueue(AppEvent::Build(super::events::BuildAction::Build));
             }
             crate::java::run_config::configuration_selector(ui, &mut state.run);
-            if ui.add_enabled(build_available && state.run.selected().is_some() && !state.run.has_workers(), egui::Button::new("Run"))
+            if ui.add_enabled(build_available && state.run.selected().is_some() && !state.run.has_workers() && state.pending_run.is_none(), egui::Button::new("Run"))
                 .on_disabled_hover_text("Open a Maven or Gradle project and select a run configuration")
                 .clicked() {
                 state.enqueue(AppEvent::Run(super::events::RunAction::Start));
@@ -601,6 +601,26 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
             state.enqueue(AppEvent::RenameSymbolConfirm(new_name));
         } else if cancel {
             state.rename_symbol = None;
+        }
+    }
+    if let Some(pending) = state.pending_run.as_ref()
+        && pending.stage == super::PendingRunStage::ConfirmSave
+    {
+        let file_count = pending.save_paths.len();
+        let mut confirm = false;
+        let mut cancel = false;
+        egui::Modal::new(egui::Id::new("run_save_confirmation_modal")).show(ui.ctx(), |ui| {
+            ui.heading("Save project files before running?");
+            ui.label(format!("{file_count} open project file(s) have unsaved changes."));
+            ui.horizontal(|ui| {
+                confirm = ui.button("Save and Run").clicked();
+                cancel = ui.button("Cancel").clicked();
+            });
+        });
+        if confirm {
+            state.enqueue(AppEvent::Run(super::events::RunAction::ConfirmSaveAndRun));
+        } else if cancel {
+            state.enqueue(AppEvent::Run(super::events::RunAction::CancelPendingStart));
         }
     }
 }

@@ -264,6 +264,7 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
         }
         match event {
             AppEvent::OpenProject(path) => {
+                state.pending_run = None;
                 state.quick_open.cancel();
                 state.symbol_search.close();
                 state.new_java_class = None;
@@ -302,6 +303,9 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                 state.quick_open.set_project(Some(root.clone()));
                 if state.project.as_ref().map(|project| &project.root) != Some(&root) {
                     state.build.reset();
+                }
+                if state.pending_run.as_ref().is_some_and(|pending| pending.root != root) {
+                    state.pending_run = None;
                 }
                 state.run.begin_project_load();
                 state.run_configuration_generation =
@@ -771,7 +775,7 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                     save_file(state, &path);
                 }
             }
-            AppEvent::SaveFile(path) => save_file(state, &path),
+            AppEvent::SaveFile(path) => { save_file(state, &path); }
             AppEvent::CloseActiveFile => {
                 if let Some(path) = active_path(state) {
                     close_file(state, &path);
@@ -1342,9 +1346,17 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                 use crate::java::build::{BuildRequest, BuildTask};
                 if matches!(action, BuildAction::Cancel) {
                     state.build.cancel();
+                    if state.pending_run.as_ref().is_some_and(|pending| pending.stage == super::PendingRunStage::Building) {
+                        state.pending_run = None;
+                        state.run.summary = "Build cancelled — Run was not started".into();
+                    }
                     continue;
                 }
                 if state.quit_requested {
+                    continue;
+                }
+                if state.pending_run.is_some() {
+                    state.last_error = Some("Finish or cancel the pending Run before starting another build".into());
                     continue;
                 }
                 let request = (|| -> Result<_, String> {
@@ -1426,7 +1438,19 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                     continue;
                 };
                 match action {
-                    RunAction::Stop => state.run.cancel(),
+                    RunAction::Stop => {
+                        if state.pending_run.as_ref().is_some_and(|pending| pending.stage == super::PendingRunStage::Building) {
+                            state.build.cancel();
+                            state.pending_run = None;
+                            state.run.summary = "Build cancelled — Run was not started".into();
+                        } else {
+                            state.pending_run = None;
+                            state.run.cancel();
+                        }
+                    }
+                    RunAction::CancelPendingStart => state.pending_run = None,
+                    RunAction::ConfirmSaveAndRun => confirm_pending_run(state),
+                    RunAction::BuildCompleted(successful) => finish_pending_run_build(state, successful),
                     RunAction::Input(line) => {
                         if let Err(error) = state.run.send_input(&line) {
                             state.run.input_line = line;
@@ -1487,35 +1511,7 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                     RunAction::Start => {
                         state.active_panel = super::ActivePanel::Run;
                         state.settings.show_tool_window = true;
-                        let result = (|| {
-                            let config = state
-                                .run
-                                .selected()
-                                .cloned()
-                                .ok_or_else(|| "Create a run configuration first".to_owned())?;
-                            let model = project
-                                .model
-                                .as_ref()
-                                .filter(|model| model.kind != crate::project::ProjectKind::Unknown)
-                                .ok_or_else(|| "Open a Maven or Gradle project first".to_owned())?;
-                            let jdk = state.settings.run_jdk(&project.root, &config)?;
-                            let resolver = state
-                                .language
-                                .classpath_resolver()
-                                .map_err(|error| error.to_string())?;
-                            state
-                                .run
-                                .start(
-                                    crate::java::run_config::RunService::new(resolver),
-                                    &config,
-                                    model,
-                                    jdk,
-                                )
-                                .map_err(|error| error.to_string())
-                        })();
-                        if let Err(error) = result {
-                            state.run.summary = error;
-                        }
+                        begin_run_flow(state);
                     }
                 }
             }
@@ -1588,6 +1584,8 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
             }
         }
     }
+    advance_pending_run_saves(state);
+    advance_pending_run_launch(state);
     advance_quit(state);
 }
 
@@ -1792,29 +1790,237 @@ fn active_path(state: &AppState) -> Option<std::path::PathBuf> {
         .map(|tab| tab.path.clone())
 }
 
-fn save_file(state: &mut AppState, path: &std::path::Path) {
-    let Some(index) = state.editor_tabs.iter().position(|tab| tab.path == path) else {
+fn begin_run_flow(state: &mut AppState) {
+    if state.pending_run.is_some() || state.run.has_workers() {
         return;
+    }
+    if state.build.running() {
+        state.run.summary = "Wait for the current build to finish before running".into();
+        return;
+    }
+    let Some(project) = state.project.as_ref() else {
+        state.run.summary = "Open a Maven or Gradle project first".into();
+        return;
+    };
+    let Some(model) = project.model.as_ref()
+        .filter(|model| model.kind != crate::project::ProjectKind::Unknown).cloned()
+    else {
+        state.run.summary = "Open a Maven or Gradle project first".into();
+        return;
+    };
+    let root = project.root.clone();
+    let Some(config) = state.run.selected().cloned() else {
+        state.run.summary = "Create a run configuration first".into();
+        return;
+    };
+    let jdk = match state.settings.run_jdk(&root, &config) {
+        Ok(jdk) => jdk.clone(),
+        Err(error) => { state.run.summary = error; return; }
+    };
+    let save_paths: HashSet<_> = state.editor_tabs.iter()
+        .filter(|tab| tab.path.starts_with(&root)
+            && (tab.document.is_dirty() || tab.saving || tab.pending_rename_to.is_some()))
+        .map(|tab| tab.path.clone()).collect();
+    let stage = if save_paths.is_empty() { super::PendingRunStage::Building }
+        else { super::PendingRunStage::ConfirmSave };
+    state.pending_run = Some(super::PendingRun {
+        root,
+        project_generation: state.project_open_generation,
+        configuration_generation: state.run_configuration_generation,
+        model,
+        config,
+        jdk,
+        stage,
+        save_paths,
+    });
+    if state.pending_run.as_ref().is_some_and(|pending| pending.stage == super::PendingRunStage::Building) {
+        start_pending_run_build(state);
+    }
+}
+
+fn confirm_pending_run(state: &mut AppState) {
+    let Some(pending) = state.pending_run.as_mut() else { return; };
+    if pending.stage != super::PendingRunStage::ConfirmSave { return; }
+    pending.stage = super::PendingRunStage::Saving;
+    let paths: Vec<_> = pending.save_paths.iter().cloned().collect();
+    for path in paths {
+        let Some(tab) = state.editor_tabs.iter_mut().find(|tab| tab.path == path) else {
+            state.pending_run = None;
+            state.run.summary = "A project file closed before it could be saved".into();
+            return;
+        };
+        if tab.saving {
+            if tab.document.is_dirty() { tab.save_again = true; }
+            continue;
+        }
+        if !save_file(state, &path) {
+            state.pending_run = None;
+            state.run.summary = "Could not save project files; Run was not started".into();
+            return;
+        }
+    }
+    advance_pending_run_saves(state);
+}
+
+fn advance_pending_run_saves(state: &mut AppState) {
+    let Some(pending) = state.pending_run.as_ref() else { return; };
+    if pending.stage != super::PendingRunStage::Saving { return; }
+    if !run_context_is_current(state, pending) {
+        state.pending_run = None;
+        state.run.summary = "Project or run configuration changed; Run was cancelled".into();
+        return;
+    }
+    let root = pending.root.clone();
+    let newly_dirty: Vec<_> = state.editor_tabs.iter()
+        .filter(|tab| tab.path.starts_with(&root)
+            && (tab.document.is_dirty() || tab.saving || tab.pending_rename_to.is_some()))
+        .map(|tab| tab.path.clone()).collect();
+    if let Some(pending) = state.pending_run.as_mut() {
+        pending.save_paths.extend(newly_dirty);
+    }
+    let Some(pending) = state.pending_run.as_ref() else { return; };
+    let paths: Vec<_> = pending.save_paths.iter().cloned().collect();
+    let mut waiting = false;
+    for path in paths {
+        let Some(tab) = state.editor_tabs.iter().find(|tab| tab.path == path) else {
+            state.pending_run = None;
+            state.run.summary = "A project file closed before it could be saved".into();
+            return;
+        };
+        if tab.saving { waiting = true; continue; }
+        if tab.document.is_dirty() || tab.pending_rename_to.is_some() {
+            if !save_file(state, &path) {
+                state.pending_run = None;
+                state.run.summary = "Could not save project files; Run was not started".into();
+                return;
+            }
+            waiting = true;
+        }
+    }
+    if !waiting {
+        if let Some(pending) = state.pending_run.as_mut() {
+            pending.stage = super::PendingRunStage::Building;
+        }
+        start_pending_run_build(state);
+    }
+}
+
+fn start_pending_run_build(state: &mut AppState) {
+    let Some(pending) = state.pending_run.as_ref() else { return; };
+    if pending.stage != super::PendingRunStage::Building { return; }
+    if !run_context_is_current(state, pending) {
+        state.pending_run = None;
+        state.run.summary = "Project or run configuration changed; Run was cancelled".into();
+        return;
+    }
+    let executable = match pending.model.kind {
+        crate::project::ProjectKind::Maven => state.settings.maven_executable.clone(),
+        crate::project::ProjectKind::Gradle => state.settings.gradle_executable.clone(),
+        crate::project::ProjectKind::Unknown => None,
+    };
+    let request = crate::java::build::BuildRequest {
+        project: pending.model.clone(),
+        task: crate::java::build::BuildTask::Build,
+        jdk: pending.jdk.clone(),
+        module: None,
+        test_task: None,
+        test_filter: None,
+    };
+    match state.build.start(request, executable.as_deref()) {
+        Ok(()) => {
+            state.status = state.build.summary.clone();
+            state.enqueue(AppEvent::ShowPanel(super::ActivePanel::Build));
+        }
+        Err(error) => {
+            state.pending_run = None;
+            state.run.summary = format!("Build could not start: {error}");
+        }
+    }
+}
+
+fn finish_pending_run_build(state: &mut AppState, successful: bool) {
+    let Some(pending) = state.pending_run.as_ref() else { return; };
+    if pending.stage != super::PendingRunStage::Building { return; }
+    if !successful {
+        state.pending_run = None;
+        state.run.summary = "Build failed or was cancelled — Run was not started".into();
+        return;
+    }
+    if !run_context_is_current(state, &pending) {
+        state.pending_run = None;
+        state.run.summary = "Project or run configuration changed; Run was cancelled".into();
+        return;
+    }
+    if let Some(pending) = state.pending_run.as_mut() {
+        pending.stage = super::PendingRunStage::Launching;
+    }
+    advance_pending_run_launch(state);
+}
+
+fn advance_pending_run_launch(state: &mut AppState) {
+    let Some(pending) = state.pending_run.as_ref() else { return; };
+    if pending.stage != super::PendingRunStage::Launching { return; }
+    if !run_context_is_current(state, pending) {
+        state.pending_run = None;
+        state.run.summary = "Project or run configuration changed; Run was cancelled".into();
+        return;
+    }
+    if state.pending_language_restart { return; }
+    let resolver = match state.language.classpath_resolver() {
+        Ok(resolver) => resolver,
+        Err(error) if error.to_string().contains("Wait for Java intelligence to start") => {
+            state.run.summary = "Build finished; waiting for Java intelligence…".into();
+            return;
+        }
+        Err(error) => {
+            state.pending_run = None;
+            state.run.summary = error.to_string();
+            return;
+        }
+    };
+    let pending = state.pending_run.take().expect("pending run checked above");
+    if let Err(error) = state.run.start(
+        crate::java::run_config::RunService::new(resolver),
+        &pending.config,
+        &pending.model,
+        &pending.jdk,
+    ) {
+        state.run.summary = error.to_string();
+    }
+}
+
+fn run_context_is_current(state: &AppState, pending: &super::PendingRun) -> bool {
+    state.project.as_ref().is_some_and(|project| project.root == pending.root)
+        && state.project_open_generation == pending.project_generation
+        && state.run_configuration_generation == pending.configuration_generation
+        && state.run.selected() == Some(&pending.config)
+}
+
+fn save_file(state: &mut AppState, path: &std::path::Path) -> bool {
+    let Some(index) = state.editor_tabs.iter().position(|tab| tab.path == path) else {
+        return false;
     };
     let tab = &mut state.editor_tabs[index];
     if tab.saving {
         tab.save_again = true;
-        return;
+        return true;
     }
     if !tab.document.is_dirty() && tab.pending_rename_to.is_none() {
         if tab.close_after_save {
             remove_tab(state, path);
         }
-        return;
+        return true;
     }
     match state.editor_io.save(tab.document.clone(), tab.pending_rename_to.clone()) {
         Ok(()) => {
             tab.saving = true;
             state.status = format!("Saving {}…", path.display());
+            true
         }
         Err(error) => {
             tab.close_after_save = false;
-            state.last_error = Some(error);
+            state.last_error = Some(error.clone());
+            false
         }
     }
 }
@@ -2339,6 +2545,11 @@ fn editor_completed(state: &mut AppState, completion: EditorCompletion) {
                     tab.document.saved_text = snapshot;
                     let mut current_path = path.clone();
                     if saved_path != path {
+                        if let Some(pending) = state.pending_run.as_mut() {
+                            if pending.save_paths.remove(&path) {
+                                pending.save_paths.insert(saved_path.clone());
+                            }
+                        }
                         state.debugger.rename_breakpoint_source(&path, saved_path.clone());
                         tab.path = saved_path.clone();
                         tab.document.path = saved_path.clone();
@@ -2363,13 +2574,22 @@ fn editor_completed(state: &mut AppState, completion: EditorCompletion) {
                     if close {
                         remove_tab(state, &current_path);
                     } else if save_again && dirty {
-                        save_file(state, &current_path);
+                        if !save_file(state, &current_path)
+                            && state.pending_run.as_ref().is_some_and(|pending| pending.save_paths.contains(&current_path))
+                        {
+                            state.pending_run = None;
+                            state.run.summary = "Could not save project files; Run was not started".into();
+                        }
                     } else if state.pending_close.as_deref() == Some(current_path.as_path()) && !dirty {
                         remove_tab(state, &current_path);
                     }
                 }
                 Err(error) => {
                     tab.close_after_save = false;
+                    if state.pending_run.as_ref().is_some_and(|pending| pending.save_paths.contains(&path)) {
+                        state.pending_run = None;
+                        state.run.summary = "Saving project files failed; Run was not started".into();
+                    }
                     state.last_error = Some(error);
                 }
             }
