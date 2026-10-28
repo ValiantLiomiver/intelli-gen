@@ -389,11 +389,15 @@ pub struct BuildTool {
     started: Option<Instant>,
     cancelling: bool,
     completion_received: bool,
+    successful_completion: bool,
     origin: Option<PathBuf>,
 }
 impl BuildTool {
     pub fn running(&self) -> bool { self.handle.is_some() }
     pub fn has_workers(&self) -> bool { self.running() || !self.retiring.is_empty() }
+    pub fn take_successful_completion(&mut self) -> bool {
+        std::mem::take(&mut self.successful_completion)
+    }
     pub fn reset(&mut self) {
         if let Some(handle) = self.handle.take() {
             handle.cancel();
@@ -407,6 +411,7 @@ impl BuildTool {
         self.started = None;
         self.cancelling = false;
         self.completion_received = false;
+        self.successful_completion = false;
         self.origin = None;
     }
     pub fn start(&mut self, request: BuildRequest, executable: Option<&Path>) -> Result<(), BuildError> {
@@ -440,12 +445,14 @@ impl BuildTool {
     fn install_handle(&mut self, handle: BuildHandle, origin: PathBuf, label: String, summary: String) {
         self.output.clear();
         self.diagnostics.clear();
+        self.test_summary = None;
         self.summary = summary;
         self.selected_jdk = label;
         self.handle = Some(handle);
         self.started = Some(Instant::now());
         self.cancelling = false;
         self.completion_received = false;
+        self.successful_completion = false;
         self.origin = Some(origin);
     }
     pub fn cancel(&mut self) {
@@ -489,6 +496,7 @@ impl BuildTool {
                     total.skipped = total.skipped.saturating_add(summary.skipped);
                 }
                 BuildEvent::Finished { exit_code, elapsed, cancelled, jdk, error } => {
+                    self.successful_completion = exit_code == Some(0) && !cancelled && error.is_none();
                     self.selected_jdk = jdk;
                     let summary = if let Some(error) = error { format!("Failed after {:.1}s: {error}", elapsed.as_secs_f32()) }
                         else { format!("{} — exit {} — {:.1}s", if cancelled { "Cancelled" } else { "Finished" },

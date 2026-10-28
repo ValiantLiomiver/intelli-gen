@@ -339,6 +339,10 @@ fn find_project_lombok(root: &Path) -> (bool, Option<PathBuf>) {
     (true, candidates.into_iter().find(|path| path.is_file()))
 }
 
+pub(crate) fn project_lombok_agent_is_cached(root: &Path) -> bool {
+    find_project_lombok(root).1.is_some()
+}
+
 fn resolve_gradle_version(notation: &str, descriptors: &[String]) -> Option<String> {
     let is_version = |value: &str| {
         !value.is_empty() && value.chars().all(|character| character.is_ascii_digit() || character == '.')

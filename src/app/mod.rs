@@ -359,6 +359,9 @@ impl eframe::App for IdeaLikeApp {
         self.state.terminal.poll();
         self.state.git.poll();
         self.state.build.poll();
+        if self.state.build.take_successful_completion() {
+            self.state.language.check_lombok_after_successful_build();
+        }
         for event in self.state.run_configuration_loader.poll() {
             self.state.enqueue(AppEvent::RunConfigurationsLoaded(event));
         }
@@ -438,6 +441,9 @@ impl eframe::App for IdeaLikeApp {
         }
         for event in self.state.language.poll() {
             self.state.enqueue(AppEvent::Language(event));
+        }
+        if self.state.language.take_lombok_restart_request() {
+            self.state.pending_language_restart = true;
         }
         if self.state.terminal.has_workers()
             || self.state.build.has_workers()

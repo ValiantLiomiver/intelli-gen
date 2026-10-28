@@ -1896,6 +1896,8 @@ pub struct LanguageTool {
     pub diagnostics: HashMap<PathBuf, Vec<LanguageDiagnostic>>,
     pub summary: String,
     pub lombok_warning: Option<String>,
+    lombok_cache_check: Option<std::sync::mpsc::Receiver<(u64, PathBuf, bool)>>,
+    lombok_restart_requested: bool,
     pub code_actions: Option<(PathBuf, i64, Position, Vec<CodeActionItem>)>,
     pub code_actions_error: Option<(PathBuf, i64, String)>,
     pub completion: Option<(PathBuf, i64, Position, Vec<CompletionItem>)>,
@@ -2122,6 +2124,8 @@ impl LanguageTool {
             .checked_add(1)
             .expect("Language generation exhausted");
         self.pending_start = None;
+        self.lombok_cache_check = None;
+        self.lombok_restart_requested = false;
         self.pending_maven_files.clear();
         self.maven_import_requested = false;
         self.symbol_query_pending = None;
@@ -2140,7 +2144,52 @@ impl LanguageTool {
     pub fn has_pending_start(&self) -> bool {
         self.pending_start.is_some()
     }
+    pub fn check_lombok_after_successful_build(&mut self) {
+        if self.lombok_warning.is_none() || self.lombok_cache_check.is_some() {
+            return;
+        }
+        let Some(root) = self.root.clone() else { return; };
+        let generation = self.generation;
+        let (sender, receiver) = std::sync::mpsc::channel();
+        self.lombok_cache_check = Some(receiver);
+        let repaint_context = self.repaint_context.clone();
+        if std::thread::Builder::new()
+            .name("lombok-cache-check".into())
+            .spawn(move || {
+                let available = crate::java::lsp_config::project_lombok_agent_is_cached(&root);
+                if sender.send((generation, root, available)).is_ok()
+                    && let Some(context) = repaint_context
+                {
+                    context.request_repaint();
+                }
+            })
+            .is_err()
+        {
+            self.lombok_cache_check = None;
+        }
+    }
+    pub fn take_lombok_restart_request(&mut self) -> bool {
+        std::mem::take(&mut self.lombok_restart_requested)
+    }
     pub fn poll(&mut self) -> Vec<LanguageUpdate> {
+        if let Some(receiver) = self.lombok_cache_check.take() {
+            match receiver.try_recv() {
+                Ok((generation, root, available)) => {
+                    if available
+                        && generation == self.generation
+                        && self.root.as_ref() == Some(&root)
+                        && self.lombok_warning.is_some()
+                    {
+                        self.lombok_restart_requested = true;
+                        self.summary = "Lombok dependency is cached; restarting Java intelligence…".into();
+                    }
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    self.lombok_cache_check = Some(receiver);
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {}
+            }
+        }
         if let Some(receiver) = self.tooling_rx.take() {
             match receiver.try_recv() {
                 Ok(snapshot) => self.tooling = snapshot,
@@ -2166,7 +2215,7 @@ impl LanguageTool {
                     ) {
                         Ok(session) => {
                             self.lombok_warning = (config.lombok_declared && config.lombok_agent.is_none()).then(||
-                                "Lombok is declared, but its JAR is not in the local Maven/Gradle cache. Resolve the dependency, then restart Java intelligence.".to_owned()
+                                "Lombok is declared, but its JAR is not in the local Maven/Gradle cache. Resolve it with a successful build or restart Java intelligence after resolving it elsewhere.".to_owned()
                             );
                             self.session = Some(session);
                         }
