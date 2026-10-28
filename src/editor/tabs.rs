@@ -39,6 +39,76 @@ fn java_completion_trigger(document: &Document, events: &[egui::Event]) -> Optio
     (identifier_prefix >= 2).then_some(crate::java::lsp::EditorCommand::Completion)
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum JavaPairEdit {
+    None,
+    SkippedClosing,
+    InsertedPair,
+}
+
+fn auto_pair_java_character(ui: &egui::Ui, text: &mut String, editor_id: egui::Id) -> JavaPairEdit {
+    if ui.memory(|memory| memory.focused()) != Some(editor_id) {
+        return JavaPairEdit::None;
+    }
+    let Some(mut state) = egui::text_edit::TextEditState::load(ui.ctx(), editor_id) else {
+        return JavaPairEdit::None;
+    };
+    let Some(range) = state.cursor.char_range() else {
+        return JavaPairEdit::None;
+    };
+    let caret: usize = range.primary.index.into();
+    if range.primary != range.secondary {
+        return JavaPairEdit::None;
+    }
+    let typed = ui.input_mut(|input| {
+        let index = input.events.iter().position(|event| {
+            matches!(event, egui::Event::Text(character)
+                if matches!(character.as_str(), "(" | "{" | "[" | ")" | "}" | "]" | "\"" | "'"))
+        })?;
+        match input.events.remove(index) {
+            egui::Event::Text(character) => Some(character),
+            _ => None,
+        }
+    });
+    let Some(typed) = typed else { return JavaPairEdit::None; };
+    let close = match typed.as_str() {
+        "(" => Some(")"),
+        "{" => Some("}"),
+        "[" => Some("]"),
+        "\"" => Some("\""),
+        "'" => Some("'"),
+        _ => None,
+    };
+    if close.is_none() {
+        let caret_byte = byte_index(text, caret);
+        if text[caret_byte..].starts_with(&typed) {
+            let next = caret + 1;
+            state.cursor.set_char_range(Some(egui::text::CCursorRange::one(
+                egui::text::CCursor::new(next),
+            )));
+            state.store(ui.ctx(), editor_id);
+            return JavaPairEdit::SkippedClosing;
+        }
+        text.insert_str(caret_byte, &typed);
+        let next = caret + 1;
+        state.cursor.set_char_range(Some(egui::text::CCursorRange::one(
+            egui::text::CCursor::new(next),
+        )));
+        state.store(ui.ctx(), editor_id);
+        return JavaPairEdit::InsertedPair;
+    }
+    let caret_byte = byte_index(text, caret);
+    let mut insertion = typed;
+    insertion.push_str(close.unwrap_or_default());
+    text.insert_str(caret_byte, &insertion);
+    let next = caret + 1;
+    state.cursor.set_char_range(Some(egui::text::CCursorRange::one(
+        egui::text::CCursor::new(next),
+    )));
+    state.store(ui.ctx(), editor_id);
+    JavaPairEdit::InsertedPair
+}
+
 fn auto_indent_java_enter(ui: &egui::Ui, text: &mut String, editor_id: egui::Id) -> bool {
     if ui.memory(|memory| memory.focused()) != Some(editor_id) {
         return false;
@@ -217,6 +287,14 @@ impl EditorTab {
         });
         let language = super::highlighter::SourceLanguage::for_path(&self.path);
         let java = language == super::highlighter::SourceLanguage::Java;
+        let pair_edit = if java && allow_edits && !self.close_after_save {
+            auto_pair_java_character(ui, &mut self.document.text, editor_id)
+        } else {
+            JavaPairEdit::None
+        };
+        if pair_edit == JavaPairEdit::InsertedPair {
+            self.document.mark_changed();
+        }
         let auto_indented = java
             && allow_edits
             && !self.close_after_save
@@ -248,7 +326,7 @@ impl EditorTab {
                     .layouter(&mut layouter)
                     .show(ui);
                 if output.response.changed() {
-                    if !auto_indented {
+                    if !auto_indented && pair_edit != JavaPairEdit::InsertedPair {
                         self.document.mark_changed();
                     }
                 }
@@ -338,6 +416,13 @@ impl EditorTab {
             .filter(|byte| *byte == b'\n')
             .count() as u32 + 1;
         let mut page = self.document.text[self.page_start..self.page_end].to_owned();
+        let pair_edit = if super::highlighter::SourceLanguage::for_path(&self.path)
+            == super::highlighter::SourceLanguage::Java && allow_edits
+        {
+            auto_pair_java_character(ui, &mut page, editor_id)
+        } else {
+            JavaPairEdit::None
+        };
         let auto_indented = super::highlighter::SourceLanguage::for_path(&self.path)
             == super::highlighter::SourceLanguage::Java
             && allow_edits
@@ -369,7 +454,7 @@ impl EditorTab {
                     output
                 })
             }).inner.inner;
-        if output.response.changed() || auto_indented {
+        if output.response.changed() || auto_indented || pair_edit == JavaPairEdit::InsertedPair {
             self.document.text.replace_range(self.page_start..self.page_end, &page);
             self.page_end = self.page_start + page.len();
             self.document.mark_changed();
