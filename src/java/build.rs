@@ -51,6 +51,7 @@ pub struct GradleTaskRequest {
 pub enum BuildEvent {
     Output { stderr: bool, text: String },
     Diagnostic(BuildDiagnostic),
+    Tests(diagnostics::TestSummary),
     Finished {
         exit_code: Option<i32>, elapsed: Duration, cancelled: bool,
         jdk: String, error: Option<String>,
@@ -363,9 +364,13 @@ fn utf8_safe_prefix_len(bytes: &[u8]) -> usize {
 async fn emit_output(bytes: &[u8], stderr: bool, root: &Path, events: &mpsc::Sender<BuildEvent>) -> bool {
     let text = diagnostics::plain_text(&String::from_utf8_lossy(bytes)).trim_end_matches('\n').to_owned();
     let diagnostic = diagnostics::parse(root, &text);
+    let tests = diagnostics::parse_test_summary(&text);
     if events.send(BuildEvent::Output { stderr, text }).await.is_err() { return false; }
     if let Some(diagnostic) = diagnostic {
         if events.send(BuildEvent::Diagnostic(diagnostic)).await.is_err() { return false; }
+    }
+    if let Some(summary) = tests {
+        if events.send(BuildEvent::Tests(summary)).await.is_err() { return false; }
     }
     true
 }
@@ -378,6 +383,7 @@ pub struct BuildTool {
     retiring: Vec<BuildHandle>,
     pub output: VecDeque<(bool, String)>,
     pub diagnostics: Vec<BuildDiagnostic>,
+    pub test_summary: Option<diagnostics::TestSummary>,
     pub summary: String,
     pub selected_jdk: String,
     started: Option<Instant>,
@@ -395,6 +401,7 @@ impl BuildTool {
         }
         self.output.clear();
         self.diagnostics.clear();
+        self.test_summary = None;
         self.summary.clear();
         self.selected_jdk.clear();
         self.started = None;
@@ -474,6 +481,13 @@ impl BuildTool {
                 BuildEvent::Diagnostic(diagnostic) => {
                     if self.diagnostics.len() < 2000 && !self.diagnostics.contains(&diagnostic) { self.diagnostics.push(diagnostic); }
                 }
+                BuildEvent::Tests(summary) => {
+                    let total = self.test_summary.get_or_insert_with(diagnostics::TestSummary::default);
+                    total.total = total.total.saturating_add(summary.total);
+                    total.passed = total.passed.saturating_add(summary.passed);
+                    total.failed = total.failed.saturating_add(summary.failed);
+                    total.skipped = total.skipped.saturating_add(summary.skipped);
+                }
                 BuildEvent::Finished { exit_code, elapsed, cancelled, jdk, error } => {
                     self.selected_jdk = jdk;
                     let summary = if let Some(error) = error { format!("Failed after {:.1}s: {error}", elapsed.as_secs_f32()) }
@@ -511,6 +525,20 @@ pub fn render(ui: &mut egui::Ui, state: &mut crate::app::AppState) {
     });
     ui.label(&state.build.summary);
     if !state.build.selected_jdk.is_empty() { ui.small(format!("JDK: {}", state.build.selected_jdk)); }
+    if let Some(summary) = state.build.test_summary {
+        let color = if summary.failed > 0 {
+            ui.visuals().error_fg_color
+        } else {
+            ui.visuals().text_color()
+        };
+        ui.colored_label(
+            color,
+            format!(
+                "Tests reported: {} total · {} passed · {} failed · {} skipped",
+                summary.total, summary.passed, summary.failed, summary.skipped
+            ),
+        );
+    }
     let mut navigation = None;
     if !state.build.diagnostics.is_empty() {
         egui::CollapsingHeader::new(format!("Compiler diagnostics ({})", state.build.diagnostics.len())).default_open(true).show(ui, |ui| {
