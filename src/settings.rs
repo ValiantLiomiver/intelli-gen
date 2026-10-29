@@ -4,13 +4,14 @@ use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 
+use crate::i18n::LanguagePreference;
 use crate::java::jdk::{JdkInstallation, ProjectJdkSelection};
 
 const MAX_RECENT_PROJECTS: usize = 12;
@@ -19,6 +20,7 @@ const MAX_RECENT_PROJECTS: usize = 12;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct UserSettings {
+    pub language: LanguagePreference,
     pub recent_projects: Vec<PathBuf>,
     pub dark_mode: bool,
     pub show_project_panel: bool,
@@ -50,6 +52,7 @@ pub struct ProjectJdkSettings {
 impl Default for UserSettings {
     fn default() -> Self {
         Self {
+            language: LanguagePreference::System,
             recent_projects: Vec::new(),
             dark_mode: true,
             show_project_panel: true,
@@ -73,6 +76,13 @@ impl UserSettings {
         let dirs = ProjectDirs::from("dev", "Intelli-gen", "Intelli-gen")
             .ok_or(SettingsError::ConfigDirectoryUnavailable)?;
         Ok(dirs.config_dir().join("settings.toml"))
+    }
+
+    pub fn config_dir() -> Result<PathBuf, SettingsError> {
+        Self::config_path()?
+            .parent()
+            .map(PathBuf::from)
+            .ok_or(SettingsError::ConfigDirectoryUnavailable)
     }
 
     pub fn load() -> Result<Self, SettingsError> {
@@ -125,7 +135,9 @@ impl UserSettings {
     }
 
     pub fn project_jdk_id(&self, root: &std::path::Path) -> Option<&str> {
-        self.project_jdks.iter().find(|entry| entry.root == root)
+        self.project_jdks
+            .iter()
+            .find(|entry| entry.root == root)
             .map(|entry| entry.selection.default_jdk_id.as_str())
             .filter(|id| !id.is_empty())
     }
@@ -134,34 +146,52 @@ impl UserSettings {
         self.project_jdks.retain(|entry| entry.root != root);
         if let Some(default_jdk_id) = id {
             self.project_jdks.push(ProjectJdkSettings {
-                root, selection: ProjectJdkSelection { default_jdk_id },
+                root,
+                selection: ProjectJdkSelection { default_jdk_id },
             });
         }
     }
 
     /// An explicit missing/invalid override is an error, never a silent fallback.
-    pub fn selected_jdk(&self, root: &std::path::Path, override_id: Option<&str>) -> Result<&JdkInstallation, String> {
-        let id = override_id.or_else(|| self.project_jdk_id(root))
+    pub fn selected_jdk(
+        &self,
+        root: &std::path::Path,
+        override_id: Option<&str>,
+    ) -> Result<&JdkInstallation, String> {
+        let id = override_id
+            .or_else(|| self.project_jdk_id(root))
             .or(self.default_jdk_id.as_deref())
             .ok_or_else(|| "Choose a JDK in Settings or Project Structure".to_owned())?;
-        let jdk = self.jdks.iter().find(|jdk| jdk.id == id)
-            .ok_or_else(|| format!("Selected JDK {id} is no longer registered; select a replacement"))?;
+        let jdk = self.jdks.iter().find(|jdk| jdk.id == id).ok_or_else(|| {
+            format!("Selected JDK {id} is no longer registered; select a replacement")
+        })?;
         if !jdk.valid {
-            return Err(format!("Selected JDK {} is marked unavailable; validate or replace it", jdk.home.display()));
+            return Err(format!(
+                "Selected JDK {} is marked unavailable; validate or replace it",
+                jdk.home.display()
+            ));
         }
         Ok(jdk)
     }
 
     /// Resolve one launch's override without changing the catalog or project defaults.
-    pub fn run_jdk(&self, root: &std::path::Path, configuration: &crate::java::run_config::RunConfiguration) -> Result<&JdkInstallation, String> {
+    pub fn run_jdk(
+        &self,
+        root: &std::path::Path,
+        configuration: &crate::java::run_config::RunConfiguration,
+    ) -> Result<&JdkInstallation, String> {
         self.selected_jdk(root, configuration.jdk_id.as_deref())
     }
 
     pub fn jdt_ls_jdk(&self) -> Result<&JdkInstallation, String> {
         let minimum = self.jdt_ls_minimum_major();
-        let id = self.jdt_ls_jdk_id.as_deref()
-            .ok_or_else(|| format!("Choose a Java {minimum} or newer runtime for JDT LS in Settings"))?;
-        let jdk = self.jdks.iter().find(|jdk| jdk.id == id)
+        let id = self.jdt_ls_jdk_id.as_deref().ok_or_else(|| {
+            format!("Choose a Java {minimum} or newer runtime for JDT LS in Settings")
+        })?;
+        let jdk = self
+            .jdks
+            .iter()
+            .find(|jdk| jdk.id == id)
             .ok_or_else(|| "The JDT LS runtime is no longer registered".to_owned())?;
         if jdk.valid && jdk.version.major >= minimum {
             return Ok(jdk);
@@ -179,7 +209,11 @@ impl UserSettings {
     }
 
     pub fn jdt_ls_minimum_major(&self) -> u32 {
-        if self.jdt_ls_executable.is_some() { 21 } else { 25 }
+        if self.jdt_ls_executable.is_some() {
+            21
+        } else {
+            25
+        }
     }
 
     fn normalize_recent_projects(&mut self) {
@@ -203,7 +237,10 @@ pub struct SettingsSaver {
     generation: u64,
     latest: Arc<AtomicU64>,
     write_lock: Arc<Mutex<()>>,
-    tx_rx: Option<(mpsc::Sender<(u64, Result<(), String>)>, mpsc::Receiver<(u64, Result<(), String>)>)>,
+    tx_rx: Option<(
+        mpsc::Sender<(u64, Result<(), String>)>,
+        mpsc::Receiver<(u64, Result<(), String>)>,
+    )>,
     workers: Vec<JoinHandle<()>>,
 }
 
@@ -220,7 +257,9 @@ impl SettingsSaver {
             .name("settings-save".into())
             .spawn(move || {
                 let result = match write_lock.lock() {
-                    Ok(_guard) if latest.load(Ordering::SeqCst) == generation => settings.save().map_err(|error| error.to_string()),
+                    Ok(_guard) if latest.load(Ordering::SeqCst) == generation => {
+                        settings.save().map_err(|error| error.to_string())
+                    }
                     Ok(_) => return,
                     Err(_) => Err("Settings save lock is unavailable".to_owned()),
                 };
@@ -234,17 +273,25 @@ impl SettingsSaver {
     pub fn poll(&mut self) -> Vec<(u64, Result<(), String>)> {
         let mut results = Vec::new();
         if let Some((_, receiver)) = &self.tx_rx {
-            while let Ok(result) = receiver.try_recv() { results.push(result); }
+            while let Ok(result) = receiver.try_recv() {
+                results.push(result);
+            }
         }
         let mut active = Vec::new();
         for worker in self.workers.drain(..) {
-            if worker.is_finished() { let _ = worker.join(); } else { active.push(worker); }
+            if worker.is_finished() {
+                let _ = worker.join();
+            } else {
+                active.push(worker);
+            }
         }
         self.workers = active;
         results
     }
 
-    pub fn has_workers(&self) -> bool { !self.workers.is_empty() }
+    pub fn has_workers(&self) -> bool {
+        !self.workers.is_empty()
+    }
 }
 
 #[derive(Debug)]

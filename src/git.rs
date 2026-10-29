@@ -470,24 +470,29 @@ pub fn render(ui: &mut egui::Ui, state: &mut crate::app::AppState) {
         if ui
             .add_enabled(
                 state.project.is_some() && !state.git.busy,
-                egui::Button::new("Refresh"),
+                egui::Button::new(crate::i18n::ui_text(ui, "Refresh")),
             )
             .clicked()
         {
             action = Some(GitAction::Refresh);
         }
         if let Some(status) = &state.git.status {
-            ui.label(format!("Branch: {}", status.branch));
+            ui.label(crate::i18n::ui_format(
+                ui,
+                "Branch: {branch}",
+                &[("branch", &status.branch)],
+            ));
             ui.label(status.workdir.display().to_string());
         }
-        ui.label(&state.git.message);
+        ui.label(crate::i18n::message(ui.ctx(), &state.git.message));
     });
     let available = state.git.status.is_some() && !state.git.busy;
     ui.add_enabled_ui(available, |ui| {
         ui.horizontal(|ui| {
             ui.add(
-                egui::TextEdit::singleline(&mut state.git.commit_message)
-                    .hint_text("Commit message (commits all staged files)"),
+                egui::TextEdit::singleline(&mut state.git.commit_message).hint_text(
+                    crate::i18n::ui_text(ui, "Commit message (commits all staged files)"),
+                ),
             );
             let staged = state
                 .git
@@ -497,7 +502,7 @@ pub fn render(ui: &mut egui::Ui, state: &mut crate::app::AppState) {
             if ui
                 .add_enabled(
                     staged && !state.git.commit_message.trim().is_empty(),
-                    egui::Button::new("Commit staged"),
+                    egui::Button::new(crate::i18n::ui_text(ui, "Commit staged")),
                 )
                 .clicked()
             {
@@ -515,20 +520,29 @@ pub fn render(ui: &mut egui::Ui, state: &mut crate::app::AppState) {
     state.git.page = state.git.page.min(pages - 1);
     ui.horizontal(|ui| {
         if ui
-            .add_enabled(state.git.page > 0, egui::Button::new("Previous paths"))
+            .add_enabled(
+                state.git.page > 0,
+                egui::Button::new(crate::i18n::ui_text(ui, "Previous paths")),
+            )
             .clicked()
         {
             state.git.page -= 1;
         }
-        ui.label(format!(
-            "Page {} / {} · {} changed paths · at most {} per page",
-            state.git.page + 1,
-            pages,
-            count,
-            PAGE_SIZE
+        ui.label(crate::i18n::ui_format(
+            ui,
+            "Page {page} / {pages} · {count} changed paths · at most {limit} per page",
+            &[
+                ("page", &(state.git.page + 1).to_string()),
+                ("pages", &pages.to_string()),
+                ("count", &count.to_string()),
+                ("limit", &PAGE_SIZE.to_string()),
+            ],
         ));
         if ui
-            .add_enabled(state.git.page + 1 < pages, egui::Button::new("Next paths"))
+            .add_enabled(
+                state.git.page + 1 < pages,
+                egui::Button::new(crate::i18n::ui_text(ui, "Next paths")),
+            )
             .clicked()
         {
             state.git.page += 1;
@@ -541,7 +555,7 @@ pub fn render(ui: &mut egui::Ui, state: &mut crate::app::AppState) {
         .show(ui, |ui| {
             if let Some(status) = &state.git.status {
                 if status.changed_paths.is_empty() {
-                    ui.label("Working tree clean");
+                    ui.label(crate::i18n::ui_text(ui, "Working tree clean"));
                 }
                 let end = first
                     .saturating_add(PAGE_SIZE)
@@ -549,12 +563,17 @@ pub fn render(ui: &mut egui::Ui, state: &mut crate::app::AppState) {
                 let page = status.changed_paths.get(first..end).unwrap_or(&[]);
                 for path in page {
                     ui.horizontal(|ui| {
-                        ui.label(format!(
-                            "{}{}{}",
-                            if path.staged { "Staged " } else { "" },
-                            if path.unstaged { "Modified " } else { "" },
-                            if path.conflicted { "Conflict " } else { "" }
-                        ));
+                        let mut flags = Vec::new();
+                        if path.staged {
+                            flags.push(crate::i18n::ui_text(ui, "Staged"));
+                        }
+                        if path.unstaged {
+                            flags.push(crate::i18n::ui_text(ui, "Modified"));
+                        }
+                        if path.conflicted {
+                            flags.push(crate::i18n::ui_text(ui, "Conflict"));
+                        }
+                        ui.label(flags.join(" · "));
                         if ui
                             .add_enabled(
                                 available,
@@ -567,14 +586,17 @@ pub fn render(ui: &mut egui::Ui, state: &mut crate::app::AppState) {
                         if ui
                             .add_enabled(
                                 available && (path.unstaged || path.conflicted),
-                                egui::Button::new("Stage"),
+                                egui::Button::new(crate::i18n::ui_text(ui, "Stage")),
                             )
                             .clicked()
                         {
                             action = Some(GitAction::Stage(path.path.clone()));
                         }
                         if ui
-                            .add_enabled(available && path.staged, egui::Button::new("Unstage"))
+                            .add_enabled(
+                                available && path.staged,
+                                egui::Button::new(crate::i18n::ui_text(ui, "Unstage")),
+                            )
                             .clicked()
                         {
                             action = Some(GitAction::Unstage(path.path.clone()));

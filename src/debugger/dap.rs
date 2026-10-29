@@ -17,18 +17,37 @@ const MAX_PENDING: usize = 64;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DapMessage {
     pub seq: u64,
-    #[serde(flatten)] pub message: DapPayload,
+    #[serde(flatten)]
+    pub message: DapPayload,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum DapPayload {
-    Request { command: String, #[serde(default)] arguments: Value },
-    Response { request_seq: u64, success: bool, command: String,
-        #[serde(default)] message: Option<String>, #[serde(default)] body: Value },
-    Event { event: String, #[serde(default)] body: Value },
+    Request {
+        command: String,
+        #[serde(default)]
+        arguments: Value,
+    },
+    Response {
+        request_seq: u64,
+        success: bool,
+        command: String,
+        #[serde(default)]
+        message: Option<String>,
+        #[serde(default)]
+        body: Value,
+    },
+    Event {
+        event: String,
+        #[serde(default)]
+        body: Value,
+    },
 }
 #[derive(Clone, Debug)]
-pub struct DapEvent { pub event: String, pub body: Value }
+pub struct DapEvent {
+    pub event: String,
+    pub body: Value,
+}
 struct Request {
     command: String,
     arguments: Value,
@@ -42,21 +61,48 @@ struct Pending {
 }
 
 #[derive(Clone)]
-pub struct DapClient { requests: mpsc::Sender<Request> }
+pub struct DapClient {
+    requests: mpsc::Sender<Request>,
+}
 impl DapClient {
     pub async fn request(&self, command: &str, arguments: Value) -> Result<Value, DebugError> {
-        self.request_timeout(command, arguments, Duration::from_secs(20)).await
+        self.request_timeout(command, arguments, Duration::from_secs(20))
+            .await
     }
-    pub async fn request_timeout(&self, command: &str, arguments: Value, timeout: Duration) -> Result<Value, DebugError> {
-        self.start_request(command, arguments, timeout)?.wait().await
+    pub async fn request_timeout(
+        &self,
+        command: &str,
+        arguments: Value,
+        timeout: Duration,
+    ) -> Result<Value, DebugError> {
+        self.start_request(command, arguments, timeout)?
+            .wait()
+            .await
     }
     /// Enqueue immediately, even if the response future is not polled yet. DAP
     /// launch must reach the transport before configuration requests are sent.
-    pub fn start_request(&self, command: &str, arguments: Value, timeout: Duration) -> Result<DapResponse, DebugError> {
+    pub fn start_request(
+        &self,
+        command: &str,
+        arguments: Value,
+        timeout: Duration,
+    ) -> Result<DapResponse, DebugError> {
         let (reply, response) = oneshot::channel();
-        self.requests.try_send(Request { command: command.into(), arguments, timeout, reply })
-            .map_err(|error| DebugError::Transport(format!("Debug request queue unavailable: {error}")))?;
-        Ok(DapResponse { response, command: command.into(), timeout })
+        self.requests
+            .try_send(Request {
+                command: command.into(),
+                arguments,
+                timeout,
+                reply,
+            })
+            .map_err(|error| {
+                DebugError::Transport(format!("Debug request queue unavailable: {error}"))
+            })?;
+        Ok(DapResponse {
+            response,
+            command: command.into(),
+            timeout,
+        })
     }
 }
 pub struct DapResponse {
@@ -66,9 +112,12 @@ pub struct DapResponse {
 }
 impl DapResponse {
     pub async fn wait(self) -> Result<Value, DebugError> {
-        tokio::time::timeout(self.timeout + Duration::from_secs(4), self.response).await
+        tokio::time::timeout(self.timeout + Duration::from_secs(4), self.response)
+            .await
             .map_err(|_| DebugError::Transport(format!("{} response timed out", self.command)))?
-            .map_err(|_| DebugError::Transport(format!("DAP session ended during {}", self.command)))?
+            .map_err(|_| {
+                DebugError::Transport(format!("DAP session ended during {}", self.command))
+            })?
     }
 }
 
@@ -82,9 +131,15 @@ impl DapConnection {
     /// The port supplied by the current JDT LS session is always contacted on
     /// IPv4 loopback; adapter output can never redirect the client to a host.
     pub async fn connect(port: u16) -> Result<Self, DebugError> {
-        if port == 0 { return Err(DebugError::Transport("JDT LS returned port zero".into())); }
-        let stream = tokio::time::timeout(Duration::from_secs(5), TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port))).await
-            .map_err(|_| DebugError::Transport("Connecting to Java debug server timed out".into()))??;
+        if port == 0 {
+            return Err(DebugError::Transport("JDT LS returned port zero".into()));
+        }
+        let stream = tokio::time::timeout(
+            Duration::from_secs(5),
+            TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port)),
+        )
+        .await
+        .map_err(|_| DebugError::Transport("Connecting to Java debug server timed out".into()))??;
         stream.set_nodelay(true)?;
         let (requests, receiver) = mpsc::channel(64);
         // Session startup pumps this bounded event queue while awaiting every
@@ -92,67 +147,154 @@ impl DapConnection {
         let (events, event_receiver) = mpsc::channel(256);
         let (shutdown, cancellation) = watch::channel(false);
         let worker = tokio::spawn(drive(stream, receiver, events, cancellation));
-        Ok(Self { client: DapClient { requests }, events: event_receiver, shutdown, worker: Some(worker) })
+        Ok(Self {
+            client: DapClient { requests },
+            events: event_receiver,
+            shutdown,
+            worker: Some(worker),
+        })
     }
-    pub fn client(&self) -> DapClient { self.client.clone() }
-    pub async fn next_event(&mut self) -> Option<Result<DapEvent, DebugError>> { self.events.recv().await }
+    pub fn client(&self) -> DapClient {
+        self.client.clone()
+    }
+    pub async fn next_event(&mut self) -> Option<Result<DapEvent, DebugError>> {
+        self.events.recv().await
+    }
     pub async fn close(&mut self) {
         let _ = self.shutdown.send(true);
-        if let Some(worker) = self.worker.take() { let _ = worker.await; }
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.await;
+        }
     }
 }
 impl Drop for DapConnection {
-    fn drop(&mut self) { let _ = self.shutdown.send(true); }
+    fn drop(&mut self) {
+        let _ = self.shutdown.send(true);
+    }
 }
 
-async fn write_message(writer: &mut (impl AsyncWrite + Unpin), message: DapMessage) -> Result<(), DebugError> {
-    let body = serde_json::to_vec(&message).map_err(|error| DebugError::Transport(format!("Cannot encode DAP message: {error}")))?;
-    if body.len() > MAX_BODY { return Err(DebugError::Transport("Outgoing DAP message exceeds 16 MiB".into())); }
+async fn write_message(
+    writer: &mut (impl AsyncWrite + Unpin),
+    message: DapMessage,
+) -> Result<(), DebugError> {
+    let body = serde_json::to_vec(&message)
+        .map_err(|error| DebugError::Transport(format!("Cannot encode DAP message: {error}")))?;
+    if body.len() > MAX_BODY {
+        return Err(DebugError::Transport(
+            "Outgoing DAP message exceeds 16 MiB".into(),
+        ));
+    }
     tokio::time::timeout(Duration::from_secs(3), async {
-        writer.write_all(format!("Content-Length: {}\r\n\r\n", body.len()).as_bytes()).await?;
+        writer
+            .write_all(format!("Content-Length: {}\r\n\r\n", body.len()).as_bytes())
+            .await?;
         writer.write_all(&body).await?;
         writer.flush().await
-    }).await.map_err(|_| DebugError::Transport("DAP write timed out".into()))??;
+    })
+    .await
+    .map_err(|_| DebugError::Transport("DAP write timed out".into()))??;
     Ok(())
 }
 async fn read_message(reader: &mut (impl AsyncRead + Unpin)) -> Result<DapMessage, DebugError> {
     let mut header = Vec::new();
     while !header.ends_with(b"\r\n\r\n") {
-        if header.len() >= 8192 { return Err(DebugError::Transport("DAP header exceeds 8 KiB".into())); }
+        if header.len() >= 8192 {
+            return Err(DebugError::Transport("DAP header exceeds 8 KiB".into()));
+        }
         header.push(reader.read_u8().await?);
     }
-    let header = std::str::from_utf8(&header).map_err(|_| DebugError::Transport("DAP header is not ASCII/UTF-8".into()))?;
+    let header = std::str::from_utf8(&header)
+        .map_err(|_| DebugError::Transport("DAP header is not ASCII/UTF-8".into()))?;
     let mut length = None;
     for line in header.split("\r\n").filter(|line| !line.is_empty()) {
-        let (name, value) = line.split_once(':').ok_or_else(|| DebugError::Transport("Malformed DAP header".into()))?;
+        let (name, value) = line
+            .split_once(':')
+            .ok_or_else(|| DebugError::Transport("Malformed DAP header".into()))?;
         if name.eq_ignore_ascii_case("Content-Length") {
-            if length.is_some() { return Err(DebugError::Transport("Duplicate DAP Content-Length".into())); }
-            length = Some(value.trim().parse::<usize>().map_err(|_| DebugError::Transport("Invalid DAP Content-Length".into()))?);
+            if length.is_some() {
+                return Err(DebugError::Transport("Duplicate DAP Content-Length".into()));
+            }
+            length = Some(
+                value
+                    .trim()
+                    .parse::<usize>()
+                    .map_err(|_| DebugError::Transport("Invalid DAP Content-Length".into()))?,
+            );
         }
     }
-    let length = length.filter(|length| *length > 0 && *length <= MAX_BODY)
+    let length = length
+        .filter(|length| *length > 0 && *length <= MAX_BODY)
         .ok_or_else(|| DebugError::Transport("Missing or oversized DAP Content-Length".into()))?;
     let mut body = vec![0; length];
     reader.read_exact(&mut body).await?;
-    serde_json::from_slice(&body).map_err(|error| DebugError::Transport(format!("Malformed DAP JSON: {error}")))
+    serde_json::from_slice(&body)
+        .map_err(|error| DebugError::Transport(format!("Malformed DAP JSON: {error}")))
 }
 
-async fn drive(stream: TcpStream, mut requests: mpsc::Receiver<Request>,
-    events: mpsc::Sender<Result<DapEvent, DebugError>>, mut cancellation: watch::Receiver<bool>) {
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn dap_framing_round_trips_a_request() {
+        let (mut sender, mut receiver) = tokio::io::duplex(1024);
+        let message = DapMessage {
+            seq: 7,
+            message: DapPayload::Request {
+                command: "setBreakpoints".into(),
+                arguments: json!({"source":{"path":"/project/Main.java"},"breakpoints":[{"line":12}]}),
+            },
+        };
+        write_message(&mut sender, message).await.unwrap();
+        let decoded = read_message(&mut receiver).await.unwrap();
+        assert_eq!(decoded.seq, 7);
+        match decoded.message {
+            DapPayload::Request { command, arguments } => {
+                assert_eq!(command, "setBreakpoints");
+                assert_eq!(arguments["breakpoints"][0]["line"], 12);
+                assert_eq!(arguments["source"]["path"], "/project/Main.java");
+            }
+            _ => panic!("expected a DAP request"),
+        }
+    }
+
+    #[tokio::test]
+    async fn dap_rejects_empty_and_oversized_frames_before_reading_body() {
+        for length in [0, MAX_BODY + 1] {
+            let (mut sender, mut receiver) = tokio::io::duplex(128);
+            sender
+                .write_all(format!("Content-Length: {length}\r\n\r\n").as_bytes())
+                .await
+                .unwrap();
+            assert!(read_message(&mut receiver).await.is_err());
+        }
+    }
+}
+
+async fn drive(
+    stream: TcpStream,
+    mut requests: mpsc::Receiver<Request>,
+    events: mpsc::Sender<Result<DapEvent, DebugError>>,
+    mut cancellation: watch::Receiver<bool>,
+) {
     let (mut reader, mut writer) = stream.into_split();
     let (incoming, mut messages) = mpsc::channel(64);
     let reader_task = tokio::spawn(async move {
         loop {
             let message = read_message(&mut reader).await;
             let failed = message.is_err();
-            if incoming.send(message).await.is_err() || failed { break; }
+            if incoming.send(message).await.is_err() || failed {
+                break;
+            }
         }
     });
     let mut sequence = 1u64;
     let mut pending: HashMap<u64, Pending> = HashMap::new();
     let mut tick = tokio::time::interval(Duration::from_millis(100));
     let failure = 'connection: loop {
-        if *cancellation.borrow() { break None; }
+        if *cancellation.borrow() {
+            break None;
+        }
         tokio::select! {
             _ = cancellation.changed() => break None,
             request = requests.recv() => {
@@ -216,10 +358,17 @@ async fn drive(stream: TcpStream, mut requests: mpsc::Receiver<Request>,
         }
     };
     let error = failure.clone().unwrap_or(DebugError::Cancelled);
-    for (_, request) in pending { let _ = request.reply.send(Err(error.clone())); }
+    for (_, request) in pending {
+        let _ = request.reply.send(Err(error.clone()));
+    }
     requests.close();
-    while let Ok(request) = requests.try_recv() { let _ = request.reply.send(Err(error.clone())); }
+    while let Ok(request) = requests.try_recv() {
+        let _ = request.reply.send(Err(error.clone()));
+    }
     let _ = writer.shutdown().await;
-    reader_task.abort(); let _ = reader_task.await;
-    if let Some(error) = failure { let _ = events.try_send(Err(error)); }
+    reader_task.abort();
+    let _ = reader_task.await;
+    if let Some(error) = failure {
+        let _ = events.try_send(Err(error));
+    }
 }

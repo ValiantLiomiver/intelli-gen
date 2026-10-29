@@ -73,11 +73,14 @@ impl FindReplace {
             return actions;
         }
         let mut open = self.visible;
-        egui::Window::new(if self.replace_visible {
-            "Find and Replace"
-        } else {
-            "Find in File"
-        })
+        egui::Window::new(crate::i18n::text(
+            ctx,
+            if self.replace_visible {
+                "Find and Replace"
+            } else {
+                "Find in File"
+            },
+        ))
         .collapsible(false)
         .resizable(false)
         .fixed_size([500.0, if self.replace_visible { 170.0 } else { 125.0 }])
@@ -86,7 +89,7 @@ impl FindReplace {
         .show(ctx, |ui| {
             let query = ui.add(
                 egui::TextEdit::singleline(&mut self.query)
-                    .hint_text("Find")
+                    .hint_text(crate::i18n::ui_text(ui, "Find"))
                     .desired_width(f32::INFINITY),
             );
             if self.focus_query {
@@ -100,7 +103,7 @@ impl FindReplace {
             if self.replace_visible {
                 let replacement = ui.add(
                     egui::TextEdit::singleline(&mut self.replacement)
-                        .hint_text("Replace with")
+                        .hint_text(crate::i18n::ui_text(ui, "Replace with"))
                         .desired_width(f32::INFINITY),
                 );
                 if replacement.changed() {
@@ -109,26 +112,38 @@ impl FindReplace {
             }
             ui.horizontal(|ui| {
                 if ui
-                    .add_enabled(!self.pending, egui::Button::new("Previous"))
+                    .add_enabled(
+                        !self.pending,
+                        egui::Button::new(crate::i18n::ui_text(ui, "Previous")),
+                    )
                     .clicked()
                 {
                     actions.push(FindAction::Previous);
                 }
                 if ui
-                    .add_enabled(!self.pending, egui::Button::new("Next"))
+                    .add_enabled(
+                        !self.pending,
+                        egui::Button::new(crate::i18n::ui_text(ui, "Next")),
+                    )
                     .clicked()
                 {
                     actions.push(FindAction::Next);
                 }
                 if self.replace_visible {
                     if ui
-                        .add_enabled(!self.pending, egui::Button::new("Replace"))
+                        .add_enabled(
+                            !self.pending,
+                            egui::Button::new(crate::i18n::ui_text(ui, "Replace")),
+                        )
                         .clicked()
                     {
                         actions.push(FindAction::Replace);
                     }
                     if ui
-                        .add_enabled(!self.pending, egui::Button::new("Replace All"))
+                        .add_enabled(
+                            !self.pending,
+                            egui::Button::new(crate::i18n::ui_text(ui, "Replace All")),
+                        )
                         .clicked()
                     {
                         actions.push(FindAction::ReplaceAll);
@@ -140,7 +155,11 @@ impl FindReplace {
                 {
                     self.invalidate();
                 }
-                if ui.button("×").on_hover_text("Close").clicked() {
+                if ui
+                    .button(crate::i18n::ui_text(ui, "×"))
+                    .on_hover_text(crate::i18n::ui_text(ui, "Close"))
+                    .clicked()
+                {
                     actions.push(FindAction::Close);
                 }
             });

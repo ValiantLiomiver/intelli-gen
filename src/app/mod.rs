@@ -4,8 +4,8 @@ mod file_structure;
 mod finder;
 mod go_to_line;
 pub mod layout;
-mod quick_open;
 mod problems;
+mod quick_open;
 mod symbol_search;
 
 use std::collections::{HashMap, HashSet};
@@ -15,6 +15,7 @@ use eframe::egui;
 
 use crate::editor::EditorIo;
 pub use crate::editor::EditorTab;
+use crate::i18n::Translator;
 use crate::project::maven_view::{MavenView, MavenViewLoader};
 use crate::project::{Project, maven_cache::MavenCacheLoader, tree::ProjectTree};
 use crate::settings::UserSettings;
@@ -106,8 +107,7 @@ pub struct AppState {
     pub language: crate::java::lsp::LanguageTool,
     pub debugger: crate::debugger::DebugTool,
     pub pending_language_restart: bool,
-    pub pending_navigation:
-        std::collections::HashMap<PathBuf, crate::java::lsp::Position>,
+    pub pending_navigation: std::collections::HashMap<PathBuf, crate::java::lsp::Position>,
     pub project_tree: Option<ProjectTree>,
     pub project_tree_error: Option<String>,
     pub new_java_class: Option<NewJavaClassDialog>,
@@ -129,6 +129,8 @@ pub struct AppState {
     pub active_panel: ActivePanel,
     pub events: Vec<AppEvent>,
     pub settings: UserSettings,
+    pub translator: Translator,
+    pub localization_error: Option<String>,
     pub jdk_discovery: crate::java::jdk::JdkDiscovery,
     pub settings_saver: crate::settings::SettingsSaver,
     pub settings_save_generation: u64,
@@ -243,11 +245,22 @@ impl AppState {
     }
 
     pub fn java_indent_settings(&self, path: &std::path::Path) -> (usize, bool) {
-        let style = self.project.as_ref().map(|project| {
-            self.project_editor_config.style_for(&project.root, path)
-        }).unwrap_or_default();
-        (style.indent_size.flatten().unwrap_or(self.settings.java_indent_size).clamp(1, 16),
-            style.insert_spaces.flatten().unwrap_or(self.settings.java_insert_spaces))
+        let style = self
+            .project
+            .as_ref()
+            .map(|project| self.project_editor_config.style_for(&project.root, path))
+            .unwrap_or_default();
+        (
+            style
+                .indent_size
+                .flatten()
+                .unwrap_or(self.settings.java_indent_size)
+                .clamp(1, 16),
+            style
+                .insert_spaces
+                .flatten()
+                .unwrap_or(self.settings.java_insert_spaces),
+        )
     }
 }
 
@@ -274,11 +287,17 @@ impl IdeaLikeApp {
                 false,
             ),
         };
+        let config_dir = UserSettings::config_dir().ok();
+        let (translator, localization_error) =
+            Translator::load(settings.language, config_dir.as_deref());
         cc.egui_ctx.set_theme(if settings.dark_mode {
             egui::Theme::Dark
         } else {
             egui::Theme::Light
         });
+        cc.egui_ctx.send_viewport_cmd(egui::ViewportCommand::Title(
+            translator.text("Intelli-gen — Java Workbench").into_owned(),
+        ));
         let mut state = AppState {
             project: None,
             project_editor_config: crate::project::editor_config::ProjectEditorConfig::default(),
@@ -351,6 +370,8 @@ impl IdeaLikeApp {
             active_panel: ActivePanel::default(),
             events: Vec::new(),
             settings,
+            translator,
+            localization_error,
             jdk_discovery: crate::java::jdk::JdkDiscovery::default(),
             settings_saver: crate::settings::SettingsSaver::default(),
             settings_save_generation: 0,
@@ -359,7 +380,7 @@ impl IdeaLikeApp {
             quick_open: quick_open::QuickOpen::default(),
             symbol_search: symbol_search::SymbolSearch::default(),
             file_structure: file_structure::FileStructure::default(),
-                go_to_line: go_to_line::GoToLine::default(),
+            go_to_line: go_to_line::GoToLine::default(),
             find_replace: crate::editor::find_replace::FindReplace::default(),
             jdk_path_input: String::new(),
             status: "Open a Maven or Gradle project to get started".into(),
@@ -408,7 +429,11 @@ impl eframe::App for IdeaLikeApp {
                     .as_ref()
                     .is_some_and(crate::project::maven_watch::MavenPomWatcher::has_worker)
                 || !self.state.retiring_maven_watchers.is_empty()
-                || self.state.project_tree_watcher.as_ref().is_some_and(crate::project::tree_watch::ProjectTreeWatcher::has_worker)
+                || self
+                    .state
+                    .project_tree_watcher
+                    .as_ref()
+                    .is_some_and(crate::project::tree_watch::ProjectTreeWatcher::has_worker)
                 || !self.state.retiring_project_tree_watchers.is_empty()
                 || self.state.language.has_workers()
                 || self.state.run.has_workers()
@@ -422,7 +447,10 @@ impl eframe::App for IdeaLikeApp {
         for completion in self.state.editor_io.drain() {
             self.state.enqueue(AppEvent::EditorCompleted(completion));
         }
-        let active_find_tab = self.state.active_tab.and_then(|index| self.state.editor_tabs.get_mut(index));
+        let active_find_tab = self
+            .state
+            .active_tab
+            .and_then(|index| self.state.editor_tabs.get_mut(index));
         self.state.find_replace.poll(active_find_tab);
         self.state.search.poll();
         self.state.quick_open.poll();
@@ -430,7 +458,9 @@ impl eframe::App for IdeaLikeApp {
         self.state.git.poll();
         self.state.build.poll();
         if let Some(successful) = self.state.build.take_completion_outcome() {
-            self.state.enqueue(AppEvent::Run(crate::app::events::RunAction::BuildCompleted(successful)));
+            self.state.enqueue(AppEvent::Run(
+                crate::app::events::RunAction::BuildCompleted(successful),
+            ));
         }
         if self.state.build.take_successful_completion() {
             self.state.language.check_lombok_after_successful_build();
@@ -494,13 +524,21 @@ impl eframe::App for IdeaLikeApp {
         for event in pom_events {
             self.state.enqueue(AppEvent::MavenPomsChanged(event));
         }
-        let tree_events = self.state.project_tree_watcher.as_mut()
-            .map(crate::project::tree_watch::ProjectTreeWatcher::poll).unwrap_or_default();
-        for event in tree_events { self.state.enqueue(AppEvent::ProjectTreeChanged(event)); }
+        let tree_events = self
+            .state
+            .project_tree_watcher
+            .as_mut()
+            .map(crate::project::tree_watch::ProjectTreeWatcher::poll)
+            .unwrap_or_default();
+        for event in tree_events {
+            self.state.enqueue(AppEvent::ProjectTreeChanged(event));
+        }
         self.state
             .retiring_maven_watchers
             .retain_mut(|watcher| !watcher.reap());
-        self.state.retiring_project_tree_watchers.retain_mut(|watcher| !watcher.reap());
+        self.state
+            .retiring_project_tree_watchers
+            .retain_mut(|watcher| !watcher.reap());
         self.state.run.poll();
         self.state.debugger.poll();
         if let Some((source, line)) = self.state.debugger.inspector.navigation.take() {
@@ -543,7 +581,11 @@ impl eframe::App for IdeaLikeApp {
                 .as_ref()
                 .is_some_and(crate::project::maven_watch::MavenPomWatcher::has_worker)
             || !self.state.retiring_maven_watchers.is_empty()
-            || self.state.project_tree_watcher.as_ref().is_some_and(crate::project::tree_watch::ProjectTreeWatcher::has_worker)
+            || self
+                .state
+                .project_tree_watcher
+                .as_ref()
+                .is_some_and(crate::project::tree_watch::ProjectTreeWatcher::has_worker)
             || !self.state.retiring_project_tree_watchers.is_empty()
             || self.state.language.has_workers()
             || self.state.language.has_pending_start()
@@ -581,11 +623,15 @@ impl eframe::App for IdeaLikeApp {
             if let Some(watcher) = &mut self.state.maven_pom_watcher {
                 watcher.request_cancel();
             }
-            if let Some(watcher) = &mut self.state.project_tree_watcher { watcher.request_cancel(); }
+            if let Some(watcher) = &mut self.state.project_tree_watcher {
+                watcher.request_cancel();
+            }
             for watcher in &mut self.state.retiring_maven_watchers {
                 watcher.request_cancel();
             }
-            for watcher in &mut self.state.retiring_project_tree_watchers { watcher.request_cancel(); }
+            for watcher in &mut self.state.retiring_project_tree_watchers {
+                watcher.request_cancel();
+            }
             self.state.run.cancel();
             self.state.debugger.cancel();
             // Keep the JDT-owned adapter alive until disconnect/terminateDebuggee
@@ -612,7 +658,11 @@ impl eframe::App for IdeaLikeApp {
                     .as_ref()
                     .is_some_and(crate::project::maven_watch::MavenPomWatcher::has_worker)
                 || !self.state.retiring_maven_watchers.is_empty()
-                || self.state.project_tree_watcher.as_ref().is_some_and(crate::project::tree_watch::ProjectTreeWatcher::has_worker)
+                || self
+                    .state
+                    .project_tree_watcher
+                    .as_ref()
+                    .is_some_and(crate::project::tree_watch::ProjectTreeWatcher::has_worker)
                 || !self.state.retiring_project_tree_watchers.is_empty()
                 || self.state.language.has_workers()
                 || self.state.run.has_workers()

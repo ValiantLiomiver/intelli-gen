@@ -155,8 +155,11 @@ fn watch(
                     let changed_paths: Vec<_> = paths.drain().collect();
                     let needs_rescan = std::mem::take(&mut rescan);
                     if needs_rescan || !changed_paths.is_empty() {
-                        let editor_config = (needs_rescan || changed_paths.iter().any(|path| path.file_name().is_some_and(|name| name == ".editorconfig")))
-                            .then(|| super::editor_config::ProjectEditorConfig::load(&root));
+                        let editor_config = (needs_rescan
+                            || changed_paths.iter().any(|path| {
+                                path.file_name().is_some_and(|name| name == ".editorconfig")
+                            }))
+                        .then(|| super::editor_config::ProjectEditorConfig::load(&root));
                         let _ = sender.send(ProjectTreeWatchEvent {
                             root: root.clone(),
                             generation,

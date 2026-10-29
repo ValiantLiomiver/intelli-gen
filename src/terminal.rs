@@ -75,10 +75,16 @@ impl TerminalSession {
         self.stopped.store(true, Ordering::Relaxed);
     }
     fn reap(&mut self) -> bool {
-        if !self.supervisor.as_ref().is_some_and(std::thread::JoinHandle::is_finished) {
+        if !self
+            .supervisor
+            .as_ref()
+            .is_some_and(std::thread::JoinHandle::is_finished)
+        {
             return false;
         }
-        if let Some(supervisor) = self.supervisor.take() { let _ = supervisor.join(); }
+        if let Some(supervisor) = self.supervisor.take() {
+            let _ = supervisor.join();
+        }
         true
     }
 }
@@ -352,7 +358,9 @@ impl TerminalTool {
         self.focus_next = true;
     }
     pub fn close(&mut self) {
-        for session in &self.retiring_sessions { session.close(); }
+        for session in &self.retiring_sessions {
+            session.close();
+        }
         if let Some(session) = &self.session {
             session.close();
             self.closing = true;
@@ -393,7 +401,7 @@ impl TerminalTool {
             match output {
                 TerminalOutput::Bytes(bytes) => self.parser.process(&bytes),
                 TerminalOutput::Message(message) => self.message = message,
-                TerminalOutput::Exited => {},
+                TerminalOutput::Exited => {}
             }
         }
         if session.reap() {
@@ -402,7 +410,7 @@ impl TerminalTool {
                 match output {
                     TerminalOutput::Bytes(bytes) => self.parser.process(&bytes),
                     TerminalOutput::Message(message) => self.message = message,
-                    TerminalOutput::Exited => {},
+                    TerminalOutput::Exited => {}
                 }
             }
             self.session = None;
@@ -458,23 +466,29 @@ pub fn render(ui: &mut egui::Ui, state: &mut crate::app::AppState) {
     ui.horizontal(|ui| {
         if state.terminal.session.is_none()
             && ui
-                .add_enabled(state.project.is_some(), egui::Button::new("Open terminal"))
+                .add_enabled(
+                    state.project.is_some(),
+                    egui::Button::new(crate::i18n::ui_text(ui, "Open terminal")),
+                )
                 .clicked()
         {
             action = Some(TerminalAction::Open);
         }
         if state.terminal.session.is_some() {
             if ui
-                .add_enabled(!state.terminal.closing, egui::Button::new("Close session"))
+                .add_enabled(
+                    !state.terminal.closing,
+                    egui::Button::new(crate::i18n::ui_text(ui, "Close session")),
+                )
                 .clicked()
             {
                 action = Some(TerminalAction::Close);
             }
-            if ui.button("Interrupt").clicked() {
+            if ui.button(crate::i18n::ui_text(ui, "Interrupt")).clicked() {
                 action = Some(TerminalAction::Input("\u{3}".into()));
             }
         }
-        ui.label(&state.terminal.message);
+        ui.label(crate::i18n::message(ui.ctx(), &state.terminal.message));
     });
     let terminal = &mut state.terminal;
     let font = egui::FontId::monospace(13.0);

@@ -90,16 +90,33 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
     let errors = problems.iter().filter(|problem| problem.rank == 0).count();
     let warnings = problems.iter().filter(|problem| problem.rank == 1).count();
     ui.horizontal(|ui| {
-        ui.label(format!("{} displayed", problems.len()));
-        ui.colored_label(ui.visuals().error_fg_color, format!("{errors} errors"));
-        ui.colored_label(ui.visuals().warn_fg_color, format!("{warnings} warnings"));
+        ui.label(crate::i18n::ui_format(
+            ui,
+            "{count} displayed",
+            &[("count", &problems.len().to_string())],
+        ));
+        ui.colored_label(
+            ui.visuals().error_fg_color,
+            crate::i18n::ui_format(ui, "{count} errors", &[("count", &errors.to_string())]),
+        );
+        ui.colored_label(
+            ui.visuals().warn_fg_color,
+            crate::i18n::ui_format(ui, "{count} warnings", &[("count", &warnings.to_string())]),
+        );
         if problems.len() == MAX_VISIBLE_PROBLEMS {
-            ui.small(format!("Display limit reached ({MAX_VISIBLE_PROBLEMS})"));
+            ui.small(crate::i18n::ui_format(
+                ui,
+                "Display limit reached ({count})",
+                &[("count", &MAX_VISIBLE_PROBLEMS.to_string())],
+            ));
         }
     });
     ui.separator();
     if problems.is_empty() {
-        ui.label("No Java or build problems reported.");
+        ui.label(crate::i18n::ui_text(
+            ui,
+            "No Java or build problems reported.",
+        ));
         return;
     }
     egui::ScrollArea::both()

@@ -37,7 +37,7 @@ impl FileStructure {
             .iter()
             .filter(|symbol| query.is_empty() || symbol.name.to_lowercase().contains(&query))
             .collect();
-        egui::Window::new("File Structure")
+        egui::Window::new(crate::i18n::text(ctx, "File Structure"))
             .collapsible(false)
             .resizable(true)
             .fixed_size([560.0, 460.0])
@@ -46,7 +46,10 @@ impl FileStructure {
             .show(ctx, |ui| {
                 let response = ui.add(
                     egui::TextEdit::singleline(&mut self.query)
-                        .hint_text("Filter classes, methods, and fields…")
+                        .hint_text(crate::i18n::ui_text(
+                            ui,
+                            "Filter classes, methods, and fields…",
+                        ))
                         .desired_width(f32::INFINITY),
                 );
                 if self.focus_query {
@@ -80,14 +83,20 @@ impl FileStructure {
                 if language.document_symbols_loading {
                     ui.horizontal(|ui| {
                         ui.spinner();
-                        ui.label("Loading Java file structure…");
+                        ui.label(crate::i18n::ui_text(ui, "Loading Java file structure…"));
                     });
                 } else if let Some(error) = &language.document_symbols_error {
-                    ui.colored_label(ui.visuals().error_fg_color, error);
+                    ui.colored_label(
+                        ui.visuals().error_fg_color,
+                        crate::i18n::message(ui.ctx(), error),
+                    );
                 } else if symbols.is_empty() {
-                    ui.weak("No symbols found in this Java file.");
+                    ui.weak(crate::i18n::ui_text(
+                        ui,
+                        "No symbols found in this Java file.",
+                    ));
                 } else if filtered.is_empty() {
-                    ui.weak("No matching symbols.");
+                    ui.weak(crate::i18n::ui_text(ui, "No matching symbols."));
                 }
                 egui::ScrollArea::vertical()
                     .max_height(380.0)

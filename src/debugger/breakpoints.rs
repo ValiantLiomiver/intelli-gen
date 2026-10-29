@@ -8,11 +8,14 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, mpsc};
 use std::thread::{self, JoinHandle};
 
+const MAX_LOG_MESSAGE_BYTES: usize = 16 * 1024;
+
 #[derive(Clone, Debug)]
 pub struct Breakpoint {
     pub source: PathBuf,
     pub line: u32,
     pub condition: Option<String>,
+    pub log_message: Option<String>,
     pub enabled: bool,
 }
 
@@ -148,6 +151,8 @@ struct StoredBreakpoint {
     source: PathBuf,
     line: u32,
     condition: Option<String>,
+    #[serde(default)]
+    log_message: Option<String>,
     enabled: bool,
 }
 
@@ -187,6 +192,11 @@ fn read_breakpoints(root: &Path) -> Result<Vec<Breakpoint>, String> {
                 .condition
                 .as_ref()
                 .is_some_and(|condition| condition.len() > 4096 || condition.contains('\0'))
+            || point.log_message.as_ref().is_some_and(|message| {
+                message.trim().is_empty()
+                    || message.len() > MAX_LOG_MESSAGE_BYTES
+                    || message.contains('\0')
+            })
             || !safe_relative_path(&point.source)
         {
             continue;
@@ -195,6 +205,7 @@ fn read_breakpoints(root: &Path) -> Result<Vec<Breakpoint>, String> {
             source: root.join(point.source),
             line: point.line,
             condition: point.condition,
+            log_message: point.log_message,
             enabled: point.enabled,
         });
     }
@@ -218,6 +229,7 @@ fn write_breakpoints(root: &Path, points: &[Breakpoint]) -> Result<(), String> {
                 source,
                 line: point.line,
                 condition: point.condition.clone(),
+                log_message: point.log_message.clone(),
                 enabled: point.enabled,
             })
         })
@@ -372,9 +384,14 @@ pub struct Breakpoints {
 }
 impl Breakpoints {
     pub fn rename_source(&mut self, old: &Path, new: PathBuf) -> bool {
-        if old == new { return false; }
-        let Some(points) = self.sources.remove(old) else { return false; };
-        self.status.retain(|(source, _), _| source != old && source != &new);
+        if old == new {
+            return false;
+        }
+        let Some(points) = self.sources.remove(old) else {
+            return false;
+        };
+        self.status
+            .retain(|(source, _), _| source != old && source != &new);
         self.modified.remove(old);
         self.modified.remove(&new);
         self.in_flight.remove(old);
@@ -546,6 +563,7 @@ impl Breakpoints {
                 source: source.clone(),
                 line,
                 condition: None,
+                log_message: None,
                 enabled: true,
             });
             entries.sort_by_key(|point| point.line);
@@ -560,8 +578,16 @@ impl Breakpoints {
         source: &Path,
         line: u32,
         condition: Option<String>,
+        log_message: Option<String>,
         enabled: bool,
     ) -> bool {
+        if log_message.as_ref().is_some_and(|message| {
+            message.trim().is_empty()
+                || message.len() > MAX_LOG_MESSAGE_BYTES
+                || message.contains('\0')
+        }) {
+            return false;
+        }
         let Some(point) = self
             .sources
             .get_mut(source)
@@ -569,16 +595,60 @@ impl Breakpoints {
         else {
             return false;
         };
-        if point.condition == condition && point.enabled == enabled {
+        if point.condition == condition
+            && point.log_message == log_message
+            && point.enabled == enabled
+        {
             return false;
         }
         point.condition = condition;
+        point.log_message = log_message;
         point.enabled = enabled;
         self.status.remove(&(source.to_path_buf(), line));
         self.in_flight.remove(source);
         self.revision = self.revision.wrapping_add(1);
         self.revisions.insert(source.to_path_buf(), self.revision);
         true
+    }
+    pub fn set_log_message(&mut self, source: PathBuf, line: u32, log_message: String) -> bool {
+        if line == 0
+            || log_message.trim().is_empty()
+            || log_message.len() > MAX_LOG_MESSAGE_BYTES
+            || log_message.contains('\0')
+        {
+            return false;
+        }
+        let entries = self.sources.entry(source.clone()).or_default();
+        if let Some(point) = entries.iter_mut().find(|point| point.line == line) {
+            if point.log_message.as_deref() == Some(log_message.as_str()) && point.enabled {
+                return false;
+            }
+            point.log_message = Some(log_message);
+            point.enabled = true;
+        } else {
+            entries.push(Breakpoint {
+                source: source.clone(),
+                line,
+                condition: None,
+                log_message: Some(log_message),
+                enabled: true,
+            });
+            entries.sort_by_key(|point| point.line);
+        }
+        self.status.remove(&(source.clone(), line));
+        self.in_flight.remove(&source);
+        self.revision = self.revision.wrapping_add(1);
+        self.revisions.insert(source, self.revision);
+        true
+    }
+    pub fn logpoint_lines(&self, source: &Path) -> Vec<u32> {
+        self.sources
+            .get(source)
+            .into_iter()
+            .flatten()
+            .filter(|point| point.enabled && point.log_message.is_some())
+            .map(|point| point.line)
+            .collect()
     }
     pub fn source_revision(&self, source: &Path) -> u64 {
         self.revisions.get(source).copied().unwrap_or(0)
@@ -599,7 +669,13 @@ impl Breakpoints {
             .into_iter()
             .flatten()
             .filter(|point| point.enabled)
-            .map(|point| json!({"line":point.line,"condition":point.condition}))
+            .map(|point| {
+                let mut breakpoint = json!({"line":point.line,"condition":point.condition});
+                if let Some(message) = &point.log_message {
+                    breakpoint["logMessage"] = json!(message);
+                }
+                breakpoint
+            })
             .collect();
         json!({"source":{"path":source,"name":source.file_name().map(|s|s.to_string_lossy())},"breakpoints":points,"sourceModified":self.modified.contains(source)})
     }
