@@ -4,12 +4,11 @@ pub mod dap;
 pub mod session;
 pub mod stack;
 pub mod variables;
-pub use stack::DebugController;
 
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-pub use session::{DebugClient, DebugEvent, DebugService, DebugSession, DebugState, DebugTool};
+pub use session::{DebugClient, DebugService, DebugState, DebugTool};
 
 #[derive(Clone, Debug)]
 pub enum DebugError {

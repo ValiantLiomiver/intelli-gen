@@ -36,7 +36,7 @@ impl StopEpoch {
     pub fn stopped(&self) {
         let _ = self
             .0
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |value| {
                 Some(if value % 2 == 0 {
                     value.wrapping_add(1)
                 } else {
@@ -47,7 +47,7 @@ impl StopEpoch {
     pub fn resumed(&self) {
         let _ = self
             .0
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |value| {
                 Some(if value % 2 == 1 {
                     value.wrapping_add(1)
                 } else {
