@@ -212,7 +212,7 @@ impl QuickOpen {
         }
         let mut chosen = None;
         let mut close = false;
-        egui::Window::new("Go to File")
+        egui::Window::new(crate::i18n::text(ctx, "Go to File"))
             .collapsible(false)
             .resizable(false)
             .fixed_size([560.0, 420.0])
@@ -220,7 +220,7 @@ impl QuickOpen {
             .show(ctx, |ui| {
                 let response = ui.add(
                     egui::TextEdit::singleline(&mut self.query)
-                        .hint_text("Type a file name or path…")
+                        .hint_text(crate::i18n::ui_text(ui, "Type a file name or path…"))
                         .desired_width(f32::INFINITY),
                 );
                 if self.focus_query {
@@ -256,12 +256,15 @@ impl QuickOpen {
                 if self.loading {
                     ui.horizontal(|ui| {
                         ui.spinner();
-                        ui.label("Indexing project files…");
+                        ui.label(crate::i18n::ui_text(ui, "Indexing project files…"));
                     });
                 } else if let Some(error) = &self.error {
-                    ui.colored_label(ui.visuals().error_fg_color, error);
+                    ui.colored_label(
+                        ui.visuals().error_fg_color,
+                        crate::i18n::message(ui.ctx(), error),
+                    );
                 } else if self.matches.is_empty() {
-                    ui.weak("No matching files");
+                    ui.weak(crate::i18n::ui_text(ui, "No matching files"));
                 }
                 if let Some(warning) = &self.warning {
                     ui.weak(warning);

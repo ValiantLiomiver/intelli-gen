@@ -5,9 +5,8 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::{self, JoinHandle};
 
 use super::{
-    discovery,
+    Project, ProjectKind, discovery,
     tree::{ProjectTree, ProjectTreeChildren},
-    Project, ProjectKind,
 };
 
 #[derive(Clone, Debug)]
@@ -20,18 +19,68 @@ pub struct NewProjectRequest {
 
 fn valid_java_identifier(value: &str) -> bool {
     const KEYWORDS: &[&str] = &[
-        "abstract", "assert", "boolean", "break", "byte", "case", "catch", "char", "class",
-        "const", "continue", "default", "do", "double", "else", "enum", "extends", "final",
-        "finally", "float", "for", "goto", "if", "implements", "import", "instanceof", "int",
-        "interface", "long", "native", "new", "package", "private", "protected", "public",
-        "return", "short", "static", "strictfp", "super", "switch", "synchronized", "this",
-        "throw", "throws", "transient", "try", "void", "volatile", "while", "true", "false",
-        "null", "_",
+        "abstract",
+        "assert",
+        "boolean",
+        "break",
+        "byte",
+        "case",
+        "catch",
+        "char",
+        "class",
+        "const",
+        "continue",
+        "default",
+        "do",
+        "double",
+        "else",
+        "enum",
+        "extends",
+        "final",
+        "finally",
+        "float",
+        "for",
+        "goto",
+        "if",
+        "implements",
+        "import",
+        "instanceof",
+        "int",
+        "interface",
+        "long",
+        "native",
+        "new",
+        "package",
+        "private",
+        "protected",
+        "public",
+        "return",
+        "short",
+        "static",
+        "strictfp",
+        "super",
+        "switch",
+        "synchronized",
+        "this",
+        "throw",
+        "throws",
+        "transient",
+        "try",
+        "void",
+        "volatile",
+        "while",
+        "true",
+        "false",
+        "null",
+        "_",
     ];
     let mut chars = value.chars();
-    let Some(first) = chars.next() else { return false; };
+    let Some(first) = chars.next() else {
+        return false;
+    };
     (first.is_alphabetic() || first == '_' || first == '$')
-        && chars.all(|character| character.is_alphanumeric() || character == '_' || character == '$')
+        && chars
+            .all(|character| character.is_alphanumeric() || character == '_' || character == '$')
         && !KEYWORDS.contains(&value)
 }
 
@@ -39,8 +88,15 @@ fn valid_java_identifier(value: &str) -> bool {
 /// an existing directory. Filesystem work is intended for a worker thread.
 pub fn create_java_project(request: &NewProjectRequest) -> Result<PathBuf, String> {
     if request.name.is_empty()
-        || !request.name.chars().all(|character| character.is_ascii_alphanumeric() || "._-".contains(character))
-        || !request.name.chars().next().is_some_and(|character| character.is_ascii_alphanumeric())
+        || !request
+            .name
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || "._-".contains(character))
+        || !request
+            .name
+            .chars()
+            .next()
+            .is_some_and(|character| character.is_ascii_alphanumeric())
     {
         return Err("Project name must start with a letter or number and contain only letters, numbers, dots, hyphens, or underscores".into());
     }
@@ -50,10 +106,17 @@ pub fn create_java_project(request: &NewProjectRequest) -> Result<PathBuf, Strin
     if !matches!(request.kind, ProjectKind::Maven | ProjectKind::Gradle) {
         return Err("Choose Maven or Gradle for the new project".into());
     }
-    let parent = request.parent.canonicalize()
-        .map_err(|error| format!("Cannot resolve parent folder {}: {error}", request.parent.display()))?;
+    let parent = request.parent.canonicalize().map_err(|error| {
+        format!(
+            "Cannot resolve parent folder {}: {error}",
+            request.parent.display()
+        )
+    })?;
     if !parent.is_dir() {
-        return Err(format!("Parent path is not a directory: {}", parent.display()));
+        return Err(format!(
+            "Parent path is not a directory: {}",
+            parent.display()
+        ));
     }
     let root = parent.join(&request.name);
     fs::create_dir(&root)
@@ -65,19 +128,35 @@ pub fn create_java_project(request: &NewProjectRequest) -> Result<PathBuf, Strin
         let mut source_directory = root.clone();
         for segment in ["src", "main", "java"] {
             source_directory.push(segment);
-            fs::create_dir(&source_directory)
-                .map_err(|error| format!("Cannot create project directory {}: {error}", source_directory.display()))?;
+            fs::create_dir(&source_directory).map_err(|error| {
+                format!(
+                    "Cannot create project directory {}: {error}",
+                    source_directory.display()
+                )
+            })?;
             created_directories.push(source_directory.clone());
         }
-        for segment in request.package.split('.').filter(|segment| !segment.is_empty()) {
+        for segment in request
+            .package
+            .split('.')
+            .filter(|segment| !segment.is_empty())
+        {
             source_directory.push(segment);
-            fs::create_dir(&source_directory)
-                .map_err(|error| format!("Cannot create package directory {}: {error}", source_directory.display()))?;
+            fs::create_dir(&source_directory).map_err(|error| {
+                format!(
+                    "Cannot create package directory {}: {error}",
+                    source_directory.display()
+                )
+            })?;
             created_directories.push(source_directory.clone());
         }
         let config_directory = root.join(".idea-rust");
-        fs::create_dir(&config_directory)
-            .map_err(|error| format!("Cannot create project configuration directory {}: {error}", config_directory.display()))?;
+        fs::create_dir(&config_directory).map_err(|error| {
+            format!(
+                "Cannot create project configuration directory {}: {error}",
+                config_directory.display()
+            )
+        })?;
         created_directories.push(config_directory.clone());
 
         let main_source = source_directory.join("Main.java");
@@ -94,9 +173,12 @@ pub fn create_java_project(request: &NewProjectRequest) -> Result<PathBuf, Strin
 
         let mut files = vec![
             (main_source.clone(), source),
-            (config_directory.join("run-configurations.toml"), format!(
-                "[[configurations]]\nid = \"starter\"\nname = \"Application\"\nmain_class = \"{main_class}\"\nworking_directory = \".\"\n"
-            )),
+            (
+                config_directory.join("run-configurations.toml"),
+                format!(
+                    "[[configurations]]\nid = \"starter\"\nname = \"Application\"\nmain_class = \"{main_class}\"\nworking_directory = \".\"\n"
+                ),
+            ),
         ];
         match request.kind {
             ProjectKind::Maven => files.push((root.join("pom.xml"), format!(
@@ -114,18 +196,33 @@ pub fn create_java_project(request: &NewProjectRequest) -> Result<PathBuf, Strin
             ProjectKind::Unknown => unreachable!(),
         }
         for (path, contents) in files {
-            let mut file = OpenOptions::new().write(true).create_new(true).open(&path)
-                .map_err(|error| format!("Cannot create project file {}: {error}", path.display()))?;
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+                .map_err(|error| {
+                    format!("Cannot create project file {}: {error}", path.display())
+                })?;
             created_files.push(path.clone());
-            if let Err(error) = file.write_all(contents.as_bytes()).and_then(|()| file.sync_all()) {
-                return Err(format!("Cannot write project file {}: {error}", path.display()));
+            if let Err(error) = file
+                .write_all(contents.as_bytes())
+                .and_then(|()| file.sync_all())
+            {
+                return Err(format!(
+                    "Cannot write project file {}: {error}",
+                    path.display()
+                ));
             }
         }
         Ok(main_source)
     })();
     if result.is_err() {
-        for path in created_files.iter().rev() { let _ = fs::remove_file(path); }
-        for path in created_directories.iter().rev() { let _ = fs::remove_dir(path); }
+        for path in created_files.iter().rev() {
+            let _ = fs::remove_file(path);
+        }
+        for path in created_directories.iter().rev() {
+            let _ = fs::remove_dir(path);
+        }
     }
     result
 }
@@ -161,17 +258,24 @@ fn open_project_path(path: PathBuf) -> Result<OpenedProject, String> {
     let (candidate_root, open_file) = if metadata.is_dir() {
         (requested, None)
     } else if metadata.is_file() {
-        let parent = requested.parent()
+        let parent = requested
+            .parent()
             .ok_or_else(|| format!("File has no parent directory: {}", requested.display()))?;
-        let root = parent.canonicalize()
+        let root = parent
+            .canonicalize()
             .map_err(|error| format!("Cannot open workspace {}: {error}", parent.display()))?;
         (root, Some(requested))
     } else {
-        return Err(format!("Not a project directory or regular file: {}", requested.display()));
+        return Err(format!(
+            "Not a project directory or regular file: {}",
+            requested.display()
+        ));
     };
     let candidate_project = discovery::discover(&candidate_root);
     let root = if open_file.is_some() {
-        candidate_project.model.as_ref()
+        candidate_project
+            .model
+            .as_ref()
             .map(|model| model.root.clone())
             .unwrap_or(candidate_root)
     } else {
@@ -180,7 +284,13 @@ fn open_project_path(path: PathBuf) -> Result<OpenedProject, String> {
     let project = discovery::discover(&root);
     let tree = super::tree::ProjectTree::read(&root).map_err(|error| error.to_string());
     let editor_config = super::editor_config::ProjectEditorConfig::load(&root);
-    Ok(OpenedProject { root, project, tree, open_file, editor_config })
+    Ok(OpenedProject {
+        root,
+        project,
+        tree,
+        open_file,
+        editor_config,
+    })
 }
 
 #[derive(Clone, Debug)]
@@ -300,10 +410,17 @@ impl ProjectTreeLoader {
     }
 
     pub fn poll(&mut self) -> Vec<ProjectTreeLoadEvent> {
-        let events = self.receiver.try_iter().filter(|event| match event {
-            ProjectTreeLoadEvent::Refreshed(event) => event.generation == self.latest_generation,
-            ProjectTreeLoadEvent::ChildrenLoaded(_) | ProjectTreeLoadEvent::RootValidated(_) => true,
-        }).collect();
+        let events = self
+            .receiver
+            .try_iter()
+            .filter(|event| match event {
+                ProjectTreeLoadEvent::Refreshed(event) => {
+                    event.generation == self.latest_generation
+                }
+                ProjectTreeLoadEvent::ChildrenLoaded(_)
+                | ProjectTreeLoadEvent::RootValidated(_) => true,
+            })
+            .collect();
         let mut active = Vec::new();
         for worker in self.workers.drain(..) {
             if worker.is_finished() {
@@ -388,5 +505,95 @@ impl ProjectOpenLoader {
 
     pub fn has_workers(&self) -> bool {
         !self.workers.is_empty()
+    }
+}
+
+#[cfg(test)]
+mod new_project_tests {
+    use super::*;
+
+    #[test]
+    fn generated_maven_descriptor_is_valid() {
+        let parent = std::env::temp_dir().join(format!(
+            "intelli-gen-project-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir(&parent).unwrap();
+        let request = NewProjectRequest {
+            parent: parent.clone(),
+            name: "demo.tools".into(),
+            package: "com.example".into(),
+            kind: ProjectKind::Maven,
+        };
+        create_java_project(&request).unwrap();
+        let root = parent.join("demo.tools");
+        let pom = fs::read_to_string(root.join("pom.xml")).unwrap();
+        assert!(pom.contains("<artifactId>demo.tools</artifactId>"));
+        let mut reader = quick_xml::Reader::from_str(&pom);
+        loop {
+            if matches!(reader.read_event().unwrap(), quick_xml::events::Event::Eof) {
+                break;
+            }
+        }
+        fs::remove_dir_all(parent).unwrap();
+    }
+
+    #[test]
+    fn generated_gradle_files_use_valid_project_metadata() {
+        let parent = std::env::temp_dir().join(format!(
+            "intelli-gen-gradle-project-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir(&parent).unwrap();
+        let request = NewProjectRequest {
+            parent: parent.clone(),
+            name: "demo.tools".into(),
+            package: "com.example".into(),
+            kind: ProjectKind::Gradle,
+        };
+        create_java_project(&request).unwrap();
+        let root = parent.join("demo.tools");
+        assert_eq!(
+            fs::read_to_string(root.join("settings.gradle")).unwrap(),
+            "rootProject.name = 'demo.tools'\n"
+        );
+        let build = fs::read_to_string(root.join("build.gradle")).unwrap();
+        assert!(build.contains("plugins {\n    id 'java'\n}"));
+        assert!(build.contains("group = 'com.example'"));
+        fs::remove_dir_all(parent).unwrap();
+    }
+
+    #[test]
+    fn new_project_creation_never_overwrites_existing_destination() {
+        let parent = std::env::temp_dir().join(format!(
+            "intelli-gen-existing-project-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let existing = parent.join("sample");
+        fs::create_dir_all(&existing).unwrap();
+        let marker = existing.join("keep.txt");
+        fs::write(&marker, "existing user data").unwrap();
+        let request = NewProjectRequest {
+            parent: parent.clone(),
+            name: "sample".into(),
+            package: "example".into(),
+            kind: ProjectKind::Maven,
+        };
+
+        assert!(create_java_project(&request).is_err());
+        assert_eq!(fs::read_to_string(marker).unwrap(), "existing user data");
+        fs::remove_dir_all(parent).unwrap();
     }
 }

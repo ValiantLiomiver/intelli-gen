@@ -17,7 +17,7 @@ source "$MANIFEST"
 
 [[ "$(uname -s)" == "Darwin" ]] || fail "macOS packaging is supported only on macOS (found $(uname -s))"
 
-for command_name in cargo curl tar git shasum; do
+for command_name in cargo curl tar git shasum codesign; do
   command -v "$command_name" >/dev/null 2>&1 || fail "required command '$command_name' was not found in PATH"
 done
 
@@ -170,6 +170,10 @@ find "${RESOURCES_DIR}/jdtls/plugins" -maxdepth 1 -name 'org.eclipse.equinox.lau
 [[ -f "${RESOURCES_DIR}/java-debug/com.microsoft.java.debug.plugin-${JAVA_DEBUG_VERSION}.jar" ]] || fail "staged Java Debug plugin is missing"
 [[ -f "${RESOURCES_DIR}/licenses/microsoft-java-debug/LICENSE.txt" ]] || fail "staged Microsoft java-debug LICENSE.txt is missing"
 [[ -f "${RESOURCES_DIR}/licenses/microsoft-java-debug/ThirdPartyNotices.txt" ]] || fail "staged Microsoft java-debug ThirdPartyNotices.txt is missing"
+# Cargo's Mach-O executable has an ad-hoc signature; seal the completed bundle
+# after every resource has been copied so the signature remains valid.
+codesign --force --deep --sign - "$APP_BUNDLE"
+codesign --verify --deep --strict "$APP_BUNDLE"
 
 # Serialize publication; package builds may stage concurrently.
 lock_attempt=0

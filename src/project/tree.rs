@@ -83,18 +83,30 @@ impl ProjectTree {
         Some(request)
     }
 
-    pub fn read_children(workspace: &Path, path: &Path, request: u64) -> Result<ProjectTreeChildren, String> {
+    pub fn read_children(
+        workspace: &Path,
+        path: &Path,
+        request: u64,
+    ) -> Result<ProjectTreeChildren, String> {
         read_visible_entries(workspace, path)
-            .map(|entries| ProjectTreeChildren { parent: path.to_path_buf(), request, entries })
+            .map(|entries| ProjectTreeChildren {
+                parent: path.to_path_buf(),
+                request,
+                entries,
+            })
             .map_err(|error| error.to_string())
     }
 
     pub fn validate_root(root: &Path) -> Result<(), String> {
-        checked_directory(root, root).map(|_| ()).map_err(|error| error.to_string())
+        checked_directory(root, root)
+            .map(|_| ())
+            .map_err(|error| error.to_string())
     }
 
     pub fn apply_root_validation(&mut self, request: u64, result: Result<(), String>) {
-        if self.root_validation_request != Some(request) { return; }
+        if self.root_validation_request != Some(request) {
+            return;
+        }
         self.root_validation_request = None;
         self.root_error = result.err();
         self.next_root_validation = Instant::now() + Duration::from_secs(1);
@@ -102,7 +114,8 @@ impl ProjectTree {
 
     pub fn root_validation_delay(&self) -> Option<Duration> {
         self.root_validation_request.is_none().then(|| {
-            self.next_root_validation.saturating_duration_since(Instant::now())
+            self.next_root_validation
+                .saturating_duration_since(Instant::now())
         })
     }
 
@@ -113,20 +126,29 @@ impl ProjectTree {
         result: Result<ProjectTreeChildren, String>,
     ) {
         if parent == self.root {
-            if self.root_loading_request != Some(request) { return; }
+            if self.root_loading_request != Some(request) {
+                return;
+            }
             self.root_loading_request = None;
             match result {
                 Ok(children) if children.parent == parent && children.request == request => {
                     self.root_error = None;
-                    self.entries = merge_entries(std::mem::take(&mut self.entries), children.entries);
+                    self.entries =
+                        merge_entries(std::mem::take(&mut self.entries), children.entries);
                 }
-                Ok(_) => self.root_error = Some("Project-tree response did not match its request".into()),
+                Ok(_) => {
+                    self.root_error = Some("Project-tree response did not match its request".into())
+                }
                 Err(error) => self.root_error = Some(error),
             }
             return;
         }
-        let Some(entry) = find_entry_mut(&mut self.entries, parent) else { return; };
-        if entry.loading_request != Some(request) { return; }
+        let Some(entry) = find_entry_mut(&mut self.entries, parent) else {
+            return;
+        };
+        if entry.loading_request != Some(request) {
+            return;
+        }
         entry.loading_request = None;
         match result {
             Ok(children) if children.parent == parent && children.request == request => {
@@ -150,14 +172,20 @@ impl ProjectTree {
                     found = Some(self.root.clone());
                     break;
                 }
-                if find_entry(&self.entries, candidate).is_some_and(|entry| entry.children.is_some()) {
+                if find_entry(&self.entries, candidate)
+                    .is_some_and(|entry| entry.children.is_some())
+                {
                     found = Some(candidate.to_path_buf());
                     break;
                 }
-                let Some(next) = candidate.parent() else { break; };
+                let Some(next) = candidate.parent() else {
+                    break;
+                };
                 candidate = next;
             }
-            if let Some(path) = found && !targets.iter().any(|(target, _)| target == &path) {
+            if let Some(path) = found
+                && !targets.iter().any(|(target, _)| target == &path)
+            {
                 if let Some(request) = self.begin_refresh(&path) {
                     targets.push((path, request));
                 }
@@ -169,9 +197,10 @@ impl ProjectTree {
     pub fn begin_refresh_all_expanded(&mut self) -> Vec<(PathBuf, u64)> {
         let mut paths = vec![self.root.clone()];
         collect_expanded_paths(&self.entries, &mut paths);
-        paths.into_iter().filter_map(|path| {
-            self.begin_refresh(&path).map(|request| (path, request))
-        }).collect()
+        paths
+            .into_iter()
+            .filter_map(|path| self.begin_refresh(&path).map(|request| (path, request)))
+            .collect()
     }
 
     pub fn render(&mut self, ui: &mut egui::Ui) -> Vec<TreeAction> {
@@ -182,10 +211,13 @@ impl ProjectTree {
             actions.push(TreeAction::ValidateRoot { request });
         }
         if self.entries.is_empty() {
-            ui.weak("Empty directory");
+            ui.weak(crate::i18n::ui_text(ui, "Empty directory"));
         }
         if let Some(error) = &self.root_error {
-            ui.colored_label(ui.visuals().error_fg_color, error);
+            ui.colored_label(
+                ui.visuals().error_fg_color,
+                crate::i18n::message(ui.ctx(), error),
+            );
             return actions;
         }
         render_entries(ui, &self.root, &mut self.entries, &mut actions);
@@ -343,9 +375,13 @@ fn compact_package(workspace: &Path, entry: &mut TreeEntry) {
 
 fn find_entry_mut<'a>(entries: &'a mut [TreeEntry], path: &Path) -> Option<&'a mut TreeEntry> {
     for entry in entries {
-        if entry.path == path { return Some(entry); }
+        if entry.path == path {
+            return Some(entry);
+        }
         if let Some(children) = &mut entry.children {
-            if let Some(entry) = find_entry_mut(children, path) { return Some(entry); }
+            if let Some(entry) = find_entry_mut(children, path) {
+                return Some(entry);
+            }
         }
     }
     None
@@ -353,8 +389,14 @@ fn find_entry_mut<'a>(entries: &'a mut [TreeEntry], path: &Path) -> Option<&'a m
 
 fn find_entry<'a>(entries: &'a [TreeEntry], path: &Path) -> Option<&'a TreeEntry> {
     for entry in entries {
-        if entry.path == path { return Some(entry); }
-        if let Some(found) = entry.children.as_deref().and_then(|children| find_entry(children, path)) {
+        if entry.path == path {
+            return Some(entry);
+        }
+        if let Some(found) = entry
+            .children
+            .as_deref()
+            .and_then(|children| find_entry(children, path))
+        {
             return Some(found);
         }
     }
@@ -364,7 +406,11 @@ fn find_entry<'a>(entries: &'a [TreeEntry], path: &Path) -> Option<&'a TreeEntry
 fn merge_entries(previous: Vec<TreeEntry>, mut refreshed: Vec<TreeEntry>) -> Vec<TreeEntry> {
     for entry in &mut refreshed {
         if let Some(old) = previous.iter().find(|old| {
-            old.path == entry.path && old.directory && entry.directory && !old.symlink && !entry.symlink
+            old.path == entry.path
+                && old.directory
+                && entry.directory
+                && !old.symlink
+                && !entry.symlink
         }) {
             entry.children = old.children.clone();
             entry.loading_request = old.loading_request;
@@ -385,16 +431,30 @@ fn collect_expanded_paths(entries: &[TreeEntry], paths: &mut Vec<PathBuf>) {
     }
 }
 
-fn context_menu(ui: &mut egui::Ui, path: &Path, directory: bool, symlink: bool, actions: &mut Vec<TreeAction>) {
-    if directory && !symlink && ui.button("New Java Class…").clicked() {
+fn context_menu(
+    ui: &mut egui::Ui,
+    path: &Path,
+    directory: bool,
+    symlink: bool,
+    actions: &mut Vec<TreeAction>,
+) {
+    if directory
+        && !symlink
+        && ui
+            .button(crate::i18n::ui_text(ui, "New Java Class…"))
+            .clicked()
+    {
         actions.push(TreeAction::NewJavaClass(path.to_path_buf()));
         ui.close();
     }
-    if directory && ui.button("Refresh").clicked() {
+    if directory && ui.button(crate::i18n::ui_text(ui, "Refresh")).clicked() {
         actions.push(TreeAction::Refresh(path.to_path_buf()));
         ui.close();
     }
-    if ui.button("Reveal in Finder").clicked() {
+    if ui
+        .button(crate::i18n::ui_text(ui, "Reveal in Finder"))
+        .clicked()
+    {
         actions.push(TreeAction::Reveal(path.to_path_buf()));
         ui.close();
     }
@@ -411,20 +471,32 @@ fn render_entries(
             let response = egui::CollapsingHeader::new(&entry.name)
                 .id_salt(&entry.path)
                 .show(ui, |ui| {
-                    if entry.children.is_none() && entry.error.is_none() && entry.loading_request.is_none() {
+                    if entry.children.is_none()
+                        && entry.error.is_none()
+                        && entry.loading_request.is_none()
+                    {
                         let request = NEXT_TREE_REQUEST.fetch_add(1, Ordering::Relaxed);
                         entry.loading_request = Some(request);
-                        actions.push(TreeAction::LoadChildren { path: entry.path.clone(), request });
+                        actions.push(TreeAction::LoadChildren {
+                            path: entry.path.clone(),
+                            request,
+                        });
                     }
                     if let Some(error) = &entry.error {
-                        ui.colored_label(ui.visuals().error_fg_color, error);
+                        ui.colored_label(
+                            ui.visuals().error_fg_color,
+                            crate::i18n::message(ui.ctx(), error),
+                        );
                     }
                     if entry.loading_request.is_some() {
-                        ui.horizontal(|ui| { ui.spinner(); ui.label("Loading…"); });
+                        ui.horizontal(|ui| {
+                            ui.spinner();
+                            ui.label(crate::i18n::ui_text(ui, "Loading…"));
+                        });
                     }
                     if let Some(children) = &mut entry.children {
                         if children.is_empty() {
-                            ui.weak("Empty directory");
+                            ui.weak(crate::i18n::ui_text(ui, "Empty directory"));
                         }
                         render_entries(ui, workspace, children, actions);
                     }
@@ -451,7 +523,8 @@ fn render_entries(
             if response.clicked() {
                 actions.push(TreeAction::OpenFile(entry.path.clone()));
             }
-            response.context_menu(|ui| context_menu(ui, &entry.path, false, entry.symlink, actions));
+            response
+                .context_menu(|ui| context_menu(ui, &entry.path, false, entry.symlink, actions));
         }
     }
 }

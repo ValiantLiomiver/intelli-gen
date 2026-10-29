@@ -20,11 +20,14 @@ struct Pom {
 pub fn artifact_id(root: &Path) -> Result<Option<String>, ProjectError> {
     let path = root.join("pom.xml");
     let xml = fs::read_to_string(&path).map_err(|source| ProjectError {
-        path: path.clone(), source,
+        path: path.clone(),
+        source,
     })?;
     let pom: Pom = quick_xml::de::from_str(&xml)
         .map_err(|error| ProjectError::invalid(&path, format!("Invalid Maven POM: {error}")))?;
-    Ok(pom.artifact_id.map(|value| value.trim().to_owned())
+    Ok(pom
+        .artifact_id
+        .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty() && !value.contains("${")))
 }
 
@@ -136,7 +139,10 @@ fn require_complete_document(xml: &str, path: &Path) -> Result<(), ProjectError>
                 })?;
             }
             Event::Text(text) if depth == 0 => {
-                if !text.iter().all(|byte| matches!(*byte, b' ' | b'\t' | b'\r' | b'\n')) {
+                if !text
+                    .iter()
+                    .all(|byte| matches!(*byte, b' ' | b'\t' | b'\r' | b'\n'))
+                {
                     return Err(ProjectError::invalid(
                         path,
                         "Unexpected text outside Maven project root",

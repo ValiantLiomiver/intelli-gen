@@ -115,8 +115,11 @@ impl MavenViewLoader {
         let sender = self.sender.clone();
         let cancel = Arc::new(AtomicBool::new(false));
         let worker_cancel = Arc::clone(&cancel);
-        let generation_token = self.generations.entry(root.clone())
-            .or_insert_with(|| Arc::new(AtomicU64::new(0))).clone();
+        let generation_token = self
+            .generations
+            .entry(root.clone())
+            .or_insert_with(|| Arc::new(AtomicU64::new(0)))
+            .clone();
         generation_token.store(generation, Ordering::Release);
         let worker_generation = Arc::clone(&generation_token);
         let worker = thread::Builder::new()
@@ -132,17 +135,27 @@ impl MavenViewLoader {
                 };
                 let mut event = event;
                 if let Ok(view) = &event.result {
-                    event.cache_error = match (fingerprint_before, fingerprint_poms(&cache_project)) {
-                        (Ok(before), Ok(after)) if before == after
-                            && worker_generation.load(Ordering::Acquire) == generation
-                            && !worker_cancel.load(Ordering::Acquire) => {
-                                MavenViewCache::for_user()
-                                    .and_then(|cache| cache.save(&cache_project.root, view, &after))
-                                    .err()
-                            }
-                        (Ok(_), Ok(_)) if worker_generation.load(Ordering::Acquire) != generation
-                            || worker_cancel.load(Ordering::Acquire) => None,
-                        (Ok(_), Ok(_)) => Some("POM files changed while Maven was resolving; result was not cached".into()),
+                    event.cache_error = match (fingerprint_before, fingerprint_poms(&cache_project))
+                    {
+                        (Ok(before), Ok(after))
+                            if before == after
+                                && worker_generation.load(Ordering::Acquire) == generation
+                                && !worker_cancel.load(Ordering::Acquire) =>
+                        {
+                            MavenViewCache::for_user()
+                                .and_then(|cache| cache.save(&cache_project.root, view, &after))
+                                .err()
+                        }
+                        (Ok(_), Ok(_))
+                            if worker_generation.load(Ordering::Acquire) != generation
+                                || worker_cancel.load(Ordering::Acquire) =>
+                        {
+                            None
+                        }
+                        (Ok(_), Ok(_)) => Some(
+                            "POM files changed while Maven was resolving; result was not cached"
+                                .into(),
+                        ),
                         (Err(error), _) | (_, Err(error)) => Some(error),
                     };
                 }
@@ -675,7 +688,9 @@ impl Context {
         let mut selectors = self.profiles.clone();
         selectors.sort();
         selectors.dedup();
-        let mut disabled: Vec<_> = self.profile_ids.keys()
+        let mut disabled: Vec<_> = self
+            .profile_ids
+            .keys()
             .filter(|id| id.as_str() != "local" && !self.profiles.contains(id))
             .map(|id| format!("!{id}"))
             .collect();
@@ -812,7 +827,9 @@ fn check_cancel(cancellation: &AtomicBool) -> Result<(), String> {
 fn valid_profile_id(id: &str) -> bool {
     !id.is_empty()
         && !id.starts_with(['!', '-', '?'])
-        && !id.chars().any(|ch| ch == ',' || ch.is_control() || ch.is_whitespace())
+        && !id
+            .chars()
+            .any(|ch| ch == ',' || ch.is_control() || ch.is_whitespace())
 }
 
 fn profile_definitions(directory: &Path) -> Result<Vec<MavenProfile>, String> {

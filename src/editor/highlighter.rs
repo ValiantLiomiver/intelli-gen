@@ -1,8 +1,8 @@
 use std::path::Path;
 use std::sync::OnceLock;
 
-use eframe::egui::{self, text::LayoutJob};
 use super::document::PAGED_EDITOR_BYTES;
+use eframe::egui::{self, text::LayoutJob};
 use syntect::easy::HighlightLines;
 use syntect::highlighting::ThemeSet;
 use syntect::parsing::SyntaxSet;
@@ -67,11 +67,15 @@ impl Highlighter {
         // The editor pages files above this bound before they reach the parser.
         if language == SourceLanguage::Plain || text.len() > MAX_HIGHLIGHT_BYTES {
             let mut job = LayoutJob::default();
-            job.append(text, 0.0, egui::TextFormat {
-                font_id: egui::FontId::monospace(14.0),
-                color: ui.visuals().text_color(),
-                ..Default::default()
-            });
+            job.append(
+                text,
+                0.0,
+                egui::TextFormat {
+                    font_id: egui::FontId::monospace(14.0),
+                    color: ui.visuals().text_color(),
+                    ..Default::default()
+                },
+            );
             self.cached = Some((text.to_owned(), dark, language, job.clone()));
             return job;
         }

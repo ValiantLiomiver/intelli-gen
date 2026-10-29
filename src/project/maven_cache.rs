@@ -276,7 +276,11 @@ mod tests {
         ProjectModel {
             root: root.to_path_buf(),
             kind: ProjectKind::Maven,
-            name: root.file_name().unwrap_or(root.as_os_str()).to_string_lossy().into_owned(),
+            name: root
+                .file_name()
+                .unwrap_or(root.as_os_str())
+                .to_string_lossy()
+                .into_owned(),
             modules,
             wrapper: None,
         }

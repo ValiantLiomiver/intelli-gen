@@ -35,7 +35,7 @@ impl SymbolSearch {
         }
         let mut open = self.visible;
         let mut close = false;
-        egui::Window::new("Go to Java Symbol")
+        egui::Window::new(crate::i18n::text(ctx, "Go to Java Symbol"))
             .collapsible(false)
             .resizable(false)
             .fixed_size([620.0, 440.0])
@@ -44,7 +44,7 @@ impl SymbolSearch {
             .show(ctx, |ui| {
                 let response = ui.add(
                     egui::TextEdit::singleline(&mut self.query)
-                        .hint_text("Class, method, or field name…")
+                        .hint_text(crate::i18n::ui_text(ui, "Class, method, or field name…"))
                         .desired_width(f32::INFINITY),
                 );
                 if self.focus_query {
@@ -85,16 +85,22 @@ impl SymbolSearch {
                     close = true;
                 }
                 if self.query.trim().is_empty() {
-                    ui.weak("Type at least one character to search the Java workspace.");
+                    ui.weak(crate::i18n::ui_text(
+                        ui,
+                        "Type at least one character to search the Java workspace.",
+                    ));
                 } else if language.workspace_symbols_loading {
                     ui.horizontal(|ui| {
                         ui.spinner();
-                        ui.label("Searching Java symbols…");
+                        ui.label(crate::i18n::ui_text(ui, "Searching Java symbols…"));
                     });
                 } else if let Some(error) = &language.workspace_symbols_error {
-                    ui.colored_label(ui.visuals().error_fg_color, error);
+                    ui.colored_label(
+                        ui.visuals().error_fg_color,
+                        crate::i18n::message(ui.ctx(), error),
+                    );
                 } else if matching_query && symbols.is_empty() {
-                    ui.weak("No matching symbols");
+                    ui.weak(crate::i18n::ui_text(ui, "No matching symbols"));
                 }
                 egui::ScrollArea::vertical()
                     .max_height(360.0)

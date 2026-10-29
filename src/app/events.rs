@@ -37,7 +37,11 @@ pub enum AppEvent {
     NextEditorTab,
     PreviousEditorTab,
     NewJavaClass(PathBuf),
-    CreateJavaClass { directory: PathBuf, name: String, package: String },
+    CreateJavaClass {
+        directory: PathBuf,
+        name: String,
+        package: String,
+    },
     QuickOpenOpen,
     SymbolSearchOpen,
     FileStructureOpen,
@@ -60,7 +64,9 @@ pub enum AppEvent {
     RenameSymbolConfirm(String),
     ApplyCompletion(usize),
     ToggleJavaLineComment,
-    IndentJava { outdent: bool },
+    IndentJava {
+        outdent: bool,
+    },
     ApplyCodeAction(usize),
     Language(crate::java::lsp::LanguageUpdate),
     RestartLanguage,
@@ -140,10 +146,22 @@ pub enum MavenAction {
 
 #[derive(Clone, Debug)]
 pub enum GradleAction {
-    SelectProject { root: PathBuf, project_path: Option<PathBuf> },
-    Reload { root: PathBuf },
-    Cancel { root: PathBuf },
-    RunTask { root: PathBuf, generation: u64, project_path: Option<PathBuf>, task_path: String },
+    SelectProject {
+        root: PathBuf,
+        project_path: Option<PathBuf>,
+    },
+    Reload {
+        root: PathBuf,
+    },
+    Cancel {
+        root: PathBuf,
+    },
+    RunTask {
+        root: PathBuf,
+        generation: u64,
+        project_path: Option<PathBuf>,
+        task_path: String,
+    },
     ToggleCollapsed,
 }
 
@@ -186,10 +204,17 @@ pub enum DebuggerAction {
         line: u32,
         modified: bool,
     },
+    SetLogpoint {
+        source: PathBuf,
+        line: u32,
+        message: String,
+        modified: bool,
+    },
     UpdateBreakpoint {
         source: PathBuf,
         line: u32,
         condition: Option<String>,
+        log_message: Option<String>,
         enabled: bool,
         modified: bool,
     },

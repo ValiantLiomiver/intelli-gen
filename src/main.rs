@@ -2,6 +2,7 @@ mod app;
 mod debugger;
 mod editor;
 mod git;
+mod i18n;
 mod java;
 mod project;
 mod search;
@@ -12,7 +13,7 @@ fn main() -> eframe::Result {
     let startup_path = std::env::args_os().nth(1).map(std::path::PathBuf::from);
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
-            .with_title("Intelli-gen — Java Workbench")
+            .with_title("Intelli-gen")
             .with_inner_size([1280.0, 840.0])
             .with_min_inner_size([760.0, 520.0]),
         ..Default::default()

@@ -57,7 +57,11 @@ pub(super) fn discover_model(path: &Path) -> Result<ProjectModel, ProjectError> 
             ProjectKind::Gradle => gradle::modules(root)?,
             ProjectKind::Unknown => unreachable!(),
         };
-        let folder_name = root.file_name().unwrap_or(root.as_os_str()).to_string_lossy().into_owned();
+        let folder_name = root
+            .file_name()
+            .unwrap_or(root.as_os_str())
+            .to_string_lossy()
+            .into_owned();
         let name = if kind == ProjectKind::Maven {
             maven::artifact_id(root)?.unwrap_or(folder_name)
         } else {
@@ -74,7 +78,11 @@ pub(super) fn discover_model(path: &Path) -> Result<ProjectModel, ProjectError> 
     Ok(ProjectModel {
         root: start.to_path_buf(),
         kind: ProjectKind::Unknown,
-        name: start.file_name().unwrap_or(start.as_os_str()).to_string_lossy().into_owned(),
+        name: start
+            .file_name()
+            .unwrap_or(start.as_os_str())
+            .to_string_lossy()
+            .into_owned(),
         modules: Vec::new(),
         wrapper: None,
     })
@@ -137,4 +145,58 @@ pub(super) fn normalize(path: &Path) -> PathBuf {
         }
     }
     normalized
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn opening_nested_folder_preserves_workspace_and_build_roots() {
+        let workspace = std::env::temp_dir().join(format!(
+            "intelli-gen-discovery-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let nested = workspace.join("module/src/main/java");
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(
+            workspace.join("pom.xml"),
+            "<project><modelVersion>4.0.0</modelVersion><groupId>test</groupId><artifactId>root</artifactId><version>1</version></project>",
+        )
+        .unwrap();
+
+        let project = discover(&nested);
+        assert_eq!(project.root, nested);
+        assert_eq!(project.model.unwrap().root, workspace);
+        fs::remove_dir_all(workspace).unwrap();
+    }
+
+    #[test]
+    fn opening_nested_gradle_folder_preserves_workspace_and_build_roots() {
+        let workspace = std::env::temp_dir().join(format!(
+            "intelli-gen-gradle-discovery-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let nested = workspace.join("app/src/main/java");
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(
+            workspace.join("settings.gradle"),
+            "rootProject.name = 'sample'\n",
+        )
+        .unwrap();
+        fs::write(workspace.join("build.gradle"), "plugins { id 'java' }\n").unwrap();
+
+        let project = discover(&nested);
+        assert_eq!(project.root, nested);
+        assert_eq!(project.model.unwrap().root, workspace);
+        fs::remove_dir_all(workspace).unwrap();
+    }
 }

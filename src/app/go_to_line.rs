@@ -21,7 +21,7 @@ impl GoToLine {
         let mut open = self.visible;
         let mut chosen = None;
         let mut close = false;
-        egui::Window::new("Go to Line")
+        egui::Window::new(crate::i18n::text(ctx, "Go to Line"))
             .collapsible(false)
             .resizable(false)
             .fixed_size([360.0, 105.0])
@@ -30,7 +30,7 @@ impl GoToLine {
             .show(ctx, |ui| {
                 let response = ui.add(
                     egui::TextEdit::singleline(&mut self.input)
-                        .hint_text("Line number")
+                        .hint_text(crate::i18n::ui_text(ui, "Line number"))
                         .desired_width(f32::INFINITY),
                 );
                 if self.focus {
@@ -44,7 +44,7 @@ impl GoToLine {
                     )
                 });
                 if let Ok(line) = self.input.trim().parse::<usize>() {
-                    if ui.button("Go").clicked() || enter {
+                    if ui.button(crate::i18n::ui_text(ui, "Go")).clicked() || enter {
                         chosen = Some(line.max(1));
                         close = true;
                     }

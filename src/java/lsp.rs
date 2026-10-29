@@ -156,9 +156,7 @@ impl SnippetParser {
         if parser.cursor != parser.source.len() {
             return None;
         }
-        if !parser.expansion.tab_stops.is_empty()
-            && !parser.expansion.tab_stops.contains_key(&0)
-        {
+        if !parser.expansion.tab_stops.is_empty() && !parser.expansion.tab_stops.contains_key(&0) {
             let end = parser.expansion.text.chars().count();
             parser.expansion.tab_stops.insert(0, vec![(end, end)]);
         }
@@ -197,7 +195,11 @@ impl SnippetParser {
             self.cursor += 1;
             return self.braced_placeholder();
         }
-        if self.source.get(self.cursor).is_some_and(char::is_ascii_digit) {
+        if self
+            .source
+            .get(self.cursor)
+            .is_some_and(char::is_ascii_digit)
+        {
             let index = self.number()?;
             let position = self.expansion.text.chars().count();
             let default = self.previous_stop_text(index);
@@ -213,9 +215,11 @@ impl SnippetParser {
             .get(self.cursor)
             .is_some_and(|character| character.is_ascii_alphabetic() || *character == '_')
         {
-            while self.source.get(self.cursor).is_some_and(|character| {
-                character.is_ascii_alphanumeric() || *character == '_'
-            }) {
+            while self
+                .source
+                .get(self.cursor)
+                .is_some_and(|character| character.is_ascii_alphanumeric() || *character == '_')
+            {
                 self.cursor += 1;
             }
             return Some(());
@@ -226,9 +230,11 @@ impl SnippetParser {
 
     fn braced_placeholder(&mut self) -> Option<()> {
         let start = self.cursor;
-        while self.source.get(self.cursor).is_some_and(|character| {
-            character.is_ascii_alphanumeric() || *character == '_'
-        }) {
+        while self
+            .source
+            .get(self.cursor)
+            .is_some_and(|character| character.is_ascii_alphanumeric() || *character == '_')
+        {
             self.cursor += 1;
         }
         if start == self.cursor {
@@ -321,16 +327,31 @@ impl SnippetParser {
         {
             self.cursor += 1;
         }
-        self.source[start..self.cursor].iter().collect::<String>().parse().ok()
+        self.source[start..self.cursor]
+            .iter()
+            .collect::<String>()
+            .parse()
+            .ok()
     }
 
     fn record_stop(&mut self, index: u32, start: usize, end: usize) {
-        self.expansion.tab_stops.entry(index).or_default().push((start, end));
+        self.expansion
+            .tab_stops
+            .entry(index)
+            .or_default()
+            .push((start, end));
     }
 
     fn previous_stop_text(&self, index: u32) -> Option<String> {
         let (start, end) = *self.expansion.tab_stops.get(&index)?.first()?;
-        Some(self.expansion.text.chars().skip(start).take(end - start).collect())
+        Some(
+            self.expansion
+                .text
+                .chars()
+                .skip(start)
+                .take(end - start)
+                .collect(),
+        )
     }
 }
 #[derive(Clone, Debug)]
@@ -486,39 +507,73 @@ impl ClasspathResolver {
                 .next()
                 .unwrap_or_default()
         );
-        let module_name = |module_root: &Path, fallback: &str| {
-            match project.kind {
-                crate::project::ProjectKind::Maven => crate::project::maven::artifact_id(module_root)
-                    .ok().flatten().unwrap_or_else(|| module_root.file_name().and_then(|name| name.to_str()).unwrap_or(fallback).to_owned()),
-                crate::project::ProjectKind::Gradle => module_root.file_name().and_then(|name| name.to_str()).unwrap_or(fallback).to_owned(),
-                crate::project::ProjectKind::Unknown => fallback.to_owned(),
-            }
+        let module_name = |module_root: &Path, fallback: &str| match project.kind {
+            crate::project::ProjectKind::Maven => crate::project::maven::artifact_id(module_root)
+                .ok()
+                .flatten()
+                .unwrap_or_else(|| {
+                    module_root
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .unwrap_or(fallback)
+                        .to_owned()
+                }),
+            crate::project::ProjectKind::Gradle => module_root
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or(fallback)
+                .to_owned(),
+            crate::project::ProjectKind::Unknown => fallback.to_owned(),
         };
         let mut projects = Vec::new();
         if let Some(module_path) = project_module {
-            if module_path.is_absolute() || module_path.components().any(|part| matches!(part, std::path::Component::ParentDir | std::path::Component::RootDir | std::path::Component::Prefix(_))) {
-                return Err(LspError("Project module must be a path relative to the build root".into()));
+            if module_path.is_absolute()
+                || module_path.components().any(|part| {
+                    matches!(
+                        part,
+                        std::path::Component::ParentDir
+                            | std::path::Component::RootDir
+                            | std::path::Component::Prefix(_)
+                    )
+                })
+            {
+                return Err(LspError(
+                    "Project module must be a path relative to the build root".into(),
+                ));
             }
             let selected_root = project.root.join(module_path);
             if selected_root == project.root {
                 projects.push((project.root.as_path(), project.name.clone()));
-            } else if let Some(module) = project.modules.iter().find(|module| module.root == selected_root) {
-                projects.push((module.root.as_path(), module_name(&module.root, &module.name)));
+            } else if let Some(module) = project
+                .modules
+                .iter()
+                .find(|module| module.root == selected_root)
+            {
+                projects.push((
+                    module.root.as_path(),
+                    module_name(&module.root, &module.name),
+                ));
             } else {
-                return Err(LspError(format!("Selected project module no longer exists: {}", module_path.display())));
+                return Err(LspError(format!(
+                    "Selected project module no longer exists: {}",
+                    module_path.display()
+                )));
             }
         } else {
             projects.push((project.root.as_path(), project.name.clone()));
             for module in &project.modules {
-            let fallback_name = || {
-                module
-                    .root
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .unwrap_or(&module.name)
-                    .to_owned()
-            };
-                projects.push((module.root.as_path(), module_name(&module.root, &fallback_name())));
+                let fallback_name = || {
+                    module
+                        .root
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .unwrap_or(&module.name)
+                        .to_owned()
+                };
+                projects.push((
+                    module.root.as_path(),
+                    module_name(&module.root, &fallback_name()),
+                ));
             }
         }
         let module = projects.into_iter().find_map(|(root, name)| {
@@ -530,7 +585,12 @@ impl ClasspathResolver {
         });
         let (source, project_name) = match (module, project_module) {
             (Some(module), _) => module,
-            (None, Some(selected)) => return Err(LspError(format!("Main class {main_class} was not found in project module {}", selected.display()))),
+            (None, Some(selected)) => {
+                return Err(LspError(format!(
+                    "Main class {main_class} was not found in project module {}",
+                    selected.display()
+                )));
+            }
             (None, None) => (project.root.clone(), project.name.clone()),
         };
         let (reply, receiver) = oneshot::channel();
@@ -812,9 +872,7 @@ async fn read_messages(
                 loop {
                     let byte = reader.read_u8().await.map_err(|error| {
                         if error.kind() == std::io::ErrorKind::UnexpectedEof {
-                            LspError(
-                                "JDT LS closed stdout before completing an LSP message".into(),
-                            )
+                            LspError("JDT LS closed stdout before completing an LSP message".into())
                         } else {
                             LspError(error.to_string())
                         }
@@ -850,9 +908,7 @@ async fn read_messages(
             let mut body = vec![0; length];
             reader.read_exact(&mut body).await.map_err(|error| {
                 if error.kind() == std::io::ErrorKind::UnexpectedEof {
-                    LspError(
-                        "JDT LS closed stdout before completing an LSP message".into(),
-                    )
+                    LspError("JDT LS closed stdout before completing an LSP message".into())
                 } else {
                     LspError(error.to_string())
                 }
@@ -905,7 +961,10 @@ async fn run(
     {
         let mut argument = OsString::from("-javaagent:");
         argument.push(agent.as_os_str());
-        let position = launcher_arguments.iter().position(|value| value == "-jar").unwrap_or(launcher_arguments.len());
+        let position = launcher_arguments
+            .iter()
+            .position(|value| value == "-jar")
+            .unwrap_or(launcher_arguments.len());
         launcher_arguments.insert(position, argument);
     }
     if let (Some(shared), Some(version)) = (&config.shared_configuration, &config.package_version) {
@@ -939,17 +998,33 @@ async fn run(
         let mut options = std::env::var_os("JAVA_TOOL_OPTIONS").unwrap_or_default();
         let agent_text = agent.to_string_lossy();
         if !options.to_string_lossy().contains(agent_text.as_ref()) {
-            if !options.is_empty() { options.push(" "); }
+            if !options.is_empty() {
+                options.push(" ");
+            }
             options.push("-javaagent:");
             let quote = if agent_text.chars().any(char::is_whitespace)
-                || agent_text.contains('"') || agent_text.contains('\'') {
-                if !agent_text.contains('"') { Some('"') }
-                else if !agent_text.contains('\'') { Some('\'') }
-                else { return Err(LspError("Cannot quote the Lombok JAR path for the custom JDT LS launcher".into())); }
-            } else { None };
-            if let Some(quote) = quote { options.push(quote.to_string()); }
+                || agent_text.contains('"')
+                || agent_text.contains('\'')
+            {
+                if !agent_text.contains('"') {
+                    Some('"')
+                } else if !agent_text.contains('\'') {
+                    Some('\'')
+                } else {
+                    return Err(LspError(
+                        "Cannot quote the Lombok JAR path for the custom JDT LS launcher".into(),
+                    ));
+                }
+            } else {
+                None
+            };
+            if let Some(quote) = quote {
+                options.push(quote.to_string());
+            }
             options.push(agent.as_os_str());
-            if let Some(quote) = quote { options.push(quote.to_string()); }
+            if let Some(quote) = quote {
+                options.push(quote.to_string());
+            }
             child_environment.push(("JAVA_TOOL_OPTIONS".into(), options));
         }
     }
@@ -1550,9 +1625,14 @@ async fn server_message(
 async fn deliver_response(request: Pending, result: &Value, events: &LanguageEventSender) {
     if request.rename_to.is_some() {
         let result = parse_rename_workspace_edits(&request.project_root, result);
-        let _ = events.send(LanguageEvent::RenameEdits {
-            path: request.path, version: request.version, position: request.position, result,
-        }).await;
+        let _ = events
+            .send(LanguageEvent::RenameEdits {
+                path: request.path,
+                version: request.version,
+                position: request.position,
+                result,
+            })
+            .await;
         return;
     }
     let Pending {
@@ -1581,7 +1661,9 @@ async fn deliver_response(request: Pending, result: &Value, events: &LanguageEve
                         .unwrap_or(&label)
                         .to_owned();
                     let is_snippet = item["insertTextFormat"].as_u64() == Some(2);
-                    let expansion = is_snippet.then(|| SnippetParser::parse(&insert_text)).flatten();
+                    let expansion = is_snippet
+                        .then(|| SnippetParser::parse(&insert_text))
+                        .flatten();
                     let snippet_supported = !is_snippet || expansion.is_some();
                     let (insert_text, snippet_tab_stops) = if is_snippet {
                         match expansion {
@@ -1647,16 +1729,27 @@ async fn deliver_response(request: Pending, result: &Value, events: &LanguageEve
                 .filter_map(|signature| {
                     let raw_label = signature["label"].as_str()?;
                     let label = raw_label.chars().take(4096).collect();
-                    let documentation = signature["documentation"].as_str()
+                    let documentation = signature["documentation"]
+                        .as_str()
                         .or_else(|| signature["documentation"]["value"].as_str())
-                        .unwrap_or_default().chars().take(4096).collect();
-                    let active_parameter_index = result["activeParameter"].as_u64()
+                        .unwrap_or_default()
+                        .chars()
+                        .take(4096)
+                        .collect();
+                    let active_parameter_index = result["activeParameter"]
+                        .as_u64()
                         .or_else(|| signature["activeParameter"].as_u64())
                         .and_then(|index| usize::try_from(index).ok());
                     let active_parameter = active_parameter_index
                         .and_then(|index| signature["parameters"].get(index))
-                        .and_then(|parameter| signature_parameter_label(raw_label, &parameter["label"]));
-                    Some(SignatureInformation { label, documentation, active_parameter })
+                        .and_then(|parameter| {
+                            signature_parameter_label(raw_label, &parameter["label"])
+                        });
+                    Some(SignatureInformation {
+                        label,
+                        documentation,
+                        active_parameter,
+                    })
                 })
                 .collect::<Vec<_>>();
             let active_signature = result["activeSignature"].as_u64().unwrap_or(0) as usize;
@@ -1689,7 +1782,12 @@ async fn deliver_response(request: Pending, result: &Value, events: &LanguageEve
         },
         EditorCommand::CodeActions => {
             let result = parse_code_actions(&path, version, result);
-            LanguageEvent::CodeActions { path, version, position, result }
+            LanguageEvent::CodeActions {
+                path,
+                version,
+                position,
+                result,
+            }
         }
         EditorCommand::DocumentSymbols => LanguageEvent::DocumentSymbols {
             result: document_symbols(result, &path),
@@ -1706,9 +1804,16 @@ async fn deliver_response(request: Pending, result: &Value, events: &LanguageEve
                 DocumentEditKind::Format => parse_text_edits(result),
                 DocumentEditKind::OrganizeImports => parse_workspace_edits(&path, version, result),
             };
-            LanguageEvent::DocumentEdits { path, version, kind, result }
+            LanguageEvent::DocumentEdits {
+                path,
+                version,
+                kind,
+                result,
+            }
         }
-        EditorCommand::Rename => LanguageEvent::ServerState("Rename response was missing its new name".into()),
+        EditorCommand::Rename => {
+            LanguageEvent::ServerState("Rename response was missing its new name".into())
+        }
     };
     let _ = events.send(event).await;
 }
@@ -1717,65 +1822,131 @@ fn parse_text_edits(value: &Value) -> Result<Vec<(Range, String)>, String> {
     if value.is_null() {
         return Ok(Vec::new());
     }
-    let edits = value.as_array().ok_or("JDT LS returned an invalid text edit list")?;
+    let edits = value
+        .as_array()
+        .ok_or("JDT LS returned an invalid text edit list")?;
     if edits.len() > 20_000 {
         return Err("JDT LS returned too many text edits".into());
     }
-    edits.iter().map(|edit| {
-        let range = serde_json::from_value(edit["range"].clone())
-            .map_err(|error| format!("Invalid text edit range: {error}"))?;
-        let text = edit["newText"].as_str()
-            .ok_or_else(|| "Text edit has no replacement text".to_owned())?;
-        Ok((range, text.to_owned()))
-    }).collect()
+    edits
+        .iter()
+        .map(|edit| {
+            let range = serde_json::from_value(edit["range"].clone())
+                .map_err(|error| format!("Invalid text edit range: {error}"))?;
+            let text = edit["newText"]
+                .as_str()
+                .ok_or_else(|| "Text edit has no replacement text".to_owned())?;
+            Ok((range, text.to_owned()))
+        })
+        .collect()
 }
 
-fn parse_code_actions(path: &Path, version: i64, value: &Value) -> Result<Vec<CodeActionItem>, String> {
-    if value.is_null() { return Ok(Vec::new()); }
-    let actions = value.as_array().ok_or("JDT LS returned an invalid code action list")?;
+fn parse_code_actions(
+    path: &Path,
+    version: i64,
+    value: &Value,
+) -> Result<Vec<CodeActionItem>, String> {
+    if value.is_null() {
+        return Ok(Vec::new());
+    }
+    let actions = value
+        .as_array()
+        .ok_or("JDT LS returned an invalid code action list")?;
     let mut result = Vec::new();
     let mut total_edits = 0usize;
     for action in actions.iter().take(100) {
-        let Some(title) = action["title"].as_str() else { continue; };
-        if title.is_empty() || action.get("disabled").is_some_and(|disabled| !disabled.is_null())
-            || action.get("command").is_some_and(|command| !command.is_null())
-        { continue; }
+        let Some(title) = action["title"].as_str() else {
+            continue;
+        };
+        if title.is_empty()
+            || action
+                .get("disabled")
+                .is_some_and(|disabled| !disabled.is_null())
+            || action
+                .get("command")
+                .is_some_and(|command| !command.is_null())
+        {
+            continue;
+        }
         let edit = &action["edit"];
-        if edit.is_null() || edit["changeAnnotations"].as_object().is_some_and(|items| !items.is_empty()) { continue; }
-        if edit.get("changes").is_some_and(|changes| !changes.is_null())
-            && edit.get("documentChanges").is_some_and(|changes| !changes.is_null())
-        { continue; }
+        if edit.is_null()
+            || edit["changeAnnotations"]
+                .as_object()
+                .is_some_and(|items| !items.is_empty())
+        {
+            continue;
+        }
+        if edit
+            .get("changes")
+            .is_some_and(|changes| !changes.is_null())
+            && edit
+                .get("documentChanges")
+                .is_some_and(|changes| !changes.is_null())
+        {
+            continue;
+        }
         let mut edits = Vec::new();
         let mut valid = true;
         if let Some(changes) = edit["changes"].as_object() {
             for (document_uri, raw_edits) in changes {
-                let Some(target) = file_path(&Value::String(document_uri.clone())) else { valid = false; break; };
-                if !same_document_path(&target, path) { valid = false; break; }
-                let Ok(parsed) = parse_text_edits(raw_edits) else { valid = false; break; };
+                let Some(target) = file_path(&Value::String(document_uri.clone())) else {
+                    valid = false;
+                    break;
+                };
+                if !same_document_path(&target, path) {
+                    valid = false;
+                    break;
+                }
+                let Ok(parsed) = parse_text_edits(raw_edits) else {
+                    valid = false;
+                    break;
+                };
                 edits.extend(parsed);
             }
         }
         if valid {
             if let Some(changes) = edit["documentChanges"].as_array() {
                 for change in changes {
-                    if change.get("kind").is_some() { valid = false; break; }
-                    let Some(document_uri) = change["textDocument"]["uri"].as_str() else { valid = false; break; };
+                    if change.get("kind").is_some() {
+                        valid = false;
+                        break;
+                    }
+                    let Some(document_uri) = change["textDocument"]["uri"].as_str() else {
+                        valid = false;
+                        break;
+                    };
                     let document_version = &change["textDocument"]["version"];
                     if !document_version.is_null() && document_version.as_i64() != Some(version) {
                         valid = false;
                         break;
                     }
-                    let Some(target) = file_path(&Value::String(document_uri.to_owned())) else { valid = false; break; };
-                    if !same_document_path(&target, path) { valid = false; break; }
-                    let Ok(parsed) = parse_text_edits(&change["edits"]) else { valid = false; break; };
+                    let Some(target) = file_path(&Value::String(document_uri.to_owned())) else {
+                        valid = false;
+                        break;
+                    };
+                    if !same_document_path(&target, path) {
+                        valid = false;
+                        break;
+                    }
+                    let Ok(parsed) = parse_text_edits(&change["edits"]) else {
+                        valid = false;
+                        break;
+                    };
                     edits.extend(parsed);
                 }
             }
         }
         if valid && !edits.is_empty() {
-            total_edits = total_edits.checked_add(edits.len()).ok_or("Too many code action edits")?;
-            if total_edits > 20_000 { return Err("JDT LS returned too many code action edits".into()); }
-            result.push(CodeActionItem { title: title.chars().take(256).collect(), edits });
+            total_edits = total_edits
+                .checked_add(edits.len())
+                .ok_or("Too many code action edits")?;
+            if total_edits > 20_000 {
+                return Err("JDT LS returned too many code action edits".into());
+            }
+            result.push(CodeActionItem {
+                title: title.chars().take(256).collect(),
+                edits,
+            });
         }
     }
     Ok(result)
@@ -1785,12 +1956,20 @@ fn same_document_path(candidate: &Path, current: &Path) -> bool {
     candidate == current || candidate.canonicalize().ok().as_deref() == Some(current)
 }
 
-fn parse_workspace_edits(path: &Path, version: i64, value: &Value) -> Result<Vec<(Range, String)>, String> {
+fn parse_workspace_edits(
+    path: &Path,
+    version: i64,
+    value: &Value,
+) -> Result<Vec<(Range, String)>, String> {
     if value.is_null() {
         return Ok(Vec::new());
     }
-    if value.get("changes").is_some_and(|changes| !changes.is_null())
-        && value.get("documentChanges").is_some_and(|changes| !changes.is_null())
+    if value
+        .get("changes")
+        .is_some_and(|changes| !changes.is_null())
+        && value
+            .get("documentChanges")
+            .is_some_and(|changes| !changes.is_null())
     {
         return Err("JDT LS returned both workspace change formats".into());
     }
@@ -1801,7 +1980,10 @@ fn parse_workspace_edits(path: &Path, version: i64, value: &Value) -> Result<Vec
             let target = file_path(&Value::String(uri.clone()))
                 .ok_or_else(|| format!("JDT LS returned a non-file edit URI: {uri}"))?;
             if target != path {
-                return Err(format!("Organize imports returned edits for another file: {}", target.display()));
+                return Err(format!(
+                    "Organize imports returned edits for another file: {}",
+                    target.display()
+                ));
             }
             edits.extend(parse_text_edits(text_edits)?);
             found = true;
@@ -1809,17 +1991,23 @@ fn parse_workspace_edits(path: &Path, version: i64, value: &Value) -> Result<Vec
     }
     if let Some(document_changes) = value["documentChanges"].as_array() {
         for change in document_changes {
-            let document = change.get("textDocument").ok_or("JDT LS returned an unsupported resource operation")?;
+            let document = change
+                .get("textDocument")
+                .ok_or("JDT LS returned an unsupported resource operation")?;
             let document_version = &document["version"];
             if !document_version.is_null() && document_version.as_i64() != Some(version) {
                 return Err("JDT LS returned edits for an outdated document version".into());
             }
-            let uri = document["uri"].as_str()
+            let uri = document["uri"]
+                .as_str()
                 .ok_or("JDT LS returned an unsupported resource operation")?;
             let target = file_path(&Value::String(uri.to_owned()))
                 .ok_or_else(|| format!("JDT LS returned a non-file edit URI: {uri}"))?;
             if target != path {
-                return Err(format!("Organize imports returned edits for another file: {}", target.display()));
+                return Err(format!(
+                    "Organize imports returned edits for another file: {}",
+                    target.display()
+                ));
             }
             edits.extend(parse_text_edits(&change["edits"])?);
             found = true;
@@ -1838,68 +2026,145 @@ fn parse_rename_workspace_edits(
     root: &Path,
     value: &Value,
 ) -> Result<Vec<WorkspaceFileEdits>, String> {
-    if value.is_null() { return Ok(Vec::new()); }
-    let root = root.canonicalize().map_err(|error| format!("Cannot resolve project root: {error}"))?;
-    if value.get("changes").is_some_and(|changes| !changes.is_null() && !changes.is_object()) {
+    if value.is_null() {
+        return Ok(Vec::new());
+    }
+    let root = root
+        .canonicalize()
+        .map_err(|error| format!("Cannot resolve project root: {error}"))?;
+    if value
+        .get("changes")
+        .is_some_and(|changes| !changes.is_null() && !changes.is_object())
+    {
         return Err("JDT LS returned an invalid workspace changes map".into());
     }
-    if value.get("documentChanges").is_some_and(|changes| !changes.is_null() && !changes.is_array()) {
+    if value
+        .get("documentChanges")
+        .is_some_and(|changes| !changes.is_null() && !changes.is_array())
+    {
         return Err("JDT LS returned an invalid document changes list".into());
     }
-    let mut by_path: std::collections::BTreeMap<PathBuf, WorkspaceFileEdits> = std::collections::BTreeMap::new();
+    let mut by_path: std::collections::BTreeMap<PathBuf, WorkspaceFileEdits> =
+        std::collections::BTreeMap::new();
     let mut resource_renames = Vec::new();
     let mut total_edits = 0usize;
-    let mut append = |uri_value: &Value, edits_value: &Value, version: Option<i64>| -> Result<(), String> {
-        let raw_uri = uri_value.as_str().ok_or("JDT LS returned an edit without a document URI")?;
-        let path = file_path(&Value::String(raw_uri.to_owned()))
-            .ok_or_else(|| format!("JDT LS returned a non-file edit URI: {raw_uri}"))?;
-        let canonical = path.canonicalize().map_err(|error| format!("Cannot resolve rename target {}: {error}", path.display()))?;
-        let metadata = std::fs::metadata(&canonical).map_err(|error| format!("Cannot inspect rename target {}: {error}", canonical.display()))?;
-        if !metadata.is_file() || !canonical.starts_with(&root) {
-            return Err(format!("Rename target must be a regular file inside the open project: {}", canonical.display()));
-        }
-        let edits = parse_text_edits(edits_value)?;
-        total_edits = total_edits.checked_add(edits.len()).ok_or("Too many rename edits")?;
-        if total_edits > 20_000 { return Err("JDT LS returned too many rename edits".into()); }
-        let entry = by_path.entry(canonical.clone()).or_insert_with(|| WorkspaceFileEdits {
-            path: canonical, edits: Vec::new(), rename_to: None, version,
-        });
-        if entry.version != version {
-            return Err(format!("JDT LS returned inconsistent document versions for {}", entry.path.display()));
-        }
-        entry.edits.extend(edits);
-        if by_path.len() > 200 { return Err("Rename affects more than 200 files; narrow the symbol scope and try again".into()); }
-        Ok(())
-    };
+    let mut append =
+        |uri_value: &Value, edits_value: &Value, version: Option<i64>| -> Result<(), String> {
+            let raw_uri = uri_value
+                .as_str()
+                .ok_or("JDT LS returned an edit without a document URI")?;
+            let path = file_path(&Value::String(raw_uri.to_owned()))
+                .ok_or_else(|| format!("JDT LS returned a non-file edit URI: {raw_uri}"))?;
+            let canonical = path.canonicalize().map_err(|error| {
+                format!("Cannot resolve rename target {}: {error}", path.display())
+            })?;
+            let metadata = std::fs::metadata(&canonical).map_err(|error| {
+                format!(
+                    "Cannot inspect rename target {}: {error}",
+                    canonical.display()
+                )
+            })?;
+            if !metadata.is_file() || !canonical.starts_with(&root) {
+                return Err(format!(
+                    "Rename target must be a regular file inside the open project: {}",
+                    canonical.display()
+                ));
+            }
+            let edits = parse_text_edits(edits_value)?;
+            total_edits = total_edits
+                .checked_add(edits.len())
+                .ok_or("Too many rename edits")?;
+            if total_edits > 20_000 {
+                return Err("JDT LS returned too many rename edits".into());
+            }
+            let entry = by_path
+                .entry(canonical.clone())
+                .or_insert_with(|| WorkspaceFileEdits {
+                    path: canonical,
+                    edits: Vec::new(),
+                    rename_to: None,
+                    version,
+                });
+            if entry.version != version {
+                return Err(format!(
+                    "JDT LS returned inconsistent document versions for {}",
+                    entry.path.display()
+                ));
+            }
+            entry.edits.extend(edits);
+            if by_path.len() > 200 {
+                return Err(
+                    "Rename affects more than 200 files; narrow the symbol scope and try again"
+                        .into(),
+                );
+            }
+            Ok(())
+        };
     if let Some(changes) = value["changes"].as_object() {
-        for (uri, edits) in changes { append(&Value::String(uri.clone()), edits, None)?; }
+        for (uri, edits) in changes {
+            append(&Value::String(uri.clone()), edits, None)?;
+        }
     }
     if let Some(changes) = value["documentChanges"].as_array() {
         for change in changes {
             if change.get("kind").is_some() {
-                if change["kind"].as_str() != Some("rename") { return Err("JDT LS returned an unsupported resource operation".into()); }
-                let old_uri = change["oldUri"].as_str().ok_or("JDT LS returned a rename without oldUri")?;
-                let new_uri = change["newUri"].as_str().ok_or("JDT LS returned a rename without newUri")?;
-                let old_path = file_path(&Value::String(old_uri.to_owned())).ok_or("JDT LS returned a non-file rename source")?.canonicalize().map_err(|error| format!("Cannot resolve rename source: {error}"))?;
-                let new_path = file_path(&Value::String(new_uri.to_owned())).ok_or("JDT LS returned a non-file rename destination")?;
-                let parent = new_path.parent().ok_or("Rename destination has no parent")?.canonicalize().map_err(|error| format!("Cannot resolve rename destination directory: {error}"))?;
-                let destination = parent.join(new_path.file_name().ok_or("Rename destination has no filename")?);
+                if change["kind"].as_str() != Some("rename") {
+                    return Err("JDT LS returned an unsupported resource operation".into());
+                }
+                let old_uri = change["oldUri"]
+                    .as_str()
+                    .ok_or("JDT LS returned a rename without oldUri")?;
+                let new_uri = change["newUri"]
+                    .as_str()
+                    .ok_or("JDT LS returned a rename without newUri")?;
+                let old_path = file_path(&Value::String(old_uri.to_owned()))
+                    .ok_or("JDT LS returned a non-file rename source")?
+                    .canonicalize()
+                    .map_err(|error| format!("Cannot resolve rename source: {error}"))?;
+                let new_path = file_path(&Value::String(new_uri.to_owned()))
+                    .ok_or("JDT LS returned a non-file rename destination")?;
+                let parent = new_path
+                    .parent()
+                    .ok_or("Rename destination has no parent")?
+                    .canonicalize()
+                    .map_err(|error| {
+                        format!("Cannot resolve rename destination directory: {error}")
+                    })?;
+                let destination = parent.join(
+                    new_path
+                        .file_name()
+                        .ok_or("Rename destination has no filename")?,
+                );
                 let destination_exists = match std::fs::symlink_metadata(&destination) {
                     Ok(_) => true,
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
-                    Err(error) => return Err(format!("Cannot inspect rename destination {}: {error}", destination.display())),
+                    Err(error) => {
+                        return Err(format!(
+                            "Cannot inspect rename destination {}: {error}",
+                            destination.display()
+                        ));
+                    }
                 };
-                if !old_path.starts_with(&root) || parent != old_path.parent().unwrap_or(Path::new(""))
+                if !old_path.starts_with(&root)
+                    || parent != old_path.parent().unwrap_or(Path::new(""))
                     || old_path.extension().is_none_or(|ext| ext != "java")
                     || destination.extension().is_none_or(|ext| ext != "java")
                     || destination_exists
-                { return Err("Java source rename must stay in the same project directory and cannot overwrite a file".into()); }
+                {
+                    return Err("Java source rename must stay in the same project directory and cannot overwrite a file".into());
+                }
                 resource_renames.push((old_path, destination));
             } else {
-                let document = change.get("textDocument").ok_or("JDT LS returned an invalid document change")?;
+                let document = change
+                    .get("textDocument")
+                    .ok_or("JDT LS returned an invalid document change")?;
                 let version = match &document["version"] {
                     Value::Null => None,
-                    value => Some(value.as_i64().ok_or("JDT LS returned an invalid document version")?),
+                    value => Some(
+                        value
+                            .as_i64()
+                            .ok_or("JDT LS returned an invalid document version")?,
+                    ),
                 };
                 append(&document["uri"], &change["edits"], version)?;
             }
@@ -1910,8 +2175,17 @@ fn parse_rename_workspace_edits(
     }
     drop(append);
     for (old_path, destination) in resource_renames {
-        let entry = by_path.entry(old_path.clone()).or_insert_with(|| WorkspaceFileEdits { path: old_path, edits: Vec::new(), rename_to: None, version: None });
-        if entry.rename_to.replace(destination).is_some() { return Err("JDT LS returned multiple file renames for one source".into()); }
+        let entry = by_path
+            .entry(old_path.clone())
+            .or_insert_with(|| WorkspaceFileEdits {
+                path: old_path,
+                edits: Vec::new(),
+                rename_to: None,
+                version: None,
+            });
+        if entry.rename_to.replace(destination).is_some() {
+            return Err("JDT LS returned multiple file renames for one source".into());
+        }
     }
     Ok(by_path.into_values().collect())
 }
@@ -1931,7 +2205,9 @@ fn signature_parameter_label(signature_label: &str, parameter_label: &Value) -> 
     }
     let start_byte = utf16_offset_to_byte(signature_label, start)?;
     let end_byte = utf16_offset_to_byte(signature_label, end)?;
-    signature_label.get(start_byte..end_byte).map(|label| label.chars().take(256).collect())
+    signature_label
+        .get(start_byte..end_byte)
+        .map(|label| label.chars().take(256).collect())
 }
 
 fn utf16_offset_to_byte(text: &str, offset: usize) -> Option<usize> {
@@ -1950,23 +2226,33 @@ fn utf16_offset_to_byte(text: &str, offset: usize) -> Option<usize> {
 
 async fn deliver_request_error(request: Pending, error: String, events: &LanguageEventSender) {
     if request.rename_to.is_some() {
-        let _ = events.send(LanguageEvent::RenameEdits {
-            path: request.path, version: request.version, position: request.position, result: Err(error),
-        }).await;
+        let _ = events
+            .send(LanguageEvent::RenameEdits {
+                path: request.path,
+                version: request.version,
+                position: request.position,
+                result: Err(error),
+            })
+            .await;
         return;
     }
-    if matches!(request.command, EditorCommand::Format | EditorCommand::OrganizeImports) {
+    if matches!(
+        request.command,
+        EditorCommand::Format | EditorCommand::OrganizeImports
+    ) {
         let kind = if request.command == EditorCommand::Format {
             DocumentEditKind::Format
         } else {
             DocumentEditKind::OrganizeImports
         };
-        let _ = events.send(LanguageEvent::DocumentEdits {
-            path: request.path,
-            version: request.version,
-            kind,
-            result: Err(error),
-        }).await;
+        let _ = events
+            .send(LanguageEvent::DocumentEdits {
+                path: request.path,
+                version: request.version,
+                kind,
+                result: Err(error),
+            })
+            .await;
     } else if request.command == EditorCommand::DocumentSymbols {
         let _ = events
             .send(LanguageEvent::DocumentSymbols {
@@ -1976,12 +2262,14 @@ async fn deliver_request_error(request: Pending, error: String, events: &Languag
             })
             .await;
     } else if request.command == EditorCommand::CodeActions {
-        let _ = events.send(LanguageEvent::CodeActions {
-            path: request.path,
-            version: request.version,
-            position: request.position,
-            result: Err(error),
-        }).await;
+        let _ = events
+            .send(LanguageEvent::CodeActions {
+                path: request.path,
+                version: request.version,
+                position: request.position,
+                result: Err(error),
+            })
+            .await;
     } else {
         let _ = events.send(LanguageEvent::ServerState(error)).await;
     }
@@ -2382,7 +2670,9 @@ impl LanguageTool {
         if self.lombok_warning.is_none() || self.lombok_cache_check.is_some() {
             return;
         }
-        let Some(root) = self.root.clone() else { return; };
+        let Some(root) = self.root.clone() else {
+            return;
+        };
         let generation = self.generation;
         let (sender, receiver) = std::sync::mpsc::channel();
         self.lombok_cache_check = Some(receiver);
@@ -2415,7 +2705,8 @@ impl LanguageTool {
                         && self.lombok_warning.is_some()
                     {
                         self.lombok_restart_requested = true;
-                        self.summary = "Lombok dependency is cached; restarting Java intelligence…".into();
+                        self.summary =
+                            "Lombok dependency is cached; restarting Java intelligence…".into();
                     }
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => {
@@ -2584,7 +2875,10 @@ impl LanguageTool {
             session.try_command(LanguageCommand::Request {
                 command: EditorCommand::DocumentSymbols,
                 path: document.path.clone(),
-                project_root: self.root.clone().ok_or_else(|| LspError("No Java workspace is open".into()))?,
+                project_root: self
+                    .root
+                    .clone()
+                    .ok_or_else(|| LspError("No Java workspace is open".into()))?,
                 position: document.lsp_position(),
                 document_end: document_end_position(&document.text),
                 range: document_line_range(&document.text, document.lsp_position().line),
@@ -2707,7 +3001,13 @@ impl LanguageTool {
             }
         }
     }
-    pub fn request(&mut self, command: EditorCommand, document: &Document, tab_size: usize, insert_spaces: bool) {
+    pub fn request(
+        &mut self,
+        command: EditorCommand,
+        document: &Document,
+        tab_size: usize,
+        insert_spaces: bool,
+    ) {
         if command == EditorCommand::CodeActions {
             self.code_actions = None;
             self.code_actions_error = None;
@@ -2727,16 +3027,27 @@ impl LanguageTool {
             session.try_command(LanguageCommand::Request {
                 command,
                 path: document.path.clone(),
-                project_root: self.root.clone().ok_or_else(|| LspError("No Java workspace is open".into()))?,
+                project_root: self
+                    .root
+                    .clone()
+                    .ok_or_else(|| LspError("No Java workspace is open".into()))?,
                 position: document.lsp_position(),
                 document_end: document_end_position(&document.text),
                 range: document_line_range(&document.text, document.lsp_position().line),
                 diagnostics: if command == EditorCommand::CodeActions {
-                    self.diagnostics.get(&document.path).into_iter().flatten()
-                        .filter(|diagnostic| diagnostic.range.start.line <= document.lsp_position().line
-                            && diagnostic.range.end.line >= document.lsp_position().line)
-                        .cloned().collect()
-                } else { Vec::new() },
+                    self.diagnostics
+                        .get(&document.path)
+                        .into_iter()
+                        .flatten()
+                        .filter(|diagnostic| {
+                            diagnostic.range.start.line <= document.lsp_position().line
+                                && diagnostic.range.end.line >= document.lsp_position().line
+                        })
+                        .cloned()
+                        .collect()
+                } else {
+                    Vec::new()
+                },
                 version: synced.version,
                 rename_to: None,
                 tab_size: tab_size.clamp(1, 8),
@@ -2747,43 +3058,75 @@ impl LanguageTool {
             self.summary = error.to_string();
         }
     }
-    pub fn request_rename(&mut self, document: &Document, position: Position, new_name: String) -> Result<(), LspError> {
+    pub fn request_rename(
+        &mut self,
+        document: &Document,
+        position: Position,
+        new_name: String,
+    ) -> Result<(), LspError> {
         let result = (|| {
             if new_name.trim().is_empty() || new_name.chars().count() > 256 {
-                return Err(LspError("Enter a nonempty Java name of at most 256 characters".into()));
+                return Err(LspError(
+                    "Enter a nonempty Java name of at most 256 characters".into(),
+                ));
             }
             if document.lsp_position() != position {
-                return Err(LspError("The rename location changed; invoke Rename Symbol again".into()));
+                return Err(LspError(
+                    "The rename location changed; invoke Rename Symbol again".into(),
+                ));
             }
-            let session = self.session.as_ref().ok_or_else(|| LspError(self.summary.clone()))?;
-            let synced = self.documents.get(&document.path)
+            let session = self
+                .session
+                .as_ref()
+                .ok_or_else(|| LspError(self.summary.clone()))?;
+            let synced = self
+                .documents
+                .get(&document.path)
                 .filter(|synced| synced.text == document.text)
-                .ok_or_else(|| LspError("Java document is not synchronized yet; try again shortly".into()))?;
-            let project_root = self.root.clone().ok_or_else(|| LspError("No Java workspace is open".into()))?;
+                .ok_or_else(|| {
+                    LspError("Java document is not synchronized yet; try again shortly".into())
+                })?;
+            let project_root = self
+                .root
+                .clone()
+                .ok_or_else(|| LspError("No Java workspace is open".into()))?;
             session.try_command(LanguageCommand::Request {
                 command: EditorCommand::Rename,
-                path: document.path.clone(), project_root, position,
+                path: document.path.clone(),
+                project_root,
+                position,
                 document_end: document_end_position(&document.text),
-                range: document_line_range(&document.text, position.line), diagnostics: Vec::new(),
+                range: document_line_range(&document.text, position.line),
+                diagnostics: Vec::new(),
                 version: synced.version,
                 rename_to: Some(new_name.trim().to_owned()),
                 tab_size: 4,
                 insert_spaces: true,
             })
         })();
-        if let Err(error) = &result { self.summary = error.to_string(); }
+        if let Err(error) = &result {
+            self.summary = error.to_string();
+        }
         result
     }
-    pub fn generation(&self) -> u64 { self.generation }
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
     pub fn document_versions(&self) -> std::collections::HashMap<PathBuf, i64> {
-        self.documents.iter().map(|(path, document)| (path.clone(), document.version)).collect()
+        self.documents
+            .iter()
+            .map(|(path, document)| (path.clone(), document.version))
+            .collect()
     }
     pub fn accepts_generation(&self, generation: u64) -> bool {
         self.generation == generation
     }
     pub fn is_document_current(&self, path: &Path, version: i64, text: &str) -> bool {
         self.current(path, version)
-            && self.documents.get(path).is_some_and(|document| document.text == text)
+            && self
+                .documents
+                .get(path)
+                .is_some_and(|document| document.text == text)
     }
     fn current(&self, path: &Path, version: i64) -> bool {
         self.documents
@@ -2821,17 +3164,18 @@ impl LanguageTool {
                 self.completion_selection = items.iter().position(|item| item.applicable);
                 self.completion = Some((path, version, position, items));
             }
-            LanguageEvent::CodeActions { path, version, position, result }
-                if self.current(&path, version) =>
-            {
-                match result {
-                    Ok(actions) => {
-                        self.code_actions = Some((path, version, position, actions));
-                        self.code_actions_error = None;
-                    }
-                    Err(error) => self.code_actions_error = Some((path, version, error)),
+            LanguageEvent::CodeActions {
+                path,
+                version,
+                position,
+                result,
+            } if self.current(&path, version) => match result {
+                Ok(actions) => {
+                    self.code_actions = Some((path, version, position, actions));
+                    self.code_actions_error = None;
                 }
-            }
+                Err(error) => self.code_actions_error = Some((path, version, error)),
+            },
             LanguageEvent::SignatureHelp {
                 path,
                 version,
@@ -2927,13 +3271,19 @@ impl LanguageTool {
                     Err(error) => self.document_symbols_error = Some(error),
                 }
             }
-            LanguageEvent::DocumentEdits { result: Err(error), path, version, kind }
-                if self.current(&path, version) =>
-            {
-                self.summary = format!("{} failed: {error}", match kind {
-                    DocumentEditKind::Format => "Java formatting",
-                    DocumentEditKind::OrganizeImports => "Organize imports",
-                });
+            LanguageEvent::DocumentEdits {
+                result: Err(error),
+                path,
+                version,
+                kind,
+            } if self.current(&path, version) => {
+                self.summary = format!(
+                    "{} failed: {error}",
+                    match kind {
+                        DocumentEditKind::Format => "Java formatting",
+                        DocumentEditKind::OrganizeImports => "Organize imports",
+                    }
+                );
             }
             _ => {}
         }
@@ -2975,13 +3325,22 @@ impl LanguageTool {
         let tab_stops = if let Some(tab_stops) = item.snippet_tab_stops {
             let insertion_end = document.character_index();
             let insertion_start = insertion_end.saturating_sub(item.insert_text.chars().count());
-            Some(tab_stops.into_iter()
-                .map(|(index, ranges)| {
-                    (index, ranges.into_iter()
-                        .map(|(start, end)| (insertion_start + start, insertion_start + end))
-                        .collect())
-                })
-                .collect())
+            Some(
+                tab_stops
+                    .into_iter()
+                    .map(|(index, ranges)| {
+                        (
+                            index,
+                            ranges
+                                .into_iter()
+                                .map(|(start, end)| {
+                                    (insertion_start + start, insertion_start + end)
+                                })
+                                .collect(),
+                        )
+                    })
+                    .collect(),
+            )
         } else {
             None
         };
@@ -2990,13 +3349,30 @@ impl LanguageTool {
         Ok(tab_stops)
     }
 
-    pub fn apply_code_action(&mut self, index: usize, document: &mut Document) -> Result<String, LspError> {
-        let (path, version, position, action) = self.code_actions.as_ref()
-            .and_then(|(path, version, position, actions)| actions.get(index).map(|action| (path, version, position, action)))
-            .ok_or_else(|| LspError("The selected Java code action is no longer available".into()))?;
-        if path != &document.path || document.lsp_position() != *position || !self.is_document_current(path, *version, &document.text) {
+    pub fn apply_code_action(
+        &mut self,
+        index: usize,
+        document: &mut Document,
+    ) -> Result<String, LspError> {
+        let (path, version, position, action) = self
+            .code_actions
+            .as_ref()
+            .and_then(|(path, version, position, actions)| {
+                actions
+                    .get(index)
+                    .map(|action| (path, version, position, action))
+            })
+            .ok_or_else(|| {
+                LspError("The selected Java code action is no longer available".into())
+            })?;
+        if path != &document.path
+            || document.lsp_position() != *position
+            || !self.is_document_current(path, *version, &document.text)
+        {
             self.code_actions = None;
-            return Err(LspError("The Java source changed; request code actions again".into()));
+            return Err(LspError(
+                "The Java source changed; request code actions again".into(),
+            ));
         }
         let title = action.title.clone();
         document.apply_lsp_edits(&action.edits).map_err(LspError)?;
@@ -3020,7 +3396,11 @@ impl LanguageTool {
             .and_then(|selected| available.iter().position(|index| *index == selected))
             .unwrap_or(0);
         let next = if direction < 0 {
-            if current == 0 { available.len() - 1 } else { current - 1 }
+            if current == 0 {
+                available.len() - 1
+            } else {
+                current - 1
+            }
         } else if current + 1 == available.len() {
             0
         } else {
@@ -3060,13 +3440,25 @@ fn maven_import_arguments(root_pom_uri: &str) -> Value {
 pub fn render(ui: &mut eframe::egui::Ui, state: &mut crate::app::AppState) {
     use crate::app::events::AppEvent;
     use eframe::egui;
-    let stale_completion = state.language.completion.as_ref().is_some_and(|(path, version, position, _)| {
-        state.active_tab.and_then(|index| state.editor_tabs.get(index)).is_none_or(|tab| {
-            &tab.path != path
-                || tab.document.lsp_position() != *position
-                || !state.language.is_document_current(path, *version, &tab.document.text)
-        })
-    });
+    let stale_completion =
+        state
+            .language
+            .completion
+            .as_ref()
+            .is_some_and(|(path, version, position, _)| {
+                state
+                    .active_tab
+                    .and_then(|index| state.editor_tabs.get(index))
+                    .is_none_or(|tab| {
+                        &tab.path != path
+                            || tab.document.lsp_position() != *position
+                            || !state.language.is_document_current(
+                                path,
+                                *version,
+                                &tab.document.text,
+                            )
+                    })
+            });
     if stale_completion {
         state.language.dismiss_completion();
     }
@@ -3093,13 +3485,13 @@ pub fn render(ui: &mut eframe::egui::Ui, state: &mut crate::app::AppState) {
             ("References", EditorCommand::References),
             ("Quick fixes", EditorCommand::CodeActions),
         ] {
-            if ui.button(label).clicked() {
+            if ui.button(crate::i18n::ui_text(ui, label)).clicked() {
                 state.enqueue(AppEvent::EditorCommand(command));
             }
         }
     });
     let mut events = Vec::new();
-    ui.small(&state.language.summary);
+    ui.small(crate::i18n::message(ui.ctx(), &state.language.summary));
     if state
         .language
         .summary
@@ -3109,14 +3501,23 @@ pub fn render(ui: &mut eframe::egui::Ui, state: &mut crate::app::AppState) {
         && !state.pending_language_restart
         && ui
             .small_button("Retry Java intelligence")
-            .on_hover_text("Restart JDT LS and retry the connection")
+            .on_hover_text(crate::i18n::ui_text(
+                ui,
+                "Restart JDT LS and retry the connection",
+            ))
             .clicked()
     {
         events.push(AppEvent::RestartLanguage);
     }
     if let Some(warning) = &state.language.lombok_warning {
-        ui.colored_label(ui.visuals().warn_fg_color, warning);
-        if ui.small_button("Restart Java intelligence after resolving Lombok").clicked() {
+        ui.colored_label(
+            ui.visuals().warn_fg_color,
+            crate::i18n::message(ui.ctx(), warning),
+        );
+        if ui
+            .small_button("Restart Java intelligence after resolving Lombok")
+            .clicked()
+        {
             events.push(AppEvent::RestartLanguage);
         }
     }
@@ -3129,25 +3530,47 @@ pub fn render(ui: &mut eframe::egui::Ui, state: &mut crate::app::AppState) {
             && error_path == path
             && state.language.current(error_path, *error_version)
         {
-            ui.colored_label(ui.visuals().warn_fg_color, error);
+            ui.colored_label(
+                ui.visuals().warn_fg_color,
+                crate::i18n::message(ui.ctx(), error),
+            );
         }
         if let Some((actions_path, version, position, actions)) = &state.language.code_actions
             && actions_path == path
-            && state.language.is_document_current(path, *version, state.active_tab.and_then(|index| state.editor_tabs.get(index)).map(|tab| tab.document.text.as_str()).unwrap_or_default())
-            && state.active_tab.and_then(|index| state.editor_tabs.get(index)).is_some_and(|tab| tab.document.lsp_position() == *position)
+            && state.language.is_document_current(
+                path,
+                *version,
+                state
+                    .active_tab
+                    .and_then(|index| state.editor_tabs.get(index))
+                    .map(|tab| tab.document.text.as_str())
+                    .unwrap_or_default(),
+            )
+            && state
+                .active_tab
+                .and_then(|index| state.editor_tabs.get(index))
+                .is_some_and(|tab| tab.document.lsp_position() == *position)
         {
             if actions.is_empty() {
-                ui.small("No direct quick fixes at the caret");
+                ui.small(crate::i18n::ui_text(
+                    ui,
+                    "No direct quick fixes at the caret",
+                ));
             } else {
-                egui::CollapsingHeader::new(format!("Quick fixes ({})", actions.len())).show(ui, |ui| {
-                    egui::ScrollArea::vertical().max_height(120.0).show(ui, |ui| {
-                        for (index, action) in actions.iter().take(30).enumerate() {
-                            if ui.button(&action.title).clicked() {
-                                events.push(AppEvent::ApplyCodeAction(index));
-                            }
-                        }
-                    });
-                });
+                egui::CollapsingHeader::new(format!("Quick fixes ({})", actions.len())).show(
+                    ui,
+                    |ui| {
+                        egui::ScrollArea::vertical()
+                            .max_height(120.0)
+                            .show(ui, |ui| {
+                                for (index, action) in actions.iter().take(30).enumerate() {
+                                    if ui.button(&action.title).clicked() {
+                                        events.push(AppEvent::ApplyCodeAction(index));
+                                    }
+                                }
+                            });
+                    },
+                );
             }
         }
         if let Some(items) = state.language.diagnostics.get(path) {
@@ -3194,7 +3617,10 @@ pub fn render(ui: &mut eframe::egui::Ui, state: &mut crate::app::AppState) {
                     .show(ui, |ui| {
                         ui.label(text);
                     });
-                if ui.small_button("Dismiss documentation").clicked() {
+                if ui
+                    .small_button(crate::i18n::ui_text(ui, "Dismiss documentation"))
+                    .clicked()
+                {
                     state.language.hover = None;
                 }
             }
@@ -3204,19 +3630,26 @@ pub fn render(ui: &mut eframe::egui::Ui, state: &mut crate::app::AppState) {
         {
             if signature_path == path {
                 if let Some(signature) = signatures.get(*active_signature) {
-                    egui::CollapsingHeader::new("Parameter info")
+                    egui::CollapsingHeader::new(crate::i18n::ui_text(ui, "Parameter info"))
                         .default_open(true)
                         .show(ui, |ui| {
                             ui.monospace(&signature.label);
                             if let Some(parameter) = &signature.active_parameter {
-                                ui.small(format!("Current parameter: {parameter}"));
+                                ui.small(crate::i18n::ui_format(
+                                    ui,
+                                    "Current parameter: {parameter}",
+                                    &[("parameter", parameter)],
+                                ));
                             }
                             if !signature.documentation.is_empty() {
                                 ui.label(&signature.documentation);
                             }
                         });
                 } else {
-                    ui.small("No signature information at this position");
+                    ui.small(crate::i18n::ui_text(
+                        ui,
+                        "No signature information at this position",
+                    ));
                 }
             }
         }
@@ -3224,9 +3657,9 @@ pub fn render(ui: &mut eframe::egui::Ui, state: &mut crate::app::AppState) {
     if let Some((path, _, _, items)) = &state.language.completion {
         if active_path.as_ref() == Some(path) {
             ui.label(if items.is_empty() {
-                "No completions"
+                crate::i18n::ui_text(ui, "No completions")
             } else {
-                "Completions"
+                crate::i18n::ui_text(ui, "Completions")
             });
             egui::ScrollArea::vertical()
                 .id_salt("java_completions")
@@ -3248,7 +3681,10 @@ pub fn render(ui: &mut eframe::egui::Ui, state: &mut crate::app::AppState) {
                         }
                     }
                 });
-            if ui.small_button("Dismiss completions").clicked() {
+            if ui
+                .small_button(crate::i18n::ui_text(ui, "Dismiss completions"))
+                .clicked()
+            {
                 state.language.dismiss_completion();
             }
         }
@@ -3286,7 +3722,10 @@ pub fn render(ui: &mut eframe::egui::Ui, state: &mut crate::app::AppState) {
                     }
                 });
         });
-        if ui.small_button("Dismiss locations").clicked() {
+        if ui
+            .small_button(crate::i18n::ui_text(ui, "Dismiss locations"))
+            .clicked()
+        {
             state.language.locations.clear();
         }
     }

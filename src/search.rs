@@ -1,6 +1,6 @@
 //! Literal project search. Disk traversal and bounded reads run on a cancellable worker.
-use std::io::Read;
 use std::collections::HashMap;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::{
     Arc,
@@ -8,9 +8,9 @@ use std::sync::{
     mpsc,
 };
 
+use crate::project::tree::EXCLUDED;
 use eframe::egui;
 use globset::{Glob, GlobSetBuilder};
-use crate::project::tree::EXCLUDED;
 
 #[derive(Clone, Debug, Default)]
 pub struct SearchQuery {
@@ -72,7 +72,10 @@ enum SearchResponse {
 
 enum SearchMode {
     Search,
-    Replace { replacement: String, open_documents: Vec<OpenDocumentSnapshot> },
+    Replace {
+        replacement: String,
+        open_documents: Vec<OpenDocumentSnapshot>,
+    },
 }
 
 struct SearchRequest {
@@ -112,12 +115,16 @@ impl ProjectSearch {
                     continue;
                 }
                 let result = match request.mode {
-                    SearchMode::Search => search(&request.root, &request.query, || current.load(Ordering::Relaxed) != request.id)
-                        .map(SearchResponse::Search),
-                    SearchMode::Replace { open_documents, .. } => preview_replacements(
-                        &request.root, &request.query, open_documents,
-                        || current.load(Ordering::Relaxed) != request.id,
-                    ).map(SearchResponse::Replace),
+                    SearchMode::Search => search(&request.root, &request.query, || {
+                        current.load(Ordering::Relaxed) != request.id
+                    })
+                    .map(SearchResponse::Search),
+                    SearchMode::Replace { open_documents, .. } => {
+                        preview_replacements(&request.root, &request.query, open_documents, || {
+                            current.load(Ordering::Relaxed) != request.id
+                        })
+                        .map(SearchResponse::Replace)
+                    }
                 };
                 if current.load(Ordering::Relaxed) == request.id {
                     if results.send((request.id, result)).is_err() {
@@ -157,7 +164,14 @@ impl ProjectSearch {
         replacement: String,
         open_documents: Vec<OpenDocumentSnapshot>,
     ) {
-        self.start_request(root, query, SearchMode::Replace { replacement, open_documents });
+        self.start_request(
+            root,
+            query,
+            SearchMode::Replace {
+                replacement,
+                open_documents,
+            },
+        );
     }
 
     fn start_request(&mut self, root: PathBuf, query: SearchQuery, mode: SearchMode) {
@@ -176,7 +190,15 @@ impl ProjectSearch {
             return;
         }
         let id = self.generation.load(Ordering::Relaxed);
-        self.running = self.commands.send(SearchRequest { id, root, query, mode }).is_ok();
+        self.running = self
+            .commands
+            .send(SearchRequest {
+                id,
+                root,
+                query,
+                mode,
+            })
+            .is_ok();
         self.message = if self.running {
             "Searching…"
         } else {
@@ -203,7 +225,10 @@ impl ProjectSearch {
     }
 
     pub fn take_selected_replace_files(&mut self) -> Vec<ReplacePreviewFile> {
-        std::mem::take(&mut self.replace_files).into_iter().filter(|file| file.selected).collect()
+        std::mem::take(&mut self.replace_files)
+            .into_iter()
+            .filter(|file| file.selected)
+            .collect()
     }
 
     pub fn reset(&mut self) {
@@ -240,7 +265,10 @@ impl ProjectSearch {
                 Ok(SearchResponse::Replace(results)) => {
                     let files = results.files.len();
                     let matches: usize = results.files.iter().map(|file| file.match_count).sum();
-                    self.message = format!("{matches} replacements in {files} files; {} unreadable, binary, non-UTF-8 or oversized files skipped", results.skipped);
+                    self.message = format!(
+                        "{matches} replacements in {files} files; {} unreadable, binary, non-UTF-8 or oversized files skipped",
+                        results.skipped
+                    );
                     if results.truncated_preview {
                         self.message.push_str("; preview lines limited to 5,000");
                     }
@@ -281,8 +309,12 @@ fn search(
         .require_git(false)
         .follow_links(false)
         .filter_entry(|entry| {
-            if entry.depth() == 0 { return true; }
-            !EXCLUDED.iter().any(|excluded| entry.file_name() == *excluded)
+            if entry.depth() == 0 {
+                return true;
+            }
+            !EXCLUDED
+                .iter()
+                .any(|excluded| entry.file_name() == *excluded)
         });
     const MAX_FILE: u64 = 16 * 1024 * 1024;
     for entry in walker.build() {
@@ -353,13 +385,16 @@ fn preview_replacements(
     if query.text.is_empty() {
         return Err("Enter text to replace".into());
     }
-    let root = root.canonicalize().map_err(|error| format!("Cannot open project {}: {error}", root.display()))?;
+    let root = root
+        .canonicalize()
+        .map_err(|error| format!("Cannot open project {}: {error}", root.display()))?;
     let mut builder = GlobSetBuilder::new();
     for glob in &query.file_globs {
         builder.add(Glob::new(glob).map_err(|error| format!("Invalid file glob: {error}"))?);
     }
     let globs = builder.build().map_err(|error| error.to_string())?;
-    let mut buffers: HashMap<_, _> = open_documents.into_iter()
+    let mut buffers: HashMap<_, _> = open_documents
+        .into_iter()
         .filter(|document| document.path.starts_with(&root))
         .map(|document| (document.path.clone(), document))
         .collect();
@@ -367,27 +402,49 @@ fn preview_replacements(
     let mut total_bytes = 0usize;
     let mut preview_lines = 0usize;
     let mut walker = ignore::WalkBuilder::new(&root);
-    walker.hidden(false).require_git(false).follow_links(false).filter_entry(|entry| {
-        if entry.depth() == 0 { return true; }
-        !EXCLUDED.iter().any(|excluded| entry.file_name() == *excluded)
-    });
+    walker
+        .hidden(false)
+        .require_git(false)
+        .follow_links(false)
+        .filter_entry(|entry| {
+            if entry.depth() == 0 {
+                return true;
+            }
+            !EXCLUDED
+                .iter()
+                .any(|excluded| entry.file_name() == *excluded)
+        });
     const MAX_FILE: u64 = 16 * 1024 * 1024;
     for entry in walker.build() {
-        if cancelled() { return Ok(results); }
+        if cancelled() {
+            return Ok(results);
+        }
         let entry = match entry {
             Ok(entry) => entry,
-            Err(_) => { results.skipped += 1; continue; }
+            Err(_) => {
+                results.skipped += 1;
+                continue;
+            }
         };
-        if !entry.file_type().is_some_and(|kind| kind.is_file()) { continue; }
+        if !entry.file_type().is_some_and(|kind| kind.is_file()) {
+            continue;
+        }
         let path = match entry.path().canonicalize() {
             Ok(path) if path.starts_with(&root) => path,
-            _ => { results.skipped += 1; continue; }
+            _ => {
+                results.skipped += 1;
+                continue;
+            }
         };
         let relative = path.strip_prefix(&root).unwrap_or(&path);
-        if !query.file_globs.is_empty() && !globs.is_match(relative) { continue; }
+        if !query.file_globs.is_empty() && !globs.is_match(relative) {
+            continue;
+        }
         let open_document = buffers.remove(&path);
         let open_revision = open_document.as_ref().map(|document| document.revision);
-        let recheck_disk = open_document.as_ref().is_none_or(|document| document.text.is_none());
+        let recheck_disk = open_document
+            .as_ref()
+            .is_none_or(|document| document.text.is_none());
         let text = if let Some(text) = open_document.and_then(|document| document.text) {
             text
         } else {
@@ -400,7 +457,10 @@ fn preview_replacements(
             }
             match String::from_utf8(bytes) {
                 Ok(text) => text,
-                Err(_) => { results.skipped += 1; continue; }
+                Err(_) => {
+                    results.skipped += 1;
+                    continue;
+                }
             }
         };
         if text.len() > MAX_FILE as usize || text.as_bytes().contains(&0) {
@@ -408,13 +468,20 @@ fn preview_replacements(
             continue;
         }
         let (_, match_count, _) = replace_all_text(&text, &query.text, "", query.case_sensitive);
-        if match_count == 0 { continue; }
+        if match_count == 0 {
+            continue;
+        }
         if results.files.len() >= 200 {
             return Err("Replace preview exceeds the 200-file limit; narrow the file globs".into());
         }
-        total_bytes = total_bytes.checked_add(text.len()).ok_or("Replace preview size overflow")?;
+        total_bytes = total_bytes
+            .checked_add(text.len())
+            .ok_or("Replace preview size overflow")?;
         if total_bytes > crate::editor::MAX_WORKSPACE_EDIT_BYTES {
-            return Err(format!("Replace preview exceeds the {} MiB workspace edit limit; narrow the file globs", crate::editor::MAX_WORKSPACE_EDIT_BYTES / (1024 * 1024)));
+            return Err(format!(
+                "Replace preview exceeds the {} MiB workspace edit limit; narrow the file globs",
+                crate::editor::MAX_WORKSPACE_EDIT_BYTES / (1024 * 1024)
+            ));
         }
         let mut matches = Vec::new();
         for (line_index, line) in text.lines().enumerate() {
@@ -451,7 +518,8 @@ pub fn render(ui: &mut egui::Ui, state: &mut crate::app::AppState) {
     let mut invalidate_preview = false;
     ui.horizontal(|ui| {
         let response = ui.add(
-            egui::TextEdit::singleline(&mut state.search.query.text).hint_text("Find in project"),
+            egui::TextEdit::singleline(&mut state.search.query.text)
+                .hint_text(crate::i18n::ui_text(ui, "Find in project")),
         );
         invalidate_preview |= response.changed();
         if state.search.focus_requested {
@@ -460,16 +528,30 @@ pub fn render(ui: &mut egui::Ui, state: &mut crate::app::AppState) {
         }
         let submitted =
             response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
-        invalidate_preview |= ui.checkbox(&mut state.search.query.case_sensitive, "Case sensitive").changed();
-        let replace_changed = ui.checkbox(&mut state.search.replace_mode, "Replace in project").changed();
+        invalidate_preview |= ui
+            .checkbox(&mut state.search.query.case_sensitive, "Case sensitive")
+            .changed();
+        let replace_changed = ui
+            .checkbox(&mut state.search.replace_mode, "Replace in project")
+            .changed();
         invalidate_preview |= replace_changed;
         if state.search.replace_mode {
-            let response = ui.add(egui::TextEdit::singleline(&mut state.search.replacement_text).hint_text("Replace with"));
+            let response = ui.add(
+                egui::TextEdit::singleline(&mut state.search.replacement_text)
+                    .hint_text(crate::i18n::ui_text(ui, "Replace with")),
+            );
             invalidate_preview |= response.changed();
         }
-        let button = if state.search.replace_mode { "Preview replacements" } else { "Search" };
+        let button = if state.search.replace_mode {
+            "Preview replacements"
+        } else {
+            "Search"
+        };
         if ui
-            .add_enabled(state.project.is_some() && !state.search.running, egui::Button::new(button))
+            .add_enabled(
+                state.project.is_some() && !state.search.running,
+                egui::Button::new(button),
+            )
             .clicked()
             || submitted
         {
@@ -488,32 +570,56 @@ pub fn render(ui: &mut egui::Ui, state: &mut crate::app::AppState) {
                 SearchAction::Run(query)
             }));
         }
-        if state.search.running && ui.button("Cancel").clicked() {
+        if state.search.running && ui.button(crate::i18n::ui_text(ui, "Cancel")).clicked() {
             action = Some(AppEvent::Search(SearchAction::Cancel));
         }
     });
-    invalidate_preview |= ui.add(egui::TextEdit::singleline(&mut state.search.globs_text)
-        .hint_text("Optional file globs, comma separated: **/*.java, pom.xml")).changed();
+    invalidate_preview |= ui
+        .add(
+            egui::TextEdit::singleline(&mut state.search.globs_text).hint_text(
+                crate::i18n::ui_text(
+                    ui,
+                    "Optional file globs, comma separated: **/*.java, pom.xml",
+                ),
+            ),
+        )
+        .changed();
     if invalidate_preview && state.search.replace_preview_active {
         state.search.clear_replace_preview();
         state.search.message = "Search or replacement changed; preview again".into();
     }
-    ui.label(if state.project.is_none() {
-        "Open a project to search"
+    let status = if state.project.is_none() {
+        crate::i18n::ui_text(ui, "Open a project to search")
     } else {
-        &state.search.message
-    });
+        crate::i18n::message(ui.ctx(), &state.search.message)
+    };
+    ui.label(status);
     if state.search.replace_preview_active {
         ui.horizontal(|ui| {
-            if ui.button("Select all").clicked() {
-                for file in &mut state.search.replace_files { file.selected = true; }
+            if ui.button(crate::i18n::ui_text(ui, "Select all")).clicked() {
+                for file in &mut state.search.replace_files {
+                    file.selected = true;
+                }
             }
-            if ui.button("Select none").clicked() {
-                for file in &mut state.search.replace_files { file.selected = false; }
+            if ui.button(crate::i18n::ui_text(ui, "Select none")).clicked() {
+                for file in &mut state.search.replace_files {
+                    file.selected = false;
+                }
             }
-            let selected = state.search.replace_files.iter().filter(|file| file.selected).count();
+            let selected = state
+                .search
+                .replace_files
+                .iter()
+                .filter(|file| file.selected)
+                .count();
             let pending = !state.pending_workspace_replacements.is_empty();
-            if ui.add_enabled(selected > 0 && !pending, egui::Button::new(format!("Apply to {selected} files"))).clicked() {
+            if ui
+                .add_enabled(
+                    selected > 0 && !pending,
+                    egui::Button::new(format!("Apply to {selected} files")),
+                )
+                .clicked()
+            {
                 action = Some(AppEvent::Search(SearchAction::ApplyReplace));
             }
         });
@@ -525,23 +631,40 @@ pub fn render(ui: &mut egui::Ui, state: &mut crate::app::AppState) {
             let root = state.project.as_ref().map(|project| project.root.as_path());
             if state.search.replace_preview_active {
                 for file in &mut state.search.replace_files {
-                    let path = root.and_then(|root| file.path.strip_prefix(root).ok()).unwrap_or(&file.path);
+                    let path = root
+                        .and_then(|root| file.path.strip_prefix(root).ok())
+                        .unwrap_or(&file.path);
                     ui.push_id(file.path.clone(), |ui| {
                         ui.horizontal(|ui| {
                             ui.checkbox(&mut file.selected, "");
-                            egui::CollapsingHeader::new(format!("{} — {} replacements", path.display(), file.match_count))
-                                .show(ui, |ui| {
-                                    for found in &file.matches {
-                                        ui.small(format!("{}: {}  ×{}", found.line, found.preview, found.count));
-                                    }
-                                });
+                            egui::CollapsingHeader::new(format!(
+                                "{} — {} replacements",
+                                path.display(),
+                                file.match_count
+                            ))
+                            .show(ui, |ui| {
+                                for found in &file.matches {
+                                    ui.small(format!(
+                                        "{}: {}  ×{}",
+                                        found.line, found.preview, found.count
+                                    ));
+                                }
+                            });
                         });
                     });
                 }
             } else if !state.search.replace_mode {
                 for found in &state.search.matches {
-                    let path = root.and_then(|root| found.path.strip_prefix(root).ok()).unwrap_or(&found.path);
-                    if ui.selectable_label(false, format!("{}:{}  {}", path.display(), found.line, found.preview)).clicked() {
+                    let path = root
+                        .and_then(|root| found.path.strip_prefix(root).ok())
+                        .unwrap_or(&found.path);
+                    if ui
+                        .selectable_label(
+                            false,
+                            format!("{}:{}  {}", path.display(), found.line, found.preview),
+                        )
+                        .clicked()
+                    {
                         action = Some(AppEvent::OpenFileAtLine(found.path.clone(), found.line));
                     }
                 }

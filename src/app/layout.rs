@@ -8,28 +8,30 @@ use crate::project::maven_view::{MavenModuleView, MavenTask};
 use crate::project::tree::TreeAction;
 
 pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
+    crate::i18n::install(ui.ctx(), &state.translator);
+    let translator = state.translator.clone();
     egui::Panel::top("main_menu").show(ui, |ui| {
         egui::MenuBar::new().ui(ui, |ui| {
-            ui.menu_button("File", |ui| {
-                if ui.button("New Java Project…").clicked() {
+            ui.menu_button(translator.text("File"), |ui| {
+                if ui.button(translator.text("New Java Project…")).clicked() {
                     state.enqueue(AppEvent::NewJavaProjectOpen);
                     ui.close();
                 }
-                if ui.button("Open Project…     ⇧⌘O").clicked() {
+                if ui.button(translator.text("Open Project…     ⇧⌘O")).clicked() {
                     ui.close();
                     actions::open_project_dialog(state);
                 }
-                if ui.button("Open File…             ⌘O").clicked() {
+                if ui.button(translator.text("Open File…             ⌘O")).clicked() {
                     ui.close();
                     actions::open_file_dialog(state);
                 }
-                if ui.add_enabled(state.project.is_some(), egui::Button::new("Go to File…             ⌘P")).clicked() {
+                if ui.add_enabled(state.project.is_some(), egui::Button::new(crate::i18n::ui_text(ui, "Go to File…             ⌘P"))).clicked() {
                     state.enqueue(AppEvent::QuickOpenOpen);
                     ui.close();
                 }
-                ui.menu_button("Recent Projects", |ui| {
+                ui.menu_button(translator.text("Recent Projects"), |ui| {
                     if state.settings.recent_projects.is_empty() {
-                        ui.label("No recent projects");
+                        ui.label(translator.text("No recent projects"));
                     }
                     for path in state.settings.recent_projects.clone() {
                         if ui.button(path.display().to_string()).clicked() {
@@ -43,7 +45,7 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
                 if ui
                     .add_enabled(
                         has_document,
-                        egui::Button::new("Save                        ⌘S"),
+                        egui::Button::new(crate::i18n::ui_text(ui, "Save                        ⌘S")),
                     )
                     .clicked()
                 {
@@ -53,7 +55,7 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
                 if ui
                     .add_enabled(
                         !state.editor_tabs.is_empty(),
-                        egui::Button::new("Save All                 ⇧⌘S"),
+                        egui::Button::new(crate::i18n::ui_text(ui, "Save All                 ⇧⌘S")),
                     )
                     .clicked()
                 {
@@ -63,7 +65,7 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
                 if ui
                     .add_enabled(
                         has_document,
-                        egui::Button::new("Close File                ⌘W"),
+                        egui::Button::new(crate::i18n::ui_text(ui, "Close File                ⌘W")),
                     )
                     .clicked()
                 {
@@ -71,73 +73,136 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
                     ui.close();
                 }
                 ui.separator();
-                if ui.add_enabled(state.editor_tabs.len() > 1, egui::Button::new("Next Tab    Ctrl+Tab")).clicked() {
+                if ui.add_enabled(state.editor_tabs.len() > 1, egui::Button::new(crate::i18n::ui_text(ui, "Next Tab    Ctrl+Tab"))).clicked() {
                     state.enqueue(AppEvent::NextEditorTab);
                     ui.close();
                 }
-                if ui.add_enabled(state.editor_tabs.len() > 1, egui::Button::new("Previous Tab    Ctrl+Shift+Tab")).clicked() {
+                if ui.add_enabled(state.editor_tabs.len() > 1, egui::Button::new(crate::i18n::ui_text(ui, "Previous Tab    Ctrl+Shift+Tab"))).clicked() {
                     state.enqueue(AppEvent::PreviousEditorTab);
                     ui.close();
                 }
                 ui.separator();
-                if ui.button("Quit").clicked() {
+                if ui.button(translator.text("Quit")).clicked() {
                     state.enqueue(AppEvent::RequestQuit);
                     ui.close();
                 }
             });
-            ui.menu_button("Edit", |ui| {
-                if ui.add_enabled(state.active_tab.is_some(), egui::Button::new("Rename Symbol…    Shift+F6")).clicked() {
+            ui.menu_button(translator.text("Edit"), |ui| {
+                if ui.add_enabled(state.active_tab.is_some(), egui::Button::new(crate::i18n::ui_text(ui, "Rename Symbol…    Shift+F6"))).clicked() {
                     state.enqueue(AppEvent::RenameSymbolOpen);
                     ui.close();
                 }
                 ui.separator();
-                if ui.button("Find in Project…    ⇧⌘F").clicked() {
+                if ui.button(translator.text("Find in Project…    ⇧⌘F")).clicked() {
                     state.enqueue(AppEvent::Search(super::events::SearchAction::Open));
                     ui.close();
                 }
-                if ui.button("Find in File…    ⌘F").clicked() {
+                if ui.button(translator.text("Find in File…    ⌘F")).clicked() {
                     state.enqueue(AppEvent::Find(crate::editor::find_replace::FindAction::Open { replace: false }));
                     ui.close();
                 }
-                if ui.button("Replace in File…    ⌘R").clicked() {
+                if ui.button(translator.text("Replace in File…    ⌘R")).clicked() {
                     state.enqueue(AppEvent::Find(crate::editor::find_replace::FindAction::Open { replace: true }));
                     ui.close();
                 }
-                if ui.add_enabled(state.active_tab.is_some(), egui::Button::new("Go to Line…    ⌘L")).clicked() {
+                if ui.add_enabled(state.active_tab.is_some(), egui::Button::new(crate::i18n::ui_text(ui, "Go to Line…    ⌘L"))).clicked() {
                     state.enqueue(AppEvent::GoToLineOpen);
                     ui.close();
                 }
             });
-            ui.menu_button("Navigate", |ui| {
-                if ui.add_enabled(!state.navigation_back.is_empty(), egui::Button::new("Back    Ctrl+Alt+←")).clicked() {
+            ui.menu_button(translator.text("Navigate"), |ui| {
+                if ui.add_enabled(!state.navigation_back.is_empty(), egui::Button::new(translator.text("Back    Ctrl+Alt+←"))).clicked() {
                     state.enqueue(AppEvent::NavigateBack);
                     ui.close();
                 }
-                if ui.add_enabled(!state.navigation_forward.is_empty(), egui::Button::new("Forward    Ctrl+Alt+→")).clicked() {
+                if ui.add_enabled(!state.navigation_forward.is_empty(), egui::Button::new(translator.text("Forward    Ctrl+Alt+→"))).clicked() {
                     state.enqueue(AppEvent::NavigateForward);
                     ui.close();
                 }
             });
-            ui.menu_button("Settings", |ui| {
-                ui.label("Java indentation");
+            ui.menu_button(translator.text("Settings"), |ui| {
+                ui.label(translator.text("Language"));
+                let mut language = state.settings.language;
+                let language_label = match language {
+                    crate::i18n::LanguagePreference::System => translator.text("System"),
+                    crate::i18n::LanguagePreference::English => translator.text("English"),
+                    crate::i18n::LanguagePreference::Italian => translator.text("Italian"),
+                };
+                egui::ComboBox::from_id_salt("language_preference")
+                    .selected_text(language_label)
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(
+                            &mut language,
+                            crate::i18n::LanguagePreference::System,
+                            translator.text("System"),
+                        );
+                        ui.selectable_value(
+                            &mut language,
+                            crate::i18n::LanguagePreference::Italian,
+                            translator.text("Italian"),
+                        );
+                        ui.selectable_value(
+                            &mut language,
+                            crate::i18n::LanguagePreference::English,
+                            translator.text("English"),
+                        );
+                    });
+                if language != state.settings.language {
+                    state.settings.language = language;
+                    let config_dir = crate::settings::UserSettings::config_dir().ok();
+                    let (translator, error) = crate::i18n::Translator::load(
+                        language,
+                        config_dir.as_deref(),
+                    );
+                    state.translator = translator;
+                    state.localization_error = error;
+                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::Title(
+                        state
+                            .translator
+                            .text("Intelli-gen — Java Workbench")
+                            .into_owned(),
+                    ));
+                    state.enqueue(AppEvent::SettingsChanged);
+                }
+                if let Some(error) = &state.localization_error {
+                    ui.colored_label(
+                        ui.visuals().warn_fg_color,
+                        translator.format(
+                            "Could not load language resources: {error}",
+                            &[("error", error)],
+                        ),
+                    );
+                }
+                if let Ok(config_dir) = crate::settings::UserSettings::config_dir() {
+                    let language_dir = config_dir.join("languages");
+                    let path = language_dir.display().to_string();
+                    ui.small(translator.format("Translation files: {path}", &[("path", &path)]));
+                    ui.small(
+                        translator
+                            .text("Edit en.ini or it.ini and restart to reload overrides."),
+                    );
+                }
+                ui.separator();
+                ui.label(translator.text("Java indentation"));
                 if let (Some(project), Some(tab)) = (&state.project, state.active_tab.and_then(|index| state.editor_tabs.get(index))) {
                     let style = state.project_editor_config.style_for(&project.root, &tab.path);
                     if style.indent_size.flatten().is_some() || style.insert_spaces.flatten().is_some() {
                         let (size, spaces) = state.java_indent_settings(&tab.path);
-                        ui.weak(format!("Project .editorconfig: {size} {}", if spaces { "spaces" } else { "tabs" }));
+                        let unit = if spaces { translator.text("spaces") } else { translator.text("tabs") };
+                        ui.weak(translator.format("Project .editorconfig: {size} {unit}", &[("size", &size.to_string()), ("unit", unit.as_ref())]));
                     }
                 }
                 let mut indentation_changed = false;
-                indentation_changed |= ui.add(egui::Slider::new(&mut state.settings.java_indent_size, 1..=8).text("Indent size")).changed();
-                indentation_changed |= ui.checkbox(&mut state.settings.java_insert_spaces, "Insert spaces").changed();
+                indentation_changed |= ui.add(egui::Slider::new(&mut state.settings.java_indent_size, 1..=8).text(translator.text("Indent size"))).changed();
+                indentation_changed |= ui.checkbox(&mut state.settings.java_insert_spaces, translator.text("Insert spaces")).changed();
                 if indentation_changed { state.enqueue(AppEvent::SettingsChanged); }
                 ui.separator();
                 actions::jdk_settings_ui(ui, state);
             });
-            ui.menu_button("Project Structure", |ui| {
+            ui.menu_button(translator.text("Project Structure"), |ui| {
                 actions::project_jdk_ui(ui, state);
             });
-            ui.menu_button("Code", |ui| {
+            ui.menu_button(translator.text("Code"), |ui| {
                 for (label, command) in [("Complete    Ctrl+Space", crate::java::lsp::EditorCommand::Completion),
                     ("Parameter info    Ctrl+Shift+Space", crate::java::lsp::EditorCommand::SignatureHelp),
                     ("Hover    F1", crate::java::lsp::EditorCommand::Hover),
@@ -147,67 +212,67 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
                     ("Find references    Shift+F12", crate::java::lsp::EditorCommand::References),
                     ("Organize imports    Ctrl+Alt+O", crate::java::lsp::EditorCommand::OrganizeImports),
                     ("Reformat code    ⌥⌘L", crate::java::lsp::EditorCommand::Format)] {
-                    if ui.add_enabled(state.active_tab.is_some(), egui::Button::new(label)).clicked() {
+                    if ui.add_enabled(state.active_tab.is_some(), egui::Button::new(translator.text(label))).clicked() {
                         state.enqueue(AppEvent::EditorCommand(command)); ui.close();
                     }
                 }
-                if ui.button("Go to Java Symbol…    ⌘⌥O").clicked() {
+                if ui.button(translator.text("Go to Java Symbol…    ⌘⌥O")).clicked() {
                     state.enqueue(AppEvent::SymbolSearchOpen);
                     ui.close();
                 }
-                if ui.add_enabled(state.active_tab.is_some(), egui::Button::new("File Structure…    ⌘F12")).clicked() {
+                if ui.add_enabled(state.active_tab.is_some(), egui::Button::new(translator.text("File Structure…    ⌘F12"))).clicked() {
                     state.enqueue(AppEvent::FileStructureOpen);
                     ui.close();
                 }
             });
-            ui.menu_button("Run", |ui| {
+            ui.menu_button(translator.text("Run"), |ui| {
                 let can_launch = state.project.as_ref()
                     .and_then(|project| project.model.as_ref())
                     .is_some_and(|model| model.kind != ProjectKind::Unknown)
                     && state.run.selected().is_some()
                     && !state.run.loading
                     && !state.run.saving;
-                if ui.add_enabled(can_launch && !state.run.has_workers() && state.pending_run.is_none(), egui::Button::new("Run Selected Configuration")).clicked() {
+                if ui.add_enabled(can_launch && !state.run.has_workers() && state.pending_run.is_none(), egui::Button::new(translator.text("Run Selected Configuration"))).clicked() {
                     state.enqueue(AppEvent::Run(super::events::RunAction::Start));
                     ui.close();
                 }
-                if ui.add_enabled(can_launch && !state.debugger.has_workers(), egui::Button::new("Debug Selected Configuration")).clicked() {
+                if ui.add_enabled(can_launch && !state.debugger.has_workers(), egui::Button::new(translator.text("Debug Selected Configuration"))).clicked() {
                     state.enqueue(AppEvent::Debugger(super::events::DebuggerAction::Start));
                     ui.close();
                 }
-                if ui.button("Run Configurations…").clicked() {
+                if ui.button(translator.text("Run Configurations…")).clicked() {
                     state.enqueue(AppEvent::ShowPanel(ActivePanel::Run));
                     ui.close();
                 }
                 ui.separator();
-                if ui.add_enabled(state.run.has_workers() || state.pending_run.is_some(), egui::Button::new("Stop Run")).clicked() {
+                if ui.add_enabled(state.run.has_workers() || state.pending_run.is_some(), egui::Button::new(translator.text("Stop Run"))).clicked() {
                     state.enqueue(AppEvent::Run(super::events::RunAction::Stop));
                     ui.close();
                 }
-                if ui.add_enabled(state.debugger.has_workers(), egui::Button::new("Stop Debug Session")).clicked() {
+                if ui.add_enabled(state.debugger.has_workers(), egui::Button::new(translator.text("Stop Debug Session"))).clicked() {
                     state.enqueue(AppEvent::Debugger(super::events::DebuggerAction::Stop));
                     ui.close();
                 }
             });
-            ui.menu_button("View", |ui| {
+            ui.menu_button(translator.text("View"), |ui| {
                 let changed = ui
-                    .checkbox(&mut state.settings.show_project_panel, "Project sidebar")
+                    .checkbox(&mut state.settings.show_project_panel, translator.text("Project sidebar"))
                     .changed()
-                    | ui.checkbox(&mut state.settings.show_tool_window, "Tool window")
+                    | ui.checkbox(&mut state.settings.show_tool_window, translator.text("Tool window"))
                         .changed();
                 if changed {
                     state.enqueue(AppEvent::SettingsChanged);
                 }
                 if state.maven_view_root.is_some()
-                    && ui.button(if state.maven_collapsed { "Show Maven sidebar" } else { "Hide Maven sidebar" }).clicked() {
+                    && ui.button(translator.text(if state.maven_collapsed { "Show Maven sidebar" } else { "Hide Maven sidebar" })).clicked() {
                     state.enqueue(AppEvent::Maven(MavenAction::ToggleCollapsed));
                 }
                 if state.gradle_task_root.is_some()
-                    && ui.button(if state.gradle_collapsed { "Show Gradle sidebar" } else { "Hide Gradle sidebar" }).clicked() {
+                    && ui.button(translator.text(if state.gradle_collapsed { "Show Gradle sidebar" } else { "Hide Gradle sidebar" })).clicked() {
                     state.enqueue(AppEvent::Gradle(super::events::GradleAction::ToggleCollapsed));
                 }
                 if ui
-                    .checkbox(&mut state.settings.dark_mode, "Dark appearance")
+                    .checkbox(&mut state.settings.dark_mode, translator.text("Dark appearance"))
                     .changed()
                 {
                     ui.ctx().set_theme(if state.settings.dark_mode {
@@ -219,33 +284,33 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
                 }
             });
             ui.separator();
-            ui.strong("Intelli-gen");
-            ui.label("Java Workbench");
+            ui.strong(translator.text("Intelli-gen"));
+            ui.label(translator.text("Java Workbench"));
         });
         ui.separator();
         ui.horizontal(|ui| {
-            if ui.button("Open Project").clicked() {
+            if ui.button(crate::i18n::ui_text(ui, "Open Project")).clicked() {
                 actions::open_project_dialog(state);
             }
-            if ui.button("Open File").clicked() {
+            if ui.button(crate::i18n::ui_text(ui, "Open File")).clicked() {
                 actions::open_file_dialog(state);
             }
             ui.separator();
             let build_available = state.project.as_ref()
                 .and_then(|project| project.model.as_ref())
                 .is_some_and(|model| model.kind != ProjectKind::Unknown);
-            if ui.add_enabled(build_available && !state.build.running(), egui::Button::new("Build"))
-                .on_disabled_hover_text("Open a Maven or Gradle project to build")
+            if ui.add_enabled(build_available && !state.build.running(), egui::Button::new(crate::i18n::ui_text(ui, "Build")))
+                .on_disabled_hover_text(crate::i18n::ui_text(ui, "Open a Maven or Gradle project to build"))
                 .clicked() {
                 state.enqueue(AppEvent::Build(super::events::BuildAction::Build));
             }
             crate::java::run_config::configuration_selector(ui, &mut state.run);
-            if ui.add_enabled(build_available && state.run.selected().is_some() && !state.run.has_workers() && state.pending_run.is_none(), egui::Button::new("Run"))
-                .on_disabled_hover_text("Open a Maven or Gradle project and select a run configuration")
+            if ui.add_enabled(build_available && state.run.selected().is_some() && !state.run.has_workers() && state.pending_run.is_none(), egui::Button::new(crate::i18n::ui_text(ui, "Run")))
+                .on_disabled_hover_text(crate::i18n::ui_text(ui, "Open a Maven or Gradle project and select a run configuration"))
                 .clicked() {
                 state.enqueue(AppEvent::Run(super::events::RunAction::Start));
             }
-            if ui.button("Configurations…").clicked() { state.enqueue(AppEvent::ShowPanel(ActivePanel::Run)); }
+            if ui.button(crate::i18n::ui_text(ui, "Configurations…")).clicked() { state.enqueue(AppEvent::ShowPanel(ActivePanel::Run)); }
             let debug_enabled = build_available && state.run.selected().is_some() && !state.debugger.has_workers()
                 && state.language.tooling.debug_bundle.is_some() && !state.pending_language_restart;
             let debug_hint = if !build_available {
@@ -253,7 +318,7 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
             } else {
                 "Install the bundled Java Debug Server or choose a valid plugin JAR override in Settings, and select a run configuration"
             };
-            if ui.add_enabled(debug_enabled, egui::Button::new("Debug"))
+            if ui.add_enabled(debug_enabled, egui::Button::new(crate::i18n::ui_text(ui, "Debug")))
                 .on_disabled_hover_text(debug_hint).clicked() {
                 state.enqueue(AppEvent::Debugger(super::events::DebuggerAction::Start));
             }
@@ -271,15 +336,32 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
             .and_then(|index| state.editor_tabs.get(index))
         {
             ui.horizontal(|ui| {
-                ui.label(format!(
-                    "Ln {}, Col {}",
-                    tab.document.cursor_line, tab.document.cursor_column
+                ui.label(crate::i18n::ui_format(
+                    ui,
+                    "Ln {line}, Col {column}",
+                    &[
+                        ("line", &tab.document.cursor_line.to_string()),
+                        ("column", &tab.document.cursor_column.to_string()),
+                    ],
                 ));
                 ui.separator();
                 ui.label(tab.path.display().to_string());
                 if let Some(destination) = &tab.pending_rename_to {
                     ui.separator();
-                    ui.colored_label(ui.visuals().warn_fg_color, format!("Rename on save → {}", destination.file_name().unwrap_or_default().to_string_lossy()));
+                    ui.colored_label(
+                        ui.visuals().warn_fg_color,
+                        crate::i18n::ui_format(
+                            ui,
+                            "Rename on save → {name}",
+                            &[(
+                                "name",
+                                &destination
+                                    .file_name()
+                                    .unwrap_or_default()
+                                    .to_string_lossy(),
+                            )],
+                        ),
+                    );
                 }
             });
         }
@@ -288,17 +370,23 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
         }
         if state.settings_save_pending {
             ui.spinner();
-            ui.label("Saving preferences…");
+            ui.label(crate::i18n::ui_text(ui, "Saving preferences…"));
         }
-        ui.label(&state.status);
+        ui.label(crate::i18n::message(ui.ctx(), &state.status));
         for error in [&state.settings_load_error, &state.settings_save_error]
             .into_iter()
             .flatten()
         {
-            ui.colored_label(ui.visuals().error_fg_color, error);
+            ui.colored_label(
+                ui.visuals().error_fg_color,
+                crate::i18n::message(ui.ctx(), error),
+            );
         }
         if let Some(error) = &state.last_error {
-            ui.colored_label(ui.visuals().error_fg_color, error);
+            ui.colored_label(
+                ui.visuals().error_fg_color,
+                crate::i18n::message(ui.ctx(), error),
+            );
         }
     });
 
@@ -309,14 +397,16 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
                 if ui
                     .selectable_label(
                         state.settings.show_tool_window && state.active_panel == panel,
-                        panel.title(),
+                        crate::i18n::ui_text(ui, panel.title()),
                     )
                     .clicked()
                 {
                     state.enqueue(AppEvent::ShowPanel(panel));
                 }
             }
-            if state.settings.show_tool_window && ui.small_button("Hide").clicked() {
+            if state.settings.show_tool_window
+                && ui.small_button(crate::i18n::ui_text(ui, "Hide")).clicked()
+            {
                 state.settings.show_tool_window = false;
                 state.enqueue(AppEvent::SettingsChanged);
             }
@@ -329,7 +419,7 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
             .default_size(250.0)
             .size_range(160.0..=480.0)
             .show(ui, |ui| {
-                ui.heading("Project");
+                ui.heading(crate::i18n::ui_text(ui, "Project"));
                 ui.separator();
                 egui::ScrollArea::both()
                     .auto_shrink([false, false])
@@ -340,15 +430,21 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
                                 .strong(&project.display_name)
                                 .on_hover_text(root.display().to_string());
                             response.context_menu(|ui| {
-                                if ui.button("New Java Class…").clicked() {
+                                if ui
+                                    .button(crate::i18n::ui_text(ui, "New Java Class…"))
+                                    .clicked()
+                                {
                                     state.enqueue(AppEvent::NewJavaClass(root.clone()));
                                     ui.close();
                                 }
-                                if ui.button("Refresh").clicked() {
+                                if ui.button(crate::i18n::ui_text(ui, "Refresh")).clicked() {
                                     state.enqueue(AppEvent::RefreshProjectTree(root.clone()));
                                     ui.close();
                                 }
-                                if ui.button("Reveal in Finder").clicked() {
+                                if ui
+                                    .button(crate::i18n::ui_text(ui, "Reveal in Finder"))
+                                    .clicked()
+                                {
                                     state.enqueue(AppEvent::RevealInFinder(root.clone()));
                                     ui.close();
                                 }
@@ -356,7 +452,7 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
                             if ui
                                 .add_enabled(
                                     !state.project_tree_loading,
-                                    egui::Button::new("Refresh"),
+                                    egui::Button::new(crate::i18n::ui_text(ui, "Refresh")),
                                 )
                                 .clicked()
                             {
@@ -366,14 +462,19 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
                                 ui.spinner();
                             }
                             if let Some(error) = &state.project_tree_error {
-                                ui.colored_label(ui.visuals().error_fg_color, error);
+                                ui.colored_label(
+                                    ui.visuals().error_fg_color,
+                                    crate::i18n::message(ui.ctx(), error),
+                                );
                             }
                             if let Some(tree) = &mut state.project_tree {
                                 let actions = tree.render(ui);
                                 for action in actions {
                                     state.enqueue(match action {
                                         TreeAction::OpenFile(path) => AppEvent::OpenFile(path),
-                                        TreeAction::NewJavaClass(path) => AppEvent::NewJavaClass(path),
+                                        TreeAction::NewJavaClass(path) => {
+                                            AppEvent::NewJavaClass(path)
+                                        }
                                         TreeAction::Refresh(path) => {
                                             AppEvent::RefreshProjectTree(path)
                                         }
@@ -388,8 +489,11 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
                                 }
                             }
                         } else {
-                            ui.label("No project open");
-                            if ui.button("Choose project directory…").clicked() {
+                            ui.label(crate::i18n::ui_text(ui, "No project open"));
+                            if ui
+                                .button(crate::i18n::ui_text(ui, "Choose project directory…"))
+                                .clicked()
+                            {
                                 actions::open_project_dialog(state);
                             }
                         }
@@ -411,12 +515,13 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
                 .show(ui, |ui| {
                     if ui
                         .small_button("◀")
-                        .on_hover_text("Show Maven sidebar")
+                        .on_hover_text(crate::i18n::ui_text(ui, "Show Maven sidebar"))
                         .clicked()
                     {
                         state.enqueue(AppEvent::Maven(MavenAction::ToggleCollapsed));
                     }
-                    ui.label("M").on_hover_text("Maven");
+                    ui.label(crate::i18n::ui_text(ui, "M"))
+                        .on_hover_text(crate::i18n::ui_text(ui, "Maven"));
                 });
         } else {
             egui::Panel::right("maven_sidebar")
@@ -434,10 +539,17 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
                 .default_size(32.0)
                 .size_range(32.0..=32.0)
                 .show(ui, |ui| {
-                    if ui.small_button("◀").on_hover_text("Show Gradle sidebar").clicked() {
-                        state.enqueue(AppEvent::Gradle(super::events::GradleAction::ToggleCollapsed));
+                    if ui
+                        .small_button("◀")
+                        .on_hover_text(crate::i18n::ui_text(ui, "Show Gradle sidebar"))
+                        .clicked()
+                    {
+                        state.enqueue(AppEvent::Gradle(
+                            super::events::GradleAction::ToggleCollapsed,
+                        ));
                     }
-                    ui.label("G").on_hover_text("Gradle");
+                    ui.label(crate::i18n::ui_text(ui, "G"))
+                        .on_hover_text(crate::i18n::ui_text(ui, "Gradle"));
                 });
         } else {
             egui::Panel::right("gradle_sidebar")
@@ -454,7 +566,7 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
             .default_size(200.0)
             .size_range(90.0..=450.0)
             .show(ui, |ui| {
-                ui.strong(state.active_panel.title());
+                ui.strong(crate::i18n::ui_text(ui, state.active_panel.title()));
                 ui.separator();
                 match state.active_panel {
                     ActivePanel::Search => crate::search::render(ui, state),
@@ -473,27 +585,39 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
             ui.vertical_centered(|ui| {
                 ui.add_space(36.0);
                 if state.project.is_some() {
-                    ui.heading("No file open");
-                    ui.label("Choose a source file from the project tree or open another project.");
+                    ui.heading(crate::i18n::ui_text(ui, "No file open"));
+                    ui.label(crate::i18n::ui_text(
+                        ui,
+                        "Choose a source file from the project tree or open another project.",
+                    ));
                 } else {
-                    ui.heading("Java Workbench");
-                    ui.label("Create a Java project or open an existing Maven or Gradle workspace.");
+                    ui.heading(crate::i18n::ui_text(ui, "Java Workbench"));
+                    ui.label(crate::i18n::ui_text(
+                        ui,
+                        "Create a Java project or open an existing Maven or Gradle workspace.",
+                    ));
                 }
                 ui.add_space(12.0);
                 ui.horizontal(|ui| {
-                    if ui.button("New Java Project…").clicked() {
+                    if ui
+                        .button(crate::i18n::ui_text(ui, "New Java Project…"))
+                        .clicked()
+                    {
                         state.enqueue(AppEvent::NewJavaProjectOpen);
                     }
-                    if ui.button("Open Project…").clicked() {
+                    if ui
+                        .button(crate::i18n::ui_text(ui, "Open Project…"))
+                        .clicked()
+                    {
                         actions::open_project_dialog(state);
                     }
-                    if ui.button("Open File…").clicked() {
+                    if ui.button(crate::i18n::ui_text(ui, "Open File…")).clicked() {
                         actions::open_file_dialog(state);
                     }
                 });
                 if !state.settings.recent_projects.is_empty() {
                     ui.add_space(28.0);
-                    ui.strong("Recent Projects");
+                    ui.strong(crate::i18n::ui_text(ui, "Recent Projects"));
                     for path in state.settings.recent_projects.clone().into_iter().take(8) {
                         let name = path
                             .file_name()
@@ -534,7 +658,10 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
         ));
     }
     if let Some(line) = state.go_to_line.render(ui.ctx()) {
-        if let Some(tab) = state.active_tab.and_then(|index| state.editor_tabs.get(index)) {
+        if let Some(tab) = state
+            .active_tab
+            .and_then(|index| state.editor_tabs.get(index))
+        {
             state.enqueue(AppEvent::OpenFileAtLine(tab.path.clone(), line));
         }
     }
@@ -545,13 +672,23 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
         let mut create = false;
         let mut cancel = false;
         egui::Modal::new(egui::Id::unique("new_java_class_modal")).show(ui.ctx(), |ui| {
-            ui.heading("New Java Class");
+            ui.heading(crate::i18n::ui_text(ui, "New Java Class"));
             ui.label(dialog.directory.display().to_string());
-            ui.add(egui::TextEdit::singleline(&mut dialog.name).hint_text("Class name, e.g. CustomerService"));
-            ui.add(egui::TextEdit::singleline(&mut dialog.package).hint_text("Package (optional; creates matching folders, e.g. com.example.service)"));
+            ui.add(
+                egui::TextEdit::singleline(&mut dialog.name)
+                    .hint_text(crate::i18n::ui_text(ui, "Class name, e.g. CustomerService")),
+            );
+            ui.add(egui::TextEdit::singleline(&mut dialog.package).hint_text(
+                "Package (optional; creates matching folders, e.g. com.example.service)",
+            ));
             ui.horizontal(|ui| {
-                create = ui.add_enabled(!dialog.name.trim().is_empty(), egui::Button::new("Create")).clicked();
-                cancel = ui.button("Cancel").clicked();
+                create = ui
+                    .add_enabled(
+                        !dialog.name.trim().is_empty(),
+                        egui::Button::new(crate::i18n::ui_text(ui, "Create")),
+                    )
+                    .clicked();
+                cancel = ui.button(crate::i18n::ui_text(ui, "Cancel")).clicked();
             });
         });
         if create {
@@ -571,14 +708,14 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
         let mut cancel = false;
         let mut choose_parent = false;
         egui::Modal::new(egui::Id::unique("new_java_project_modal")).show(ui.ctx(), |ui| {
-            ui.heading("New Java Project");
+            ui.heading(crate::i18n::ui_text(ui, "New Java Project"));
             ui.horizontal(|ui| {
-                ui.label("Location");
+                ui.label(crate::i18n::ui_text(ui, "Location"));
                 ui.label(dialog.parent.display().to_string());
-                choose_parent = ui.button("Choose…").clicked();
+                choose_parent = ui.button(crate::i18n::ui_text(ui, "Choose…")).clicked();
             });
-            ui.add(egui::TextEdit::singleline(&mut dialog.name).hint_text("Project name"));
-            ui.add(egui::TextEdit::singleline(&mut dialog.package).hint_text("Java package (optional, e.g. com.example)"));
+            ui.add(egui::TextEdit::singleline(&mut dialog.name).hint_text(crate::i18n::ui_text(ui, "Project name")));
+            ui.add(egui::TextEdit::singleline(&mut dialog.package).hint_text(crate::i18n::ui_text(ui, "Java package (optional, e.g. com.example)")));
             egui::ComboBox::from_id_salt("new_java_project_kind")
                 .selected_text(dialog.kind.to_string())
                 .show_ui(ui, |ui| {
@@ -586,14 +723,14 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
                     ui.selectable_value(&mut dialog.kind, ProjectKind::Gradle, "Gradle");
                 });
             ui.horizontal(|ui| {
-                create = ui.add_enabled(!dialog.name.trim().is_empty(), egui::Button::new("Create")).clicked();
-                cancel = ui.button("Cancel").clicked();
+                create = ui.add_enabled(!dialog.name.trim().is_empty(), egui::Button::new(crate::i18n::ui_text(ui, "Create"))).clicked();
+                cancel = ui.button(crate::i18n::ui_text(ui, "Cancel")).clicked();
             });
-            ui.small("Creates a Java 8 starter project locally. No tools or dependencies are downloaded.");
+            ui.small(crate::i18n::ui_text(ui, "Creates a Java 8 starter project locally. No tools or dependencies are downloaded."));
         });
         if choose_parent {
             if let Some(parent) = rfd::FileDialog::new()
-                .set_title("Choose project parent folder")
+                .set_title(crate::i18n::text(ui.ctx(), "Choose project parent folder"))
                 .set_directory(&dialog.parent)
                 .pick_folder()
             {
@@ -617,15 +754,33 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
         let mut confirm = false;
         let mut cancel = false;
         egui::Modal::new(egui::Id::unique("rename_symbol_modal")).show(ui.ctx(), |ui| {
-            ui.heading("Rename Java Symbol");
-            ui.label(format!("{} in {}", dialog.old_name, dialog.path.display()));
+            ui.heading(crate::i18n::ui_text(ui, "Rename Java Symbol"));
+            ui.label(crate::i18n::ui_format(
+                ui,
+                "{name} in {path}",
+                &[
+                    ("name", &dialog.old_name),
+                    ("path", &dialog.path.display().to_string()),
+                ],
+            ));
             let input_id = egui::Id::new("rename_symbol_name");
             let was_focused = ui.ctx().memory(|memory| memory.has_focus(input_id));
-            let input = ui.add(egui::TextEdit::singleline(&mut dialog.new_name).id(input_id).hint_text("New name"));
-            if !was_focused { input.request_focus(); }
-            confirm = ui.add_enabled(!dialog.new_name.trim().is_empty(), egui::Button::new("Rename")).clicked()
+            let input = ui.add(
+                egui::TextEdit::singleline(&mut dialog.new_name)
+                    .id(input_id)
+                    .hint_text(crate::i18n::ui_text(ui, "New name")),
+            );
+            if !was_focused {
+                input.request_focus();
+            }
+            confirm = ui
+                .add_enabled(
+                    !dialog.new_name.trim().is_empty(),
+                    egui::Button::new(crate::i18n::ui_text(ui, "Rename")),
+                )
+                .clicked()
                 || input.has_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
-            cancel = ui.button("Cancel").clicked();
+            cancel = ui.button(crate::i18n::ui_text(ui, "Cancel")).clicked();
         });
         if confirm {
             let new_name = dialog.new_name.trim().to_owned();
@@ -642,11 +797,18 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
         let mut confirm = false;
         let mut cancel = false;
         egui::Modal::new(egui::Id::new("run_save_confirmation_modal")).show(ui.ctx(), |ui| {
-            ui.heading("Save project files before running?");
-            ui.label(format!("{file_count} open project file(s) have unsaved changes."));
+            ui.heading(crate::i18n::ui_text(
+                ui,
+                "Save project files before running?",
+            ));
+            ui.label(format!(
+                "{file_count} open project file(s) have unsaved changes."
+            ));
             ui.horizontal(|ui| {
-                confirm = ui.button("Save and Run").clicked();
-                cancel = ui.button("Cancel").clicked();
+                confirm = ui
+                    .button(crate::i18n::ui_text(ui, "Save and Run"))
+                    .clicked();
+                cancel = ui.button(crate::i18n::ui_text(ui, "Cancel")).clicked();
             });
         });
         if confirm {
@@ -660,11 +822,11 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
 fn render_maven_sidebar(ui: &mut egui::Ui, state: &mut AppState) {
     let mut actions = Vec::new();
     ui.horizontal(|ui| {
-        ui.heading("Maven");
+        ui.heading(crate::i18n::ui_text(ui, "Maven"));
         if let Some(root) = &state.maven_view_root {
             if ui
                 .small_button("↻")
-                .on_hover_text("Reload Maven structure")
+                .on_hover_text(crate::i18n::ui_text(ui, "Reload Maven structure"))
                 .clicked()
             {
                 actions.push(AppEvent::Maven(MavenAction::Reload { root: root.clone() }));
@@ -672,7 +834,7 @@ fn render_maven_sidebar(ui: &mut egui::Ui, state: &mut AppState) {
         }
         if ui
             .small_button("▶")
-            .on_hover_text("Hide Maven sidebar")
+            .on_hover_text(crate::i18n::ui_text(ui, "Hide Maven sidebar"))
             .clicked()
         {
             actions.push(AppEvent::Maven(MavenAction::ToggleCollapsed));
@@ -685,25 +847,31 @@ fn render_maven_sidebar(ui: &mut egui::Ui, state: &mut AppState) {
             if state.maven_loading {
                 ui.horizontal(|ui| {
                     ui.spinner();
-                    ui.label("Loading effective Maven model…");
+                    ui.label(crate::i18n::ui_text(ui, "Loading effective Maven model…"));
                 });
             } else if state.maven_cache_loading {
                 ui.horizontal(|ui| {
                     ui.spinner();
-                    ui.label("Loading cached Maven model…");
+                    ui.label(crate::i18n::ui_text(ui, "Loading cached Maven model…"));
                 });
             }
             if let Some(error) = &state.maven_error {
-                ui.colored_label(ui.visuals().error_fg_color, error);
+                ui.colored_label(
+                    ui.visuals().error_fg_color,
+                    crate::i18n::message(ui.ctx(), error),
+                );
             }
             if let Some(error) = &state.maven_cache_error {
-                ui.colored_label(ui.visuals().error_fg_color, error);
+                ui.colored_label(
+                    ui.visuals().error_fg_color,
+                    crate::i18n::message(ui.ctx(), error),
+                );
             }
             let Some(root) = state.maven_view_root.as_ref() else {
                 return;
             };
             if let Some(view) = &state.maven_view {
-                egui::CollapsingHeader::new("Profiles")
+                egui::CollapsingHeader::new(crate::i18n::ui_text(ui, "Profiles"))
                     .default_open(true)
                     .show(ui, |ui| {
                         for profile in &view.profiles {
@@ -746,7 +914,10 @@ fn render_maven_sidebar(ui: &mut egui::Ui, state: &mut AppState) {
                 && !state.maven_cache_loading
                 && state.maven_error.is_none()
             {
-                ui.label("No cached Maven model. Select ↻ to load it.");
+                ui.label(crate::i18n::ui_text(
+                    ui,
+                    "No cached Maven model. Select ↻ to load it.",
+                ));
             }
         });
     for action in actions {
@@ -758,28 +929,64 @@ fn render_gradle_sidebar(ui: &mut egui::Ui, state: &mut AppState) {
     use super::events::GradleAction;
     let mut actions = Vec::new();
     ui.horizontal(|ui| {
-        ui.heading("Gradle");
+        ui.heading(crate::i18n::ui_text(ui, "Gradle"));
         if let Some(root) = &state.gradle_task_root {
             let (label, hint, action) = if state.gradle_task_loading {
-                ("Cancel", "Cancel Gradle task discovery", GradleAction::Cancel { root: root.clone() })
+                (
+                    "Cancel",
+                    "Cancel Gradle task discovery",
+                    GradleAction::Cancel { root: root.clone() },
+                )
             } else if state.gradle_task_loaded {
-                ("↻", "Reload Gradle tasks", GradleAction::Reload { root: root.clone() })
+                (
+                    "↻",
+                    "Reload Gradle tasks",
+                    GradleAction::Reload { root: root.clone() },
+                )
             } else {
-                ("Load tasks", "Run Gradle only after this explicit action", GradleAction::Reload { root: root.clone() })
+                (
+                    "Load tasks",
+                    "Run Gradle only after this explicit action",
+                    GradleAction::Reload { root: root.clone() },
+                )
             };
-            if ui.small_button(label).on_hover_text(hint).clicked() {
+            if ui
+                .small_button(crate::i18n::ui_text(ui, label))
+                .on_hover_text(crate::i18n::ui_text(ui, hint))
+                .clicked()
+            {
                 actions.push(AppEvent::Gradle(action));
             }
         }
-        if ui.small_button("▶").on_hover_text("Hide Gradle sidebar").clicked() {
+        if ui
+            .small_button("▶")
+            .on_hover_text(crate::i18n::ui_text(ui, "Hide Gradle sidebar"))
+            .clicked()
+        {
             actions.push(AppEvent::Gradle(GradleAction::ToggleCollapsed));
         }
     });
     ui.separator();
-    let Some(root) = state.gradle_task_root.clone() else { return; };
-    let Some(model) = state.project.as_ref().and_then(|project| project.model.as_ref()) else { return; };
-    let project_name = state.gradle_selected_project.as_ref()
-        .and_then(|path| model.modules.iter().find(|module| &module.root == path).map(|module| module.name.clone()))
+    let Some(root) = state.gradle_task_root.clone() else {
+        return;
+    };
+    let Some(model) = state
+        .project
+        .as_ref()
+        .and_then(|project| project.model.as_ref())
+    else {
+        return;
+    };
+    let project_name = state
+        .gradle_selected_project
+        .as_ref()
+        .and_then(|path| {
+            model
+                .modules
+                .iter()
+                .find(|module| &module.root == path)
+                .map(|module| module.name.clone())
+        })
         .unwrap_or_else(|| format!("{} (root)", model.name));
     let mut selected = state.gradle_selected_project.clone();
     egui::ComboBox::from_id_salt("gradle_project_selector")
@@ -791,48 +998,81 @@ fn render_gradle_sidebar(ui: &mut egui::Ui, state: &mut AppState) {
             }
         });
     if selected != state.gradle_selected_project {
-        actions.push(AppEvent::Gradle(GradleAction::SelectProject { root: root.clone(), project_path: selected }));
+        actions.push(AppEvent::Gradle(GradleAction::SelectProject {
+            root: root.clone(),
+            project_path: selected,
+        }));
     }
     ui.horizontal(|ui| {
-        ui.label("Filter");
+        ui.label(crate::i18n::ui_text(ui, "Filter"));
         ui.text_edit_singleline(&mut state.gradle_task_filter);
     });
-    egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-        if state.gradle_task_loading {
-            ui.horizontal(|ui| { ui.spinner(); ui.label("Loading Gradle tasks…"); });
-        }
-        if !state.gradle_task_loaded && !state.gradle_task_loading {
-            ui.weak("Load tasks to inspect this Gradle project.");
-        }
-        if let Some(error) = &state.gradle_task_error {
-            ui.colored_label(ui.visuals().error_fg_color, error);
-        }
-        let filter = state.gradle_task_filter.trim().to_lowercase();
-        let enabled = !state.gradle_task_loading && state.gradle_task_error.is_none() && !state.build.running();
-        let generation = state.gradle_task_generation;
-        let module = state.gradle_selected_project.clone();
-        let mut count = 0;
-        for task in &state.gradle_tasks {
-            if !filter.is_empty() && !task.path.to_lowercase().contains(&filter)
-                && !task.description.to_lowercase().contains(&filter)
-            {
-                continue;
+    egui::ScrollArea::vertical()
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            if state.gradle_task_loading {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label(crate::i18n::ui_text(ui, "Loading Gradle tasks…"));
+                });
             }
-            count += 1;
-            if ui.add_enabled(enabled, egui::Button::new(egui::RichText::new(&task.path).monospace()))
-                .on_hover_text(&task.description).clicked()
-            {
-                actions.push(AppEvent::Gradle(GradleAction::RunTask {
-                    root: root.clone(), generation, project_path: module.clone(), task_path: task.path.clone(),
-                }));
+            if !state.gradle_task_loaded && !state.gradle_task_loading {
+                ui.weak(crate::i18n::ui_text(
+                    ui,
+                    "Load tasks to inspect this Gradle project.",
+                ));
             }
-            if !task.description.is_empty() { ui.weak(&task.description); }
-        }
-        if count == 0 && state.gradle_task_loaded && !state.gradle_task_loading && state.gradle_task_error.is_none() {
-            ui.weak("No matching Gradle tasks");
-        }
-    });
-    for action in actions { state.enqueue(action); }
+            if let Some(error) = &state.gradle_task_error {
+                ui.colored_label(
+                    ui.visuals().error_fg_color,
+                    crate::i18n::message(ui.ctx(), error),
+                );
+            }
+            let filter = state.gradle_task_filter.trim().to_lowercase();
+            let enabled = !state.gradle_task_loading
+                && state.gradle_task_error.is_none()
+                && !state.build.running();
+            let generation = state.gradle_task_generation;
+            let module = state.gradle_selected_project.clone();
+            let mut count = 0;
+            for task in &state.gradle_tasks {
+                if !filter.is_empty()
+                    && !task.path.to_lowercase().contains(&filter)
+                    && !task.description.to_lowercase().contains(&filter)
+                {
+                    continue;
+                }
+                count += 1;
+                if ui
+                    .add_enabled(
+                        enabled,
+                        egui::Button::new(egui::RichText::new(&task.path).monospace()),
+                    )
+                    .on_hover_text(&task.description)
+                    .clicked()
+                {
+                    actions.push(AppEvent::Gradle(GradleAction::RunTask {
+                        root: root.clone(),
+                        generation,
+                        project_path: module.clone(),
+                        task_path: task.path.clone(),
+                    }));
+                }
+                if !task.description.is_empty() {
+                    ui.weak(&task.description);
+                }
+            }
+            if count == 0
+                && state.gradle_task_loaded
+                && !state.gradle_task_loading
+                && state.gradle_task_error.is_none()
+            {
+                ui.weak(crate::i18n::ui_text(ui, "No matching Gradle tasks"));
+            }
+        });
+    for action in actions {
+        state.enqueue(action);
+    }
 }
 
 fn render_maven_module(
@@ -856,7 +1096,7 @@ fn render_maven_module(
         .default_open(is_root)
         .show(ui, |ui| {
             let module_path = module.relative_path.clone();
-            egui::CollapsingHeader::new("Lifecycle")
+            egui::CollapsingHeader::new(crate::i18n::ui_text(ui, "Lifecycle"))
                 .id_salt("lifecycle")
                 .show(ui, |ui| {
                     for task in &module.lifecycle {
@@ -871,7 +1111,7 @@ fn render_maven_module(
                         );
                     }
                 });
-            egui::CollapsingHeader::new("Plugins")
+            egui::CollapsingHeader::new(crate::i18n::ui_text(ui, "Plugins"))
                 .id_salt("plugins")
                 .show(ui, |ui| {
                     for plugin in &module.plugins {
@@ -892,7 +1132,7 @@ fn render_maven_module(
                             });
                     }
                 });
-            egui::CollapsingHeader::new("Dependencies")
+            egui::CollapsingHeader::new(crate::i18n::ui_text(ui, "Dependencies"))
                 .id_salt("dependencies")
                 .show(ui, |ui| {
                     for dependency in &module.dependencies {
@@ -900,7 +1140,7 @@ fn render_maven_module(
                     }
                 });
             if is_root {
-                egui::CollapsingHeader::new("Repositories")
+                egui::CollapsingHeader::new(crate::i18n::ui_text(ui, "Repositories"))
                     .id_salt("repositories")
                     .show(ui, |ui| {
                         for repository in &module.repositories {

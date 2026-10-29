@@ -1,12 +1,15 @@
-use std::path::PathBuf;
 use std::fs;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::{self, JoinHandle, Thread};
 use std::time::{Duration, Instant, SystemTime};
 
-use super::{ProjectModel, maven_cache::{fingerprint_pom_paths, fingerprint_poms}};
+use super::{
+    ProjectModel,
+    maven_cache::{fingerprint_pom_paths, fingerprint_poms},
+};
 
 #[derive(Clone, Debug)]
 pub struct MavenPomEvent {
@@ -195,17 +198,26 @@ fn metadata_snapshot(paths: &[PathBuf]) -> Result<Vec<PomMetadata>, String> {
     let mut paths = paths.to_vec();
     paths.sort();
     paths.dedup();
-    paths.into_iter().map(|path| {
-        match fs::metadata(&path) {
+    paths
+        .into_iter()
+        .map(|path| match fs::metadata(&path) {
             Ok(metadata) => Ok(PomMetadata {
                 path,
-                modified: Some(metadata.modified().map_err(|error| format!("Cannot inspect POM timestamp: {error}"))?),
+                modified: Some(
+                    metadata
+                        .modified()
+                        .map_err(|error| format!("Cannot inspect POM timestamp: {error}"))?,
+                ),
                 length: Some(metadata.len()),
             }),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(PomMetadata { path, modified: None, length: None }),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(PomMetadata {
+                path,
+                modified: None,
+                length: None,
+            }),
             Err(error) => Err(format!("Cannot inspect Maven POM metadata: {error}")),
-        }
-    }).collect()
+        })
+        .collect()
 }
 
 pub fn project_pom_paths(model: &ProjectModel) -> Vec<PathBuf> {
