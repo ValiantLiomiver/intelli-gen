@@ -174,10 +174,21 @@ impl Translator {
         if self.catalog.contains_key(source) || self.english.contains_key(source) {
             return self.text(source).into_owned();
         }
-        for (template, _) in self.catalog.iter().filter(|(key, _)| key.contains('{')) {
-            let Some(parameters) = match_template(template, source) else {
-                continue;
-            };
+        let matched = self
+            .catalog
+            .keys()
+            .filter(|key| key.contains('{'))
+            .filter_map(|template| {
+                let parameters = match_template(template, source)?;
+                let literal_bytes = template.len()
+                    - parameters
+                        .iter()
+                        .map(|(name, _)| name.len() + 2)
+                        .sum::<usize>();
+                Some((literal_bytes, template, parameters))
+            })
+            .max_by(|left, right| (left.0, left.1).cmp(&(right.0, right.1)));
+        if let Some((_, template, parameters)) = matched {
             let references: Vec<_> = parameters
                 .iter()
                 .map(|(name, value)| (name.as_str(), value.as_str()))
@@ -229,6 +240,7 @@ fn match_template(template: &str, source: &str) -> Option<Vec<(String, String)>>
             source_offset += next_static.len();
             return (source_offset == source.len()).then_some(parameters);
         }
+        source_offset += next_static.len();
     }
 }
 
@@ -297,6 +309,36 @@ fn unescape(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dynamic_messages_prefer_specific_templates_over_generic_matches() {
+        let catalog = HashMap::from([
+            (
+                "{name} in {path}".to_owned(),
+                "Generico: {name} in {path}".to_owned(),
+            ),
+            (
+                "Opened {name} in {path}".to_owned(),
+                "Aperto {name} in {path}".to_owned(),
+            ),
+        ]);
+        let translator = Translator {
+            catalog: Arc::new(catalog),
+            english: Arc::new(HashMap::new()),
+        };
+        assert_eq!(
+            translator.message("Opened Main.java in /tmp/project"),
+            "Aperto Main.java in /tmp/project"
+        );
+        assert_eq!(
+            translator.message("Main.java in /tmp/project"),
+            "Generico: Main.java in /tmp/project"
+        );
+        assert_eq!(translator.message("Unrelated status"), "Unrelated status");
+        let (italian, error) = Translator::load(LanguagePreference::Italian, None);
+        assert!(error.is_none());
+        assert_eq!(italian.message("Ln 12, Col 8"), "Riga 12, colonna 8");
+    }
 
     #[test]
     fn builtin_catalogs_parse_and_preserve_translation_parameters() {
