@@ -561,13 +561,24 @@ mod main_project_tests {
             debug_bundle: Some(bundle),
             debug_bundle_error: None,
         };
-        let project = ProjectModel {
-            root: root.clone(),
-            name: "directory-fallback".into(),
-            kind: crate::project::ProjectKind::Unknown,
-            modules: Vec::new(),
-            wrapper: None,
+        let maven = root.join("pom.xml").is_file();
+        let mut project = if maven {
+            ProjectModel::discover(&root).unwrap()
+        } else {
+            ProjectModel {
+                root: root.clone(),
+                name: "directory-fallback".into(),
+                kind: crate::project::ProjectKind::Unknown,
+                modules: Vec::new(),
+                wrapper: None,
+            }
         };
+        project.name = "directory-fallback".into();
+        let source = project.root.join(if maven {
+            "src/main/java/Main.java"
+        } else {
+            "Main.java"
+        });
         let mut session = JavaLanguageService::start(&project, &config).unwrap();
         tokio::time::timeout(Duration::from_secs(90), async {
             loop {
@@ -585,26 +596,52 @@ mod main_project_tests {
         })
         .await
         .expect("language worker ready");
+        if maven {
+            session
+                .try_command(LanguageCommand::RefreshMaven {
+                    root_pom: project.root.join("pom.xml"),
+                })
+                .unwrap();
+            tokio::time::timeout(Duration::from_secs(100), async {
+                loop {
+                    let update = session.events.recv().await.expect("Maven import event");
+                    if let LanguageEvent::ServerState(message) = update.event {
+                        assert!(
+                            !message.starts_with("Maven import failed:")
+                                && !message.starts_with("Maven import request timed out"),
+                            "{message}"
+                        );
+                        if message == "Maven import request completed" {
+                            break;
+                        }
+                    }
+                }
+            })
+            .await
+            .expect("Maven import response");
+        }
         let resolver = ClasspathResolver {
             commands: session.commands.clone(),
             root,
         };
         let paths = resolver.resolve(&project, "Main", None).await.unwrap();
         assert_eq!(paths.project_name.as_deref(), Some("smoke"));
-        assert!(paths.classpaths.iter().any(|path| path.ends_with("bin")));
+        assert!(paths.classpaths.iter().any(|path| path.ends_with(if maven {
+            "target/classes"
+        } else {
+            "bin"
+        })));
         let resolver = DebugAdapterResolver {
             commands: session.commands.clone(),
             root: project.root.clone(),
             bundle: config.debug_bundle.clone(),
         };
-        let service = crate::debugger::DebugService::new(
-            resolver,
-            config.debug_bundle.clone().unwrap(),
-        )
-        .with_initial_requests(vec![(
-            "setBreakpoints".into(),
-            json!({"source":{"path":project.root.join("Main.java")},"breakpoints":[{"line":4}]}),
-        )]);
+        let service =
+            crate::debugger::DebugService::new(resolver, config.debug_bundle.clone().unwrap())
+                .with_initial_requests(vec![(
+                    "setBreakpoints".into(),
+                    json!({"source":{"path":source.clone()},"breakpoints":[{"line":4}]}),
+                )]);
         let mut run = crate::java::run_config::RunConfiguration::new(&project.root);
         run.main_class = "Main".into();
         let mut debug = service.start(&run, &project, &config.jdks[0]).unwrap();
@@ -698,7 +735,6 @@ mod main_project_tests {
         }
         assert!(output_seen, "debuggee must print its final value");
         assert!(!debug.needs_host_restart());
-        let source = project.root.join("Main.java");
         let mut points = crate::debugger::breakpoints::Breakpoints::default();
         points.set_log_message(source.clone(), 4, "smoke={value}".into());
         points.update(

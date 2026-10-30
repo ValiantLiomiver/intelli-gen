@@ -247,3 +247,19 @@ jar 3.3.0, Surefire 2.22.1, and clean 3.2.0. The module uses local system-scoped
 `junit:junit:4.13` and `org.hamcrest:hamcrest-core:1.3` JARs. These coordinates are
 needed for Surefire to select JUnit 4. All plugin dependencies and the JUnit 4
 provider must already exist in the local Maven cache; the test downloads nothing.
+
+The live language/debug worker test also passed with a minimal Maven project
+containing only a POM and conventional Java sources, without an Eclipse
+`.project` or `.classpath`. In this case it discovers the Maven model, issues the
+production `RefreshMaven` command, waits for `Maven import request completed`,
+resolves `target/classes` and the server project name, and runs the same two debug
+sessions (breakpoint/evaluation/stepping plus conditional logpoint/cancellation).
+
+To reproduce this variant, use the same environment and ignored test command,
+but provide a POM with group/artifact `smoke:smoke`, version `1`, and Java
+source/target/release `25`, without dependencies. Put the seven-line `Main.java`
+fixture in `src/main/java/` and compile it with debug information into
+`target/classes` before the test. The fixture intentionally uses a different
+physical directory name from its Maven artifact name. This verifies the import
+and debug workers together; native project opening and widget routing remain
+outside this test.
