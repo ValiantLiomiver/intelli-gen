@@ -190,3 +190,9 @@ model: a conditional logpoint at line 4 emits `smoke=40`, and an ordinary
 breakpoint stops at line 5. The assertion checks that the logpoint did not
 suspend execution. Cancelling this stopped session joins its worker and leaves
 the host reusable without a restart request.
+
+The standard test `italian_gutter_menu_emits_enable_and_disable_intents` drives
+real egui frames with pointer events. It opens the editor gutter popup, locates
+the rendered Italian action label, clicks it, and checks the resulting enable or
+disable intent for breakpoints and logpoints. This verifies the widget flow
+without an OS window; it does not verify native window rendering.

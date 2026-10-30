@@ -630,3 +630,113 @@ mod workspace_replace_tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 }
+#[cfg(test)]
+mod gutter_ui_tests {
+    use super::*;
+    use eframe::egui;
+
+    fn frame(
+        ctx: &egui::Context,
+        events: Vec<egui::Event>,
+        disabled: bool,
+        logpoint: bool,
+    ) -> (egui::FullOutput, Option<GutterBreakpointAction>, egui::Pos2) {
+        let mut action = None;
+        let mut target = egui::Pos2::ZERO;
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(800.0, 600.0),
+                )),
+                events,
+                ..Default::default()
+            },
+            |root| {
+                egui::CentralPanel::default().show(root, |ui| {
+                    ui.horizontal_top(|ui| {
+                        ui.allocate_exact_size(egui::vec2(58.0, 0.0), egui::Sense::hover());
+                        let mut text = "class Main {}".to_owned();
+                        let editor = egui::TextEdit::multiline(&mut text).code_editor().show(ui);
+                        target = egui::pos2(
+                            editor.response.rect.min.x - 50.0,
+                            editor.galley_pos.y + editor.galley.rows[0].rect().center().y,
+                        );
+                        action = editor_gutter(
+                            ui,
+                            &editor,
+                            std::path::Path::new("Main.java"),
+                            1,
+                            Some(if disabled { &[] } else { &[1] }),
+                            Some(if logpoint && !disabled { &[1] } else { &[] }),
+                            Some(if disabled { &[1] } else { &[] }),
+                            None,
+                            None,
+                            &[],
+                        );
+                    });
+                });
+            },
+        );
+        output.textures_delta.clear();
+        (output, action, target)
+    }
+
+    fn click(pos: egui::Pos2) -> Vec<egui::Event> {
+        vec![
+            egui::Event::PointerMoved(pos),
+            egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            },
+            egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            },
+        ]
+    }
+
+    fn text_position(shape: &egui::epaint::Shape, label: &str) -> Option<egui::Pos2> {
+        match shape {
+            egui::epaint::Shape::Text(text) if text.galley.text() == label => {
+                Some(text.pos + text.galley.size() / 2.0)
+            }
+            egui::epaint::Shape::Vec(shapes) => {
+                shapes.iter().find_map(|shape| text_position(shape, label))
+            }
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn italian_gutter_menu_emits_enable_and_disable_intents() {
+        for (disabled, logpoint, label, enabled) in [
+            (false, false, "Disabilita breakpoint", false),
+            (false, true, "Disabilita breakpoint", false),
+            (true, false, "Abilita breakpoint", true),
+        ] {
+            let ctx = egui::Context::default();
+            ctx.global_style_mut(|style| style.animation_time = 0.0);
+            let (translator, _) =
+                crate::i18n::Translator::load(crate::i18n::LanguagePreference::Italian, None);
+            crate::i18n::install(&ctx, &translator);
+            let (_, _, gutter) = frame(&ctx, vec![], disabled, logpoint);
+            frame(&ctx, click(gutter), disabled, logpoint);
+            let (output, _, _) = frame(&ctx, vec![], disabled, logpoint);
+            let button = output
+                .shapes
+                .iter()
+                .find_map(|shape| text_position(&shape.shape, label))
+                .expect("localized gutter menu action");
+            let (_, action, _) = frame(&ctx, click(button), disabled, logpoint);
+            assert!(
+                matches!(action, Some(GutterBreakpointAction::SetEnabled { line: 1, enabled: value }) if value == enabled),
+                "{action:?}"
+            );
+        }
+    }
+}
