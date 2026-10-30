@@ -460,6 +460,68 @@ fn valid_gradle_task_path(path: &str) -> bool {
 mod gradle_argument_tests {
     use super::*;
 
+    #[tokio::test]
+    #[ignore = "requires INTELLI_GEN_GRADLE, INTELLI_GEN_BUILD_JAVA_HOME and INTELLI_GEN_GRADLE_PROJECT disposable fixture"]
+    async fn live_gradle_worker_builds_and_cleans_remapped_module() {
+        let root = PathBuf::from(std::env::var_os("INTELLI_GEN_GRADLE_PROJECT").unwrap());
+        let executable = PathBuf::from(std::env::var_os("INTELLI_GEN_GRADLE").unwrap());
+        let home = PathBuf::from(std::env::var_os("INTELLI_GEN_BUILD_JAVA_HOME").unwrap());
+        let project = ProjectModel::discover(&root).unwrap();
+        assert_eq!(project.kind, ProjectKind::Gradle);
+        assert!(
+            project
+                .modules
+                .iter()
+                .any(|module| module.name == ":app" && module.root.ends_with("custom/app"))
+        );
+        let jdk = crate::java::jdk::JdkCatalog::add(&home).unwrap();
+        let class = project
+            .root
+            .join("custom/app/build/classes/java/main/Main.class");
+        for task in [BuildTask::Build, BuildTask::Clean] {
+            let mut handle = BuildService::start_with_executable(
+                BuildRequest {
+                    project: project.clone(),
+                    jdk: jdk.clone(),
+                    task,
+                    gradle_offline: true,
+                    module: None,
+                    test_task: None,
+                    test_filter: None,
+                },
+                Some(&executable),
+            )
+            .unwrap();
+            let mut output = String::new();
+            tokio::time::timeout(Duration::from_secs(120), async {
+                loop {
+                    match handle.events.recv().await.expect("build worker completion") {
+                        BuildEvent::Output { text, .. } => output.push_str(&text),
+                        BuildEvent::Finished {
+                            exit_code,
+                            cancelled,
+                            error,
+                            jdk: selected,
+                            ..
+                        } => {
+                            assert_eq!(exit_code, Some(0), "{error:?}\n{output}");
+                            assert!(!cancelled);
+                            assert!(error.is_none(), "{error:?}");
+                            assert!(selected.contains(&jdk.home.display().to_string()));
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+            })
+            .await
+            .expect("build worker completed before timeout");
+            handle.worker.take().unwrap().join().unwrap();
+            assert!(output.contains("BUILD SUCCESSFUL"), "{output}");
+            assert_eq!(class.is_file(), task == BuildTask::Build);
+        }
+    }
+
     #[test]
     fn refresh_dependencies_keeps_module_and_rejects_offline_execution() {
         let args = gradle_task_arguments(":app:dependencies", false, true).unwrap();
