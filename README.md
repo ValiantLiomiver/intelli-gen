@@ -126,3 +126,30 @@ These observations verify the installed tools through direct protocol requests.
 They do not verify Intelli-gen's Rust worker integration, Maven/Gradle project
 import, or native UI interactions. The tests did not download tooling or change
 the IDE's configured JDK.
+
+The optional Rust test `live_java_debug_transport` also passed against that live
+adapter. It exercises the production `DapConnection` / `DapClient` transport,
+including concurrent launch/configuration requests, breakpoint verification,
+stack/scopes/locals, expression evaluation, step over, continue, termination,
+and disconnect. The app's session reducer and native widgets remain unverified.
+
+To run this test, start JDT LS with the debug plugin and import an Eclipse Java
+project named `smoke`. Compile the following `Main.java` into its `bin/` directory
+with `javac -g -d bin Main.java`; preserve these source line numbers:
+
+```java
+public class Main {
+  public static void main(String[] args) {
+    int value = 40;
+    value += 2;
+    System.out.println(value);
+  }
+}
+```
+
+Execute `vscode.java.startDebugSession` through LSP, then set
+`INTELLI_GEN_DAP_PORT` to the returned loopback port,
+`INTELLI_GEN_DAP_PROJECT` to the absolute project directory, and
+`INTELLI_GEN_DAP_JAVA` to the absolute Java executable. With JDT LS still running,
+execute `cargo test live_java_debug_transport -- --ignored`. Local socket
+permissions are required. The test launches and terminates this fixture program.
