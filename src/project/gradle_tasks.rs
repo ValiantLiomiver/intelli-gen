@@ -60,6 +60,7 @@ impl GradleTaskLoader {
         executable: Option<PathBuf>,
         jdk: JdkInstallation,
         generation: u64,
+        offline: bool,
     ) -> Result<(), String> {
         if project.kind != ProjectKind::Gradle {
             return Err("The Gradle task browser requires a Gradle project".into());
@@ -117,6 +118,7 @@ impl GradleTaskLoader {
                     program,
                     module_name.as_deref(),
                     project_path.as_deref(),
+                    offline,
                     environment,
                     worker_cancel,
                 );
@@ -216,6 +218,7 @@ fn load_tasks(
     program: PathBuf,
     module_name: Option<&str>,
     project_path: Option<&Path>,
+    offline: bool,
     environment: Vec<(OsString, OsString)>,
     cancellation: Arc<AtomicBool>,
 ) -> Result<Vec<GradleTask>, String> {
@@ -255,6 +258,9 @@ fn load_tasks(
         command.arg("tasks");
     }
     command.arg("--all");
+    if offline {
+        command.arg("--offline");
+    }
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -390,7 +396,7 @@ mod tests {
         let program = scratch.0.join("gradle");
         fs::write(
             &program,
-            "#!/bin/sh\n[ \"$3\" = ':app:tasks' ] || exit 1\nprintf \"Tasks runnable from project ':app'\\n\\nbuild - Builds the project\\n\"\n",
+            "#!/bin/sh\n[ \"$3\" = ':app:tasks' ] || exit 1\n[ \"$5\" = '--offline' ] || exit 1\nprintf \"Tasks runnable from project ':app'\\n\\nbuild - Builds the project\\n\"\n",
         ).unwrap();
         fs::set_permissions(&program, fs::Permissions::from_mode(0o700)).unwrap();
         let tasks = load_tasks(
@@ -398,6 +404,7 @@ mod tests {
             program.clone(),
             Some(":app"),
             Some(&module),
+            true,
             Vec::new(),
             Arc::new(AtomicBool::new(false)),
         )
@@ -410,6 +417,7 @@ mod tests {
             program,
             Some(":app"),
             Some(&outside.0),
+            false,
             Vec::new(),
             Arc::new(AtomicBool::new(false)),
         )

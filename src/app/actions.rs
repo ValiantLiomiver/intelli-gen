@@ -1622,6 +1622,7 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                             .clone();
                         let jdk = state.settings.selected_jdk(&project.root, None)?.clone();
                         Ok(crate::java::build::GradleTaskRequest {
+                            offline: state.settings.gradle_offline,
                             project: model,
                             task_path,
                             jdk,
@@ -1879,6 +1880,7 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                     };
                     Ok((
                         BuildRequest {
+                            gradle_offline: state.settings.gradle_offline,
                             project: model,
                             task,
                             jdk,
@@ -2169,6 +2171,7 @@ fn reload_gradle_tasks(state: &mut AppState) {
             executable,
             jdk,
             state.gradle_task_generation,
+            state.settings.gradle_offline,
         ) {
             Ok(()) => state.gradle_task_loading = true,
             Err(error) => state.gradle_task_error = Some(error),
@@ -2460,6 +2463,7 @@ fn start_pending_run_build(state: &mut AppState) {
         crate::project::ProjectKind::Unknown => None,
     };
     let request = crate::java::build::BuildRequest {
+        gradle_offline: state.settings.gradle_offline,
         project: pending.model.clone(),
         task: crate::java::build::BuildTask::Build,
         jdk: pending.jdk.clone(),
@@ -3780,6 +3784,16 @@ pub fn jdk_settings_ui(ui: &mut egui::Ui, state: &mut AppState) {
             }
         });
     }
+    changed |= ui
+        .checkbox(
+            &mut state.settings.gradle_offline,
+            crate::i18n::ui_text(ui, "Gradle offline mode"),
+        )
+        .on_hover_text(crate::i18n::ui_text(
+            ui,
+            "Use cached dependencies for Gradle builds and task reports.",
+        ))
+        .changed();
     if changed {
         state.enqueue(AppEvent::SettingsChanged);
     }

@@ -33,6 +33,7 @@ impl fmt::Display for BuildTask {
 
 #[derive(Clone, Debug)]
 pub struct BuildRequest {
+    pub gradle_offline: bool,
     pub project: ProjectModel,
     pub task: BuildTask,
     pub jdk: JdkInstallation,
@@ -53,6 +54,7 @@ pub struct MavenTaskRequest {
 
 #[derive(Clone, Debug)]
 pub struct GradleTaskRequest {
+    pub offline: bool,
     pub project: ProjectModel,
     pub task_path: String,
     pub jdk: JdkInstallation,
@@ -282,6 +284,9 @@ impl BuildService {
             };
             args.extend(defaults.iter().map(OsString::from));
         }
+        if request.project.kind == ProjectKind::Gradle && request.gradle_offline {
+            args.push(OsString::from("--offline"));
+        }
         Self::launch(request.project, request.jdk, program, module, args)
     }
 
@@ -360,17 +365,15 @@ impl BuildService {
             ));
         }
         let program = build_program(&request.project, executable)?;
-        Self::launch(
-            request.project,
-            request.jdk,
-            program,
-            None,
-            vec![
-                OsString::from("--console=plain"),
-                OsString::from("--no-daemon"),
-                OsString::from(request.task_path),
-            ],
-        )
+        let mut args = vec![
+            OsString::from("--console=plain"),
+            OsString::from("--no-daemon"),
+            OsString::from(request.task_path),
+        ];
+        if request.offline {
+            args.push(OsString::from("--offline"));
+        }
+        Self::launch(request.project, request.jdk, program, None, args)
     }
 
     fn launch(

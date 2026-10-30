@@ -37,6 +37,7 @@ pub struct UserSettings {
     /// Used only when a project has no wrapper; values are executable paths, never shell commands.
     pub maven_executable: Option<PathBuf>,
     pub gradle_executable: Option<PathBuf>,
+    pub gradle_offline: bool,
     /// Java indentation width, clamped to 1..=8 when used in the editor.
     pub java_indent_size: usize,
     /// Insert spaces instead of literal tabs for Java indentation.
@@ -65,6 +66,7 @@ impl Default for UserSettings {
             project_jdks: Vec::new(),
             maven_executable: None,
             gradle_executable: None,
+            gradle_offline: false,
             java_indent_size: 4,
             java_insert_spaces: true,
         }
@@ -331,5 +333,22 @@ impl std::error::Error for SettingsError {
             Self::Serialize(source) => Some(source),
             Self::ConfigDirectoryUnavailable => None,
         }
+    }
+}
+#[cfg(test)]
+mod offline_tests {
+    use super::*;
+
+    #[test]
+    fn gradle_offline_defaults_to_false_and_survives_settings_roundtrip() {
+        let mut settings: UserSettings = toml::from_str("").unwrap();
+        assert!(!settings.gradle_offline);
+        settings.gradle_offline = true;
+        let saved = toml::to_string(&settings).unwrap();
+        assert!(
+            toml::from_str::<UserSettings>(&saved)
+                .unwrap()
+                .gradle_offline
+        );
     }
 }

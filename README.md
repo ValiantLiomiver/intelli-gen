@@ -90,6 +90,8 @@ records verified containment and no integrity contradictions.
 The extracted `META-INF/plugin.xml` registers `Gradle.ExecuteTask`,
 `Gradle.ToggleOfflineAction`, and `Gradle.RefreshDependencies`, including toolbar
 or menu references. This proves the shipped action registrations; it does not
-establish their runtime behavior. Offline mode and dependency refresh are
-comparison targets for further implementation, not capabilities claimed by
-Intelli-gen here. No JetBrains implementation code is included in Intelli-gen.
+establish their runtime behavior. Intelli-gen Settings now provides **Gradle offline mode** for CLI builds, tests,
+builds before Run, and task reports. It passes `--offline` so Gradle uses cached
+dependencies; missing cached dependencies cause Gradle to fail. This preference
+does not configure the separate JDT LS Gradle importer. Dependency refresh remains
+a comparison target for further implementation. No JetBrains implementation code is included in Intelli-gen.
