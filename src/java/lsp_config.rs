@@ -14,17 +14,18 @@ mod maven_import_tests {
 
     #[test]
     fn default_settings_disable_maven_import_and_keep_gradle_enabled() {
-        let imports = default_java_import_settings(json!("/jdk/home"), false);
+        let imports = default_java_import_settings(json!("/jdk/home"), false, None);
         assert_eq!(imports["maven"]["enabled"], false);
         assert_eq!(imports["gradle"]["enabled"], true);
         assert_eq!(imports["gradle"]["java"]["home"], "/jdk/home");
         assert_eq!(imports["gradle"]["offline"]["enabled"], false);
+        assert_eq!(imports["gradle"]["wrapper"]["enabled"], true);
+        assert!(imports["gradle"]["home"].is_null());
     }
 
     #[test]
     fn gradle_offline_import_setting_survives_maven_refresh() {
-        let initial =
-            json!({"java": {"import": default_java_import_settings(json!("/jdk/home"), true)}});
+        let initial = json!({"java": {"import": default_java_import_settings(json!("/jdk/home"), true, Some(std::path::Path::new("/gradle/home")))}});
         let refreshed = java_settings_for_maven_refresh(&initial);
         assert_eq!(
             refreshed["java"]["import"]["gradle"]["offline"]["enabled"],
@@ -34,6 +35,34 @@ mod maven_import_tests {
             refreshed["java"]["import"]["gradle"]["java"]["home"],
             "/jdk/home"
         );
+        assert_eq!(
+            refreshed["java"]["import"]["gradle"]["home"],
+            "/gradle/home"
+        );
+    }
+
+    #[test]
+    fn gradle_home_requires_a_distribution_layout() {
+        let root = std::env::temp_dir().join(format!(
+            "intelli-gen-gradle-home-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(root.join("bin")).unwrap();
+        std::fs::write(root.join("bin/gradle"), "launcher").unwrap();
+        assert!(super::configured_gradle_home(Some(&root.join("bin/gradle"))).is_none());
+        std::fs::create_dir(root.join("lib")).unwrap();
+        std::fs::write(root.join("lib/gradle-launcher-1.jar"), "jar").unwrap();
+        assert_eq!(
+            super::configured_gradle_home(Some(&root.join("bin/gradle"))),
+            Some(root.canonicalize().unwrap())
+        );
+        std::fs::write(root.join("custom-launcher"), "script").unwrap();
+        assert!(super::configured_gradle_home(Some(&root.join("custom-launcher"))).is_none());
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -231,6 +260,7 @@ pub struct JdtlsConfig {
     pub package_version: Option<OsString>,
     pub runtime_jdk_id: String,
     pub gradle_offline: bool,
+    pub gradle_home: Option<PathBuf>,
     pub workspace_data: PathBuf,
     pub jdks: Vec<JdkInstallation>,
     pub project_jdk_id: Option<String>,
@@ -238,10 +268,38 @@ pub struct JdtlsConfig {
     pub debug_bundle_error: Option<String>,
 }
 
-pub(crate) fn default_java_import_settings(gradle_java_home: Value, offline: bool) -> Value {
+fn configured_gradle_home(executable: Option<&Path>) -> Option<PathBuf> {
+    let executable = executable?.canonicalize().ok()?;
+    if !executable.is_file()
+        || !matches!(executable.file_name()?.to_str()?, "gradle" | "gradle.bat")
+    {
+        return None;
+    }
+    let bin = executable.parent()?;
+    if bin.file_name()? != "bin" {
+        return None;
+    }
+    let home = bin.parent()?;
+    let has_launcher = std::fs::read_dir(home.join("lib"))
+        .ok()?
+        .filter_map(Result::ok)
+        .any(|entry| {
+            let name = entry.file_name();
+            name.to_str()
+                .is_some_and(|name| name.starts_with("gradle-launcher-") && name.ends_with(".jar"))
+                && entry.path().is_file()
+        });
+    has_launcher.then(|| home.to_path_buf())
+}
+
+pub(crate) fn default_java_import_settings(
+    gradle_java_home: Value,
+    offline: bool,
+    gradle_home: Option<&Path>,
+) -> Value {
     json!({
         "maven": {"enabled": false},
-        "gradle": {"enabled": true, "java": {"home": gradle_java_home}, "offline": {"enabled": offline}}
+        "gradle": {"enabled": true, "home": gradle_home, "wrapper": {"enabled": true}, "java": {"home": gradle_java_home}, "offline": {"enabled": offline}}
     })
 }
 
@@ -284,6 +342,7 @@ impl JdtlsConfig {
             package_version: resolved.package_version,
             runtime_jdk_id,
             gradle_offline: settings.gradle_offline,
+            gradle_home: configured_gradle_home(settings.gradle_executable.as_deref()),
             workspace_data: dirs
                 .data_local_dir()
                 .join("jdtls")
@@ -361,7 +420,7 @@ impl JdtlsConfig {
             // This preference is shared with Gradle, so retain automatic
             // updates while the Maven importer itself is disabled by default.
             "configuration": {"runtimes": runtimes, "updateBuildConfiguration": "automatic"},
-            "import": default_java_import_settings(json!(project_jdk.home), self.gradle_offline),
+            "import": default_java_import_settings(json!(project_jdk.home), self.gradle_offline, self.gradle_home.as_deref()),
             "autobuild": {"enabled": true}
         }}))
     }

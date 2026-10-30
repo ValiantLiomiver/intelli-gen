@@ -556,6 +556,7 @@ mod main_project_tests {
             runtime_jdk_id: jdk.id.clone(),
             project_jdk_id: Some(jdk.id.clone()),
             gradle_offline: true,
+            gradle_home: None,
             workspace_data: root.parent().unwrap().join("rust-worker-workspace"),
             jdks: vec![jdk],
             debug_bundle: Some(bundle),
