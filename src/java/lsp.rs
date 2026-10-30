@@ -698,6 +698,86 @@ mod main_project_tests {
         }
         assert!(output_seen, "debuggee must print its final value");
         assert!(!debug.needs_host_restart());
+        let source = project.root.join("Main.java");
+        let mut points = crate::debugger::breakpoints::Breakpoints::default();
+        points.set_log_message(source.clone(), 4, "smoke={value}".into());
+        points.update(
+            &source,
+            4,
+            Some("value == 40".into()),
+            Some("smoke={value}".into()),
+            true,
+        );
+        points.toggle(source, 5);
+        let resolver = DebugAdapterResolver {
+            commands: session.commands.clone(),
+            root: project.root.clone(),
+            bundle: config.debug_bundle.clone(),
+        };
+        let service =
+            crate::debugger::DebugService::new(resolver, config.debug_bundle.clone().unwrap())
+                .with_initial_requests(points.initial_requests());
+        let mut second = service.start(&run, &project, &config.jdks[0]).unwrap();
+        let mut log = String::new();
+        let thread = tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                let mut stopped_thread = None;
+                for event in second.poll() {
+                    match event {
+                        crate::debugger::session::DebugEvent::Output { text, .. } => {
+                            log.push_str(&text)
+                        }
+                        crate::debugger::session::DebugEvent::Stopped { thread_id, .. } => {
+                            stopped_thread = thread_id
+                        }
+                        crate::debugger::session::DebugEvent::Failed(error) => {
+                            panic!("second debug session failed: {error}")
+                        }
+                        _ => {}
+                    }
+                }
+                if let Some(thread) = stopped_thread {
+                    break thread;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("second session reached the suspending breakpoint");
+        assert!(
+            log.contains("smoke=40"),
+            "conditional logpoint output: {log}"
+        );
+        let stack = second
+            .client()
+            .request("stackTrace", json!({"threadId":thread}))
+            .await
+            .unwrap();
+        assert_eq!(
+            stack["stackFrames"][0]["line"], 5,
+            "logpoint must not suspend at line 4"
+        );
+        second.cancel();
+        tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                second.poll();
+                if let Some(result) = second.reap() {
+                    result.unwrap();
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("cancelled debug session reaped");
+        assert!(matches!(
+            second.state(),
+            crate::debugger::DebugState::Terminated {
+                cancelled: true,
+                ..
+            }
+        ));
+        assert!(!second.needs_host_restart());
         session.shutdown();
         session.worker.take().unwrap().join().unwrap();
     }

@@ -183,3 +183,10 @@ worker reaping, and cleanup without requiring a language-host restart. The Java
 adapter in this run omitted an exit code; the session correctly retained `None`
 rather than inventing a successful code. This covers the debug session worker;
 the app event reducer and native UI still require end-to-end verification.
+
+The live worker test additionally reuses the same language host for a second
+debug session. It builds the initial requests through the production breakpoint
+model: a conditional logpoint at line 4 emits `smoke=40`, and an ordinary
+breakpoint stops at line 5. The assertion checks that the logpoint did not
+suspend execution. Cancelling this stopped session joins its worker and leaves
+the host reusable without a restart request.
