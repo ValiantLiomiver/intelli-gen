@@ -174,10 +174,21 @@ impl Translator {
         if self.catalog.contains_key(source) || self.english.contains_key(source) {
             return self.text(source).into_owned();
         }
-        for (template, _) in self.catalog.iter().filter(|(key, _)| key.contains('{')) {
-            let Some(parameters) = match_template(template, source) else {
-                continue;
-            };
+        let matched = self
+            .catalog
+            .keys()
+            .filter(|key| key.contains('{'))
+            .filter_map(|template| {
+                let parameters = match_template(template, source)?;
+                let literal_bytes = template.len()
+                    - parameters
+                        .iter()
+                        .map(|(name, _)| name.len() + 2)
+                        .sum::<usize>();
+                Some((literal_bytes, template, parameters))
+            })
+            .max_by(|left, right| (left.0, left.1).cmp(&(right.0, right.1)));
+        if let Some((_, template, parameters)) = matched {
             let references: Vec<_> = parameters
                 .iter()
                 .map(|(name, value)| (name.as_str(), value.as_str()))
@@ -229,6 +240,7 @@ fn match_template(template: &str, source: &str) -> Option<Vec<(String, String)>>
             source_offset += next_static.len();
             return (source_offset == source.len()).then_some(parameters);
         }
+        source_offset += next_static.len();
     }
 }
 
@@ -292,4 +304,110 @@ fn unescape(text: &str) -> String {
         }
     }
     output
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dynamic_messages_prefer_specific_templates_over_generic_matches() {
+        let catalog = HashMap::from([
+            (
+                "{name} in {path}".to_owned(),
+                "Generico: {name} in {path}".to_owned(),
+            ),
+            (
+                "Opened {name} in {path}".to_owned(),
+                "Aperto {name} in {path}".to_owned(),
+            ),
+        ]);
+        let translator = Translator {
+            catalog: Arc::new(catalog),
+            english: Arc::new(HashMap::new()),
+        };
+        assert_eq!(
+            translator.message("Opened Main.java in /tmp/project"),
+            "Aperto Main.java in /tmp/project"
+        );
+        assert_eq!(
+            translator.message("Main.java in /tmp/project"),
+            "Generico: Main.java in /tmp/project"
+        );
+        assert_eq!(translator.message("Unrelated status"), "Unrelated status");
+        let (italian, error) = Translator::load(LanguagePreference::Italian, None);
+        assert!(error.is_none());
+        assert_eq!(italian.message("Ln 12, Col 8"), "Riga 12, colonna 8");
+    }
+
+    #[test]
+    fn builtin_catalogs_parse_and_preserve_translation_parameters() {
+        let english = parse_catalog(ENGLISH).expect("valid English catalog");
+        let italian = parse_catalog(ITALIAN).expect("valid Italian catalog");
+        assert_eq!(
+            english.keys().collect::<std::collections::BTreeSet<_>>(),
+            italian.keys().collect::<std::collections::BTreeSet<_>>(),
+            "built-in catalogs must expose the same keys"
+        );
+        let parameters = |text: &str| {
+            text.match_indices('{')
+                .filter_map(|(start, _)| {
+                    text[start + 1..]
+                        .find('}')
+                        .map(|end| text[start + 1..start + 1 + end].to_owned())
+                })
+                .collect::<std::collections::BTreeSet<_>>()
+        };
+        for (key, value) in &english {
+            let translated = italian
+                .get(key)
+                .unwrap_or_else(|| panic!("missing Italian key: {key}"));
+            assert_eq!(
+                parameters(key),
+                parameters(value),
+                "English parameters: {key}"
+            );
+            assert_eq!(
+                parameters(key),
+                parameters(translated),
+                "Italian parameters: {key}"
+            );
+        }
+    }
+
+    #[test]
+    fn ini_catalog_parses_escaped_equals_and_newlines() {
+        let catalog =
+            parse_catalog("# comment\nEnvironment (NAME\\=value)=A\\=B\\nnext line\n; comment\n")
+                .unwrap();
+
+        assert_eq!(
+            catalog.get("Environment (NAME=value)").map(String::as_str),
+            Some("A=B\nnext line")
+        );
+    }
+
+    #[test]
+    fn ini_catalog_rejects_duplicate_and_invalid_entries() {
+        assert!(parse_catalog("label=one\nlabel=two").is_err());
+        assert!(parse_catalog("=empty key").is_err());
+        assert!(parse_catalog("missing separator").is_err());
+    }
+
+    #[test]
+    fn message_translates_templates_and_preserves_dynamic_paths() {
+        let source = "Cannot save {path}: The file changed on disk.";
+        let translated = "Impossibile salvare {path}: il file è cambiato su disco.";
+        let translator = Translator {
+            catalog: Arc::new(HashMap::from([(source.to_owned(), translated.to_owned())])),
+            english: Arc::new(HashMap::from([(source.to_owned(), source.to_owned())])),
+        };
+
+        assert_eq!(
+            translator.message(
+                "Cannot save /tmp/project with spaces/Main.java: The file changed on disk."
+            ),
+            "Impossibile salvare /tmp/project with spaces/Main.java: il file è cambiato su disco."
+        );
+    }
 }

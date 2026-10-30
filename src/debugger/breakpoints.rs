@@ -650,6 +650,15 @@ impl Breakpoints {
             .map(|point| point.line)
             .collect()
     }
+    pub fn disabled_lines(&self, source: &Path) -> Vec<u32> {
+        self.sources
+            .get(source)
+            .into_iter()
+            .flatten()
+            .filter(|point| !point.enabled)
+            .map(|point| point.line)
+            .collect()
+    }
     pub fn source_revision(&self, source: &Path) -> u64 {
         self.revisions.get(source).copied().unwrap_or(0)
     }
@@ -707,5 +716,48 @@ impl Breakpoints {
                 self.update_event(key, &event.reason, &event.breakpoint);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn updating_disabled_breakpoint_reenables_without_losing_metadata() {
+        let source = PathBuf::from("src/Main.java");
+        let mut breakpoints = Breakpoints::default();
+        breakpoints.sources.insert(
+            source.clone(),
+            vec![Breakpoint {
+                source: source.clone(),
+                line: 12,
+                condition: Some("ready".into()),
+                log_message: Some("value={value}".into()),
+                enabled: false,
+            }],
+        );
+        assert_eq!(breakpoints.disabled_lines(&source), [12]);
+
+        assert!(breakpoints.update(
+            &source,
+            12,
+            Some("ready".into()),
+            Some("value={value}".into()),
+            true,
+        ));
+
+        let point = &breakpoints.sources[&source][0];
+        assert!(point.enabled);
+        assert!(breakpoints.disabled_lines(&source).is_empty());
+        assert_eq!(point.condition.as_deref(), Some("ready"));
+        assert_eq!(point.log_message.as_deref(), Some("value={value}"));
+        assert_eq!(
+            breakpoints.arguments(&source)["breakpoints"][0]["logMessage"],
+            "value={value}"
+        );
+
+        breakpoints.toggle(source.clone(), 12);
+        assert!(breakpoints.sources[&source].is_empty());
     }
 }

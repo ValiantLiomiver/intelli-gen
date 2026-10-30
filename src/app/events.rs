@@ -161,6 +161,7 @@ pub enum GradleAction {
         generation: u64,
         project_path: Option<PathBuf>,
         task_path: String,
+        refresh_dependencies: bool,
     },
     ToggleCollapsed,
 }

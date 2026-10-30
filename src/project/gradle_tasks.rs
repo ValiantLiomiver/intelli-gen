@@ -60,6 +60,7 @@ impl GradleTaskLoader {
         executable: Option<PathBuf>,
         jdk: JdkInstallation,
         generation: u64,
+        offline: bool,
     ) -> Result<(), String> {
         if project.kind != ProjectKind::Gradle {
             return Err("The Gradle task browser requires a Gradle project".into());
@@ -116,6 +117,8 @@ impl GradleTaskLoader {
                     &worker_root,
                     program,
                     module_name.as_deref(),
+                    project_path.as_deref(),
+                    offline,
                     environment,
                     worker_cancel,
                 );
@@ -214,25 +217,13 @@ fn load_tasks(
     root: &Path,
     program: PathBuf,
     module_name: Option<&str>,
+    project_path: Option<&Path>,
+    offline: bool,
     environment: Vec<(OsString, OsString)>,
     cancellation: Arc<AtomicBool>,
 ) -> Result<Vec<GradleTask>, String> {
     check_cancel(&cancellation)?;
-    if let Some(module_name) = module_name {
-        let module = module_name
-            .strip_prefix(':')
-            .ok_or("Invalid Gradle project path")?;
-        let mut path = root.to_path_buf();
-        for component in module.split(':') {
-            if component.is_empty()
-                || component == "."
-                || component == ".."
-                || component.contains(['/', '\\'])
-            {
-                return Err("Invalid Gradle project path".into());
-            }
-            path.push(component);
-        }
+    if let Some(path) = project_path {
         let reactor = root
             .canonicalize()
             .map_err(|error| format!("Cannot inspect Gradle project: {error}"))?;
@@ -267,6 +258,9 @@ fn load_tasks(
         command.arg("tasks");
     }
     command.arg("--all");
+    if offline {
+        command.arg("--offline");
+    }
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -336,15 +330,19 @@ fn parse_task_report(project_path: &str, output: &str) -> Vec<GradleTask> {
         }
         let (name, description) = line.split_once(" - ").map_or((line, ""), |parts| parts);
         let name = name.trim();
-        if !valid_task_name(name) {
-            continue;
-        }
         let prefix = if project_path == ":" {
             String::new()
         } else {
             project_path.trim_end_matches(':').to_owned()
         };
-        let path = format!("{prefix}:{name}");
+        let path = if name.starts_with(':') {
+            name.to_owned()
+        } else {
+            format!("{prefix}:{name}")
+        };
+        if !valid_project_path(&path) {
+            continue;
+        }
         tasks.push(GradleTask {
             path,
             description: description.trim().to_owned(),
@@ -365,6 +363,67 @@ fn valid_task_name(name: &str) -> bool {
 
 fn valid_project_path(path: &str) -> bool {
     path.starts_with(':') && path[1..].split(':').all(valid_task_name)
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn task_report_keeps_qualified_subproject_tasks() {
+        let report = "Tasks runnable from root project\nBuild tasks\n---\napp:build - Assembles and tests this project.\napp:nested:test - Runs tests.\n:other:check - Checks another project.\n../invalid:task - Invalid\napp::task - Invalid\nBUILD SUCCESSFUL\n";
+        let tasks = parse_task_report(":", report);
+        assert_eq!(
+            tasks
+                .iter()
+                .map(|task| task.path.as_str())
+                .collect::<Vec<_>>(),
+            [":app:build", ":app:nested:test", ":other:check"]
+        );
+        let tasks = parse_task_report(
+            ":app",
+            "Tasks runnable from project ':app'\nnested:test - Runs tests.\n",
+        );
+        assert_eq!(tasks[0].path, ":app:nested:test");
+    }
+
+    #[test]
+    fn task_report_uses_discovered_project_directory_and_gradle_name() {
+        let scratch = Scratch::create().unwrap();
+        let module = scratch.0.join("custom/app");
+        fs::create_dir_all(&module).unwrap();
+        let program = scratch.0.join("gradle");
+        fs::write(
+            &program,
+            "#!/bin/sh\n[ \"$3\" = ':app:tasks' ] || exit 1\n[ \"$5\" = '--offline' ] || exit 1\nprintf \"Tasks runnable from project ':app'\\n\\nbuild - Builds the project\\n\"\n",
+        ).unwrap();
+        fs::set_permissions(&program, fs::Permissions::from_mode(0o700)).unwrap();
+        let tasks = load_tasks(
+            &scratch.0,
+            program.clone(),
+            Some(":app"),
+            Some(&module),
+            true,
+            Vec::new(),
+            Arc::new(AtomicBool::new(false)),
+        )
+        .unwrap();
+        assert_eq!(tasks[0].path, ":app:build");
+
+        let outside = Scratch::create().unwrap();
+        let error = load_tasks(
+            &scratch.0,
+            program,
+            Some(":app"),
+            Some(&outside.0),
+            false,
+            Vec::new(),
+            Arc::new(AtomicBool::new(false)),
+        )
+        .unwrap_err();
+        assert!(error.contains("outside the opened build"));
+    }
 }
 
 fn output_tail(bytes: &[u8]) -> String {

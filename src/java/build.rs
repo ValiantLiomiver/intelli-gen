@@ -33,6 +33,7 @@ impl fmt::Display for BuildTask {
 
 #[derive(Clone, Debug)]
 pub struct BuildRequest {
+    pub gradle_offline: bool,
     pub project: ProjectModel,
     pub task: BuildTask,
     pub jdk: JdkInstallation,
@@ -53,6 +54,8 @@ pub struct MavenTaskRequest {
 
 #[derive(Clone, Debug)]
 pub struct GradleTaskRequest {
+    pub offline: bool,
+    pub refresh_dependencies: bool,
     pub project: ProjectModel,
     pub task_path: String,
     pub jdk: JdkInstallation,
@@ -282,6 +285,9 @@ impl BuildService {
             };
             args.extend(defaults.iter().map(OsString::from));
         }
+        if request.project.kind == ProjectKind::Gradle && request.gradle_offline {
+            args.push(OsString::from("--offline"));
+        }
         Self::launch(request.project, request.jdk, program, module, args)
     }
 
@@ -354,23 +360,13 @@ impl BuildService {
         if request.project.kind != ProjectKind::Gradle {
             return Err(BuildError("Open a Gradle build first".into()));
         }
-        if !valid_gradle_task_path(&request.task_path) {
-            return Err(BuildError(
-                "Choose a valid discovered Gradle task path".into(),
-            ));
-        }
+        let args = gradle_task_arguments(
+            &request.task_path,
+            request.offline,
+            request.refresh_dependencies,
+        )?;
         let program = build_program(&request.project, executable)?;
-        Self::launch(
-            request.project,
-            request.jdk,
-            program,
-            None,
-            vec![
-                OsString::from("--console=plain"),
-                OsString::from("--no-daemon"),
-                OsString::from(request.task_path),
-            ],
-        )
+        Self::launch(request.project, request.jdk, program, None, args)
     }
 
     fn launch(
@@ -419,6 +415,35 @@ impl BuildService {
     }
 }
 
+fn gradle_task_arguments(
+    task: &str,
+    offline: bool,
+    refresh: bool,
+) -> Result<Vec<OsString>, BuildError> {
+    if !valid_gradle_task_path(task) {
+        return Err(BuildError(
+            "Choose a valid discovered Gradle task path".into(),
+        ));
+    }
+    if refresh && (offline || !task.ends_with(":dependencies")) {
+        return Err(BuildError(
+            "Refresh dependencies requires online mode and a Gradle dependencies task".into(),
+        ));
+    }
+    let mut args = vec![
+        OsString::from("--console=plain"),
+        OsString::from("--no-daemon"),
+        OsString::from(task),
+    ];
+    if offline {
+        args.push(OsString::from("--offline"));
+    }
+    if refresh {
+        args.push(OsString::from("--refresh-dependencies"));
+    }
+    Ok(args)
+}
+
 fn valid_gradle_task_path(path: &str) -> bool {
     path.starts_with(':')
         && path[1..].split(':').all(|segment| {
@@ -429,6 +454,171 @@ fn valid_gradle_task_path(path: &str) -> bool {
                 && bytes
                     .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
         })
+}
+
+#[cfg(test)]
+mod gradle_argument_tests {
+    use super::*;
+
+    #[tokio::test]
+    #[ignore = "requires INTELLI_GEN_GRADLE, INTELLI_GEN_BUILD_JAVA_HOME and INTELLI_GEN_GRADLE_PROJECT disposable fixture"]
+    async fn live_gradle_worker_builds_and_cleans_remapped_module() {
+        let root = PathBuf::from(std::env::var_os("INTELLI_GEN_GRADLE_PROJECT").unwrap());
+        let executable = PathBuf::from(std::env::var_os("INTELLI_GEN_GRADLE").unwrap());
+        let home = PathBuf::from(std::env::var_os("INTELLI_GEN_BUILD_JAVA_HOME").unwrap());
+        live_build_fixture(root, executable, home, ProjectKind::Gradle).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires INTELLI_GEN_MAVEN_PROJECT disposable fixture with offline mvnw and INTELLI_GEN_BUILD_JAVA_HOME"]
+    async fn live_maven_worker_prefers_wrapper_and_reports_test_failures() {
+        let root = PathBuf::from(std::env::var_os("INTELLI_GEN_MAVEN_PROJECT").unwrap());
+        let home = PathBuf::from(std::env::var_os("INTELLI_GEN_BUILD_JAVA_HOME").unwrap());
+        let project = ProjectModel::discover(&root).unwrap();
+        assert!(project.wrapper.is_some(), "Maven fixture must provide mvnw");
+        live_build_fixture(
+            root,
+            PathBuf::from("/missing-configured-maven"),
+            home,
+            ProjectKind::Maven,
+        )
+        .await;
+    }
+
+    async fn live_build_fixture(
+        root: PathBuf,
+        executable: PathBuf,
+        home: PathBuf,
+        kind: ProjectKind,
+    ) {
+        let project = ProjectModel::discover(&root).unwrap();
+        assert_eq!(project.kind, kind);
+        assert!(
+            project
+                .modules
+                .iter()
+                .any(|module| module.root.ends_with("custom/app"))
+        );
+        let jdk = crate::java::jdk::JdkCatalog::add(&home).unwrap();
+        let class = project.root.join(match kind {
+            ProjectKind::Maven => "custom/app/target/classes/Main.class",
+            _ => "custom/app/build/classes/java/main/Main.class",
+        });
+        for task in [BuildTask::Build, BuildTask::Test, BuildTask::Clean] {
+            let mut handle = BuildService::start_with_executable(
+                BuildRequest {
+                    project: project.clone(),
+                    jdk: jdk.clone(),
+                    task,
+                    gradle_offline: true,
+                    module: None,
+                    test_task: None,
+                    test_filter: None,
+                },
+                Some(&executable),
+            )
+            .unwrap();
+            let mut output = String::new();
+            let mut summary = None;
+            let mut failures = Vec::new();
+            tokio::time::timeout(Duration::from_secs(120), async {
+                loop {
+                    match handle.events.recv().await.expect("build worker completion") {
+                        BuildEvent::Output { text, .. } => output.push_str(&text),
+                        BuildEvent::Tests(totals) => summary = Some(totals),
+                        BuildEvent::TestFailures(items) => failures.extend(items),
+                        BuildEvent::Finished {
+                            exit_code,
+                            cancelled,
+                            error,
+                            jdk: selected,
+                            ..
+                        } => {
+                            assert_eq!(
+                                exit_code,
+                                Some(if task == BuildTask::Test { 1 } else { 0 }),
+                                "{error:?}\n{output}"
+                            );
+                            assert!(!cancelled);
+                            assert!(error.is_none(), "{error:?}");
+                            assert!(selected.contains(&jdk.home.display().to_string()));
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+            })
+            .await
+            .expect("build worker completed before timeout");
+            handle.worker.take().unwrap().join().unwrap();
+            if task == BuildTask::Test {
+                assert!(
+                    output.contains(if kind == ProjectKind::Maven {
+                        "BUILD FAILURE"
+                    } else {
+                        "BUILD FAILED"
+                    }),
+                    "{output}"
+                );
+                assert_eq!(
+                    summary,
+                    Some(diagnostics::TestSummary {
+                        total: 2,
+                        passed: 1,
+                        failed: 1,
+                        skipped: 0
+                    }),
+                    "{output}"
+                );
+                assert_eq!(failures.len(), 1);
+                assert_eq!(failures[0].class_name, "MainTest");
+                assert_eq!(failures[0].test_name, "failing");
+                assert_eq!(
+                    failures[0].source_path.as_deref(),
+                    Some(
+                        project
+                            .root
+                            .join("custom/app/src/test/java/MainTest.java")
+                            .as_path()
+                    )
+                );
+                assert!(failures[0].source_line.is_some());
+            } else {
+                assert!(
+                    output.contains(if kind == ProjectKind::Maven {
+                        "BUILD SUCCESS"
+                    } else {
+                        "BUILD SUCCESSFUL"
+                    }),
+                    "{output}"
+                );
+            }
+            assert_eq!(class.is_file(), task != BuildTask::Clean);
+        }
+    }
+
+    #[test]
+    fn refresh_dependencies_keeps_module_and_rejects_offline_execution() {
+        let args = gradle_task_arguments(":app:dependencies", false, true).unwrap();
+        assert_eq!(
+            args,
+            [
+                "--console=plain",
+                "--no-daemon",
+                ":app:dependencies",
+                "--refresh-dependencies"
+            ]
+            .map(OsString::from)
+        );
+        assert!(gradle_task_arguments(":app:dependencies", true, true).is_err());
+        assert!(gradle_task_arguments(":app:build", false, true).is_err());
+        assert!(gradle_task_arguments("--invalid", false, false).is_err());
+        assert!(
+            gradle_task_arguments(":app:build", true, false)
+                .unwrap()
+                .contains(&OsString::from("--offline"))
+        );
+    }
 }
 
 pub(crate) fn valid_java_class_name(class_name: &str) -> bool {

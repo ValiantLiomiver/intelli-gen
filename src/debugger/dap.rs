@@ -236,6 +236,111 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    #[ignore = "requires INTELLI_GEN_DAP_PORT, INTELLI_GEN_DAP_PROJECT, INTELLI_GEN_DAP_JAVA and the documented smoke fixture"]
+    async fn live_java_debug_transport() {
+        async fn event(connection: &mut DapConnection, name: &str) -> Value {
+            tokio::time::timeout(Duration::from_secs(30), async {
+                loop {
+                    let event = connection
+                        .next_event()
+                        .await
+                        .expect("adapter event stream")
+                        .expect("valid event");
+                    if event.event == name {
+                        return event.body;
+                    }
+                }
+            })
+            .await
+            .expect("expected adapter event before timeout")
+        }
+        let port = std::env::var("INTELLI_GEN_DAP_PORT")
+            .unwrap()
+            .parse()
+            .unwrap();
+        let project =
+            std::path::PathBuf::from(std::env::var_os("INTELLI_GEN_DAP_PROJECT").unwrap());
+        let java = std::path::PathBuf::from(std::env::var_os("INTELLI_GEN_DAP_JAVA").unwrap());
+        let mut connection = DapConnection::connect(port).await.unwrap();
+        let client = connection.client();
+        client.request("initialize", json!({"adapterID":"java", "linesStartAt1":true, "columnsStartAt1":true, "pathFormat":"path"})).await.unwrap();
+        let launch = client.start_request("launch", json!({
+            "mainClass":"Main", "projectName":"smoke", "javaExec":java,
+            "cwd":project, "classPaths":[project.join("bin")], "console":"internalConsole", "stopOnEntry":false
+        }), Duration::from_secs(60)).unwrap();
+        event(&mut connection, "initialized").await;
+        let points = client
+            .request(
+                "setBreakpoints",
+                json!({"source":{"path":project.join("Main.java")},"breakpoints":[{"line":4}]}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(points["breakpoints"][0]["verified"], true);
+        client
+            .request("configurationDone", json!({}))
+            .await
+            .unwrap();
+        launch.wait().await.unwrap();
+        let stopped = event(&mut connection, "stopped").await;
+        let thread = stopped["threadId"].as_i64().unwrap();
+        let stack = client
+            .request("stackTrace", json!({"threadId":thread}))
+            .await
+            .unwrap();
+        let frame = &stack["stackFrames"][0];
+        assert_eq!(frame["line"], 4);
+        let scopes = client
+            .request("scopes", json!({"frameId":frame["id"]}))
+            .await
+            .unwrap();
+        let mut found = false;
+        for scope in scopes["scopes"].as_array().unwrap() {
+            let variables = client
+                .request(
+                    "variables",
+                    json!({"variablesReference":scope["variablesReference"]}),
+                )
+                .await
+                .unwrap();
+            found |= variables["variables"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|v| v["name"] == "value" && v["value"] == "40");
+        }
+        assert!(found, "local value must be visible at the breakpoint");
+        let value = client
+            .request(
+                "evaluate",
+                json!({"frameId":frame["id"], "expression":"value + 2", "context":"watch"}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(value["result"], "42");
+        client
+            .request("next", json!({"threadId":thread}))
+            .await
+            .unwrap();
+        event(&mut connection, "stopped").await;
+        let stack = client
+            .request("stackTrace", json!({"threadId":thread}))
+            .await
+            .unwrap();
+        assert_eq!(stack["stackFrames"][0]["line"], 5);
+        client
+            .request("continue", json!({"threadId":thread}))
+            .await
+            .unwrap();
+        event(&mut connection, "terminated").await;
+        client
+            .request("disconnect", json!({"terminateDebuggee":true}))
+            .await
+            .unwrap();
+        connection.close().await;
+    }
+
+    #[tokio::test]
     async fn dap_framing_round_trips_a_request() {
         let (mut sender, mut receiver) = tokio::io::duplex(1024);
         let message = DapMessage {

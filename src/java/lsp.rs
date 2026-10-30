@@ -480,6 +480,409 @@ pub struct RuntimeClasspaths {
     #[serde(default, alias = "project_name")]
     pub project_name: Option<String>,
 }
+struct PendingClasspaths {
+    sent: Instant,
+    reply: oneshot::Sender<Result<RuntimeClasspaths, LspError>>,
+    path: PathBuf,
+    main_class: String,
+    paths: Option<RuntimeClasspaths>,
+}
+
+fn main_project_name(
+    result: &Value,
+    main_class: &str,
+    source: &Path,
+) -> Result<Option<String>, LspError> {
+    let items = result
+        .as_array()
+        .ok_or_else(|| LspError("Invalid Java main-class response".into()))?;
+    let source = source
+        .canonicalize()
+        .unwrap_or_else(|_| source.to_path_buf());
+    let mut names = std::collections::BTreeSet::new();
+    for item in items {
+        if item["mainClass"].as_str() != Some(main_class) {
+            continue;
+        }
+        let Some(path) = item["filePath"].as_str().map(PathBuf::from) else {
+            continue;
+        };
+        let path = path.canonicalize().unwrap_or(path);
+        if path != source && !(source.is_dir() && path.starts_with(&source)) {
+            continue;
+        }
+        if let Some(name) = item["projectName"].as_str().filter(|name| !name.is_empty()) {
+            names.insert(name.to_owned());
+        }
+    }
+    if names.len() > 1 {
+        return Err(LspError(
+            "Multiple Java projects contain the selected main class; choose a project module"
+                .into(),
+        ));
+    }
+    Ok(names.into_iter().next())
+}
+
+#[cfg(test)]
+mod main_project_tests {
+    use super::*;
+
+    #[tokio::test]
+    #[ignore = "requires INTELLI_GEN_JAVA_HOME, INTELLI_GEN_JAVA_RESOURCES and INTELLI_GEN_DAP_PROJECT smoke fixture"]
+    async fn live_worker_resolves_server_project_name() {
+        let root = PathBuf::from(std::env::var_os("INTELLI_GEN_DAP_PROJECT").unwrap());
+        let home = PathBuf::from(std::env::var_os("INTELLI_GEN_JAVA_HOME").unwrap());
+        let resources = PathBuf::from(std::env::var_os("INTELLI_GEN_JAVA_RESOURCES").unwrap());
+        let jdk = crate::java::jdk::JdkCatalog::add(&home).unwrap();
+        let project_jdk = std::env::var_os("INTELLI_GEN_PROJECT_JAVA_HOME")
+            .map(|home| crate::java::jdk::JdkCatalog::add(Path::new(&home)).unwrap())
+            .unwrap_or_else(|| jdk.clone());
+        let executable = resources.parent().unwrap().join("MacOS/intelli-gen");
+        let resolved = crate::java::lsp_config::resolve_jdtls(
+            &crate::settings::UserSettings::default(),
+            &executable,
+        )
+        .unwrap();
+        let bundle = crate::java::lsp_config::resolve_debug_bundle(
+            &crate::settings::UserSettings::default(),
+            &executable,
+        )
+        .unwrap();
+        let config = JdtlsConfig {
+            executable: resolved.display_path,
+            launcher_arguments: resolved.arguments,
+            lombok_agent: None,
+            lombok_declared: false,
+            shared_configuration: resolved.shared_configuration,
+            package_version: resolved.package_version,
+            runtime_jdk_id: jdk.id.clone(),
+            project_jdk_id: Some(project_jdk.id.clone()),
+            gradle_offline: true,
+            gradle_home: std::env::var_os("INTELLI_GEN_GRADLE_HOME").map(PathBuf::from),
+            workspace_data: root.parent().unwrap().join("rust-worker-workspace"),
+            jdks: vec![jdk, project_jdk],
+            debug_bundle: Some(bundle),
+            debug_bundle_error: None,
+        };
+        let maven = root.join("pom.xml").is_file();
+        let gradle = root.join("build.gradle").is_file();
+        let mut project = if maven || gradle {
+            ProjectModel::discover(&root).unwrap()
+        } else {
+            ProjectModel {
+                root: root.clone(),
+                name: "directory-fallback".into(),
+                kind: crate::project::ProjectKind::Unknown,
+                modules: Vec::new(),
+                wrapper: None,
+            }
+        };
+        project.name = "directory-fallback".into();
+        let source = project.root.join(if maven || gradle {
+            "src/main/java/Main.java"
+        } else {
+            "Main.java"
+        });
+        let mut session = JavaLanguageService::start(&project, &config).unwrap();
+        tokio::time::timeout(Duration::from_secs(90), async {
+            loop {
+                let update = session.events.recv().await.expect("language worker event");
+                if let LanguageEvent::ServerState(message) = update.event {
+                    assert!(
+                        !message.starts_with("Java intelligence unavailable:"),
+                        "{message}"
+                    );
+                    if message == "Java intelligence ready" {
+                        break;
+                    }
+                }
+            }
+        })
+        .await
+        .expect("language worker ready");
+        if maven {
+            session
+                .try_command(LanguageCommand::RefreshMaven {
+                    root_pom: project.root.join("pom.xml"),
+                })
+                .unwrap();
+            tokio::time::timeout(Duration::from_secs(100), async {
+                loop {
+                    let update = session.events.recv().await.expect("Maven import event");
+                    if let LanguageEvent::ServerState(message) = update.event {
+                        assert!(
+                            !message.starts_with("Maven import failed:")
+                                && !message.starts_with("Maven import request timed out"),
+                            "{message}"
+                        );
+                        if message == "Maven import request completed" {
+                            break;
+                        }
+                    }
+                }
+            })
+            .await
+            .expect("Maven import response");
+        }
+        let resolver = ClasspathResolver {
+            commands: session.commands.clone(),
+            root,
+        };
+        let expected_output = if maven {
+            "target/classes"
+        } else if gradle {
+            "bin/main"
+        } else {
+            "bin"
+        };
+        // Import command acknowledgement can precede the asynchronous workspace update.
+        let paths = tokio::time::timeout(Duration::from_secs(60), async {
+            loop {
+                let paths = resolver.resolve(&project, "Main", None).await.unwrap();
+                if paths.classpaths.iter().any(|path| {
+                    path.ends_with(expected_output) && path.join("Main.class").is_file()
+                }) {
+                    break paths;
+                }
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+        })
+        .await
+        .expect("imported project classpath and compiled main class");
+        assert_eq!(
+            paths.project_name.as_deref(),
+            Some(if gradle { "smoke-project" } else { "smoke" })
+        );
+        let resolver = DebugAdapterResolver {
+            commands: session.commands.clone(),
+            root: project.root.clone(),
+            bundle: config.debug_bundle.clone(),
+        };
+        let service =
+            crate::debugger::DebugService::new(resolver, config.debug_bundle.clone().unwrap())
+                .with_initial_requests(vec![(
+                    "setBreakpoints".into(),
+                    json!({"source":{"path":source.clone()},"breakpoints":[{"line":4}]}),
+                )]);
+        let mut run = crate::java::run_config::RunConfiguration::new(&project.root);
+        run.main_class = "Main".into();
+        let mut debug = service.start(&run, &project, &config.jdks[0]).unwrap();
+        async fn stopped(debug: &mut crate::debugger::session::DebugSession) -> i64 {
+            tokio::time::timeout(Duration::from_secs(30), async {
+                loop {
+                    for event in debug.poll() {
+                        match event {
+                            crate::debugger::session::DebugEvent::Stopped { thread_id, .. } => {
+                                return thread_id.unwrap();
+                            }
+                            crate::debugger::session::DebugEvent::Failed(error) => {
+                                panic!("debug worker failed: {error}")
+                            }
+                            _ => {}
+                        }
+                    }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await
+            .expect("debug worker stopped at breakpoint")
+        }
+        let thread = stopped(&mut debug).await;
+        assert!(matches!(
+            debug.state(),
+            crate::debugger::DebugState::Stopped
+        ));
+        let client = debug.client();
+        let stack = client
+            .request("stackTrace", json!({"threadId":thread}))
+            .await
+            .unwrap();
+        let frame = &stack["stackFrames"][0];
+        assert_eq!(frame["line"], 4);
+        let runtime_version = client
+            .request(
+                "evaluate",
+                json!({"frameId":frame["id"],"expression":"System.getProperty(\"java.specification.version\")","context":"watch"}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            runtime_version["result"],
+            format!("\"{}\"", config.jdks[0].version.major)
+        );
+        let value = client
+            .request(
+                "evaluate",
+                json!({"frameId":frame["id"],"expression":"value + 2","context":"watch"}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(value["result"], "42");
+        client
+            .request("next", json!({"threadId":thread}))
+            .await
+            .unwrap();
+        let thread = stopped(&mut debug).await;
+        let stack = client
+            .request("stackTrace", json!({"threadId":thread}))
+            .await
+            .unwrap();
+        assert_eq!(stack["stackFrames"][0]["line"], 5);
+        client
+            .request("continue", json!({"threadId":thread}))
+            .await
+            .unwrap();
+        let mut output_seen = false;
+        tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                for event in debug.poll() {
+                    match event {
+                        crate::debugger::session::DebugEvent::Failed(error) => {
+                            panic!("debug worker failed: {error}")
+                        }
+                        crate::debugger::session::DebugEvent::Output { text, .. } => {
+                            output_seen |= text.lines().any(|line| line.trim() == "42")
+                        }
+                        _ => {}
+                    }
+                }
+                if let Some(result) = debug.reap() {
+                    result.unwrap();
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("debug worker terminated and joined");
+        match debug.state() {
+            crate::debugger::DebugState::Terminated {
+                exit_code,
+                cancelled: false,
+            } => {
+                if let Some(code) = exit_code {
+                    assert_eq!(code, 0);
+                }
+            }
+            state => panic!("unexpected final state: {state:?}"),
+        }
+        assert!(output_seen, "debuggee must print its final value");
+        assert!(!debug.needs_host_restart());
+        let mut points = crate::debugger::breakpoints::Breakpoints::default();
+        points.set_log_message(source.clone(), 4, "smoke={value}".into());
+        points.update(
+            &source,
+            4,
+            Some("value == 40".into()),
+            Some("smoke={value}".into()),
+            true,
+        );
+        points.toggle(source, 5);
+        let resolver = DebugAdapterResolver {
+            commands: session.commands.clone(),
+            root: project.root.clone(),
+            bundle: config.debug_bundle.clone(),
+        };
+        let service =
+            crate::debugger::DebugService::new(resolver, config.debug_bundle.clone().unwrap())
+                .with_initial_requests(points.initial_requests());
+        let mut second = service.start(&run, &project, &config.jdks[0]).unwrap();
+        let mut log = String::new();
+        let thread = tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                let mut stopped_thread = None;
+                for event in second.poll() {
+                    match event {
+                        crate::debugger::session::DebugEvent::Output { text, .. } => {
+                            log.push_str(&text)
+                        }
+                        crate::debugger::session::DebugEvent::Stopped { thread_id, .. } => {
+                            stopped_thread = thread_id
+                        }
+                        crate::debugger::session::DebugEvent::Failed(error) => {
+                            panic!("second debug session failed: {error}")
+                        }
+                        _ => {}
+                    }
+                }
+                if let Some(thread) = stopped_thread {
+                    break thread;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("second session reached the suspending breakpoint");
+        assert!(
+            log.contains("smoke=40"),
+            "conditional logpoint output: {log}"
+        );
+        let stack = second
+            .client()
+            .request("stackTrace", json!({"threadId":thread}))
+            .await
+            .unwrap();
+        assert_eq!(
+            stack["stackFrames"][0]["line"], 5,
+            "logpoint must not suspend at line 4"
+        );
+        second.cancel();
+        tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                second.poll();
+                if let Some(result) = second.reap() {
+                    result.unwrap();
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("cancelled debug session reaped");
+        assert!(matches!(
+            second.state(),
+            crate::debugger::DebugState::Terminated {
+                cancelled: true,
+                ..
+            }
+        ));
+        assert!(!second.needs_host_restart());
+        session.shutdown();
+        session.worker.take().unwrap().join().unwrap();
+    }
+
+    #[test]
+    fn server_project_name_is_selected_by_main_class_and_source() {
+        let result = json!([
+            {"mainClass":"Main","projectName":"wrong-module","filePath":"/workspace/other/Main.java"},
+            {"mainClass":"Main","projectName":"logical-gradle-name","filePath":"/workspace/custom/service/Main.java"}
+        ]);
+        assert_eq!(
+            main_project_name(
+                &result,
+                "Main",
+                Path::new("/workspace/custom/service/Main.java")
+            )
+            .unwrap()
+            .as_deref(),
+            Some("logical-gradle-name")
+        );
+        assert!(
+            main_project_name(
+                &result,
+                "Missing",
+                Path::new("/workspace/custom/service/Main.java")
+            )
+            .unwrap()
+            .is_none()
+        );
+        assert!(
+            main_project_name(&json!(null), "Main", Path::new("/workspace/Main.java")).is_err()
+        );
+    }
+}
+
 /// This sender belongs to one language session. Restarting drops its receiver;
 /// a response cannot be delivered by a replacement session.
 #[derive(Clone)]
@@ -597,6 +1000,7 @@ impl ClasspathResolver {
         self.commands
             .try_send(LanguageCommand::Classpaths {
                 path: source,
+                main_class: main_class.to_owned(),
                 reply,
             })
             .map_err(|error| LspError(format!("Java language service unavailable: {error}")))?;
@@ -676,6 +1080,7 @@ enum LanguageCommand {
     },
     Classpaths {
         path: PathBuf,
+        main_class: String,
         reply: oneshot::Sender<Result<RuntimeClasspaths, LspError>>,
     },
     Open {
@@ -1366,13 +1771,8 @@ async fn protocol(
     let mut pending_symbols: HashMap<u64, (String, Instant)> = HashMap::new();
     let mut debug_ports: HashMap<u64, (Instant, oneshot::Sender<Result<u16, LspError>>)> =
         HashMap::new();
-    let mut classpaths: HashMap<
-        u64,
-        (
-            Instant,
-            oneshot::Sender<Result<RuntimeClasspaths, LspError>>,
-        ),
-    > = HashMap::new();
+    let mut classpaths: HashMap<u64, PendingClasspaths> = HashMap::new();
+    let mut maven_imports: HashMap<u64, Instant> = HashMap::new();
     let mut heartbeat = tokio::time::interval(Duration::from_secs(1));
     loop {
         if *cancellation.borrow() {
@@ -1392,20 +1792,25 @@ async fn protocol(
                             "command": "vscode.java.startDebugSession", "arguments": []
                         }})).await?;
                     }
-                    LanguageCommand::Classpaths { path, reply } => {
+                    LanguageCommand::Classpaths { path, main_class, reply } => {
                         if classpaths.len() >= 8 { let _ = reply.send(Err(LspError("Too many classpath requests pending".into()))); continue; }
                         let id = next_id; next_id += 1;
                         let source_uri = uri(&path)?;
-                        classpaths.insert(id, (Instant::now(), reply));
+                        classpaths.insert(id, PendingClasspaths { sent: Instant::now(), reply, path, main_class, paths: None });
                         send(input, json!({"jsonrpc": "2.0", "id": id, "method": "workspace/executeCommand", "params": {
                             "command": "java.project.getClasspaths", "arguments": [source_uri, "{\"scope\":\"runtime\"}"]
                         }})).await?;
                     }
                     LanguageCommand::RefreshMaven { root_pom } => {
+                        if maven_imports.len() >= 8 {
+                            let _ = events.send(LanguageEvent::ServerState("Too many Maven imports pending; wait and retry".into())).await;
+                            continue;
+                        }
                         settings = crate::java::lsp_config::java_settings_for_maven_refresh(&settings);
                         notify(input, "workspace/didChangeConfiguration", json!({"settings": settings.clone()})).await?;
                         let id = next_id;
                         next_id += 1;
+                        maven_imports.insert(id, Instant::now());
                         send(input, json!({"jsonrpc": "2.0", "id": id, "method": "workspace/executeCommand", "params": {
                             "command": "java.project.changeImportedProjects",
                             "arguments": maven_import_arguments(&uri(&root_pom)?)
@@ -1464,16 +1869,35 @@ async fn protocol(
             message = messages.recv() => {
                 let message = message.ok_or_else(|| LspError("JDT LS disconnected".into()))??;
                 if message.get("method").is_some() { server_message(input, &message, &settings, &root_uri, events).await?; }
+                else if message.get("id").and_then(Value::as_u64).is_some_and(|id| maven_imports.remove(&id).is_some()) {
+                    let _ = events.send(LanguageEvent::ServerState(maven_import_status(&message))).await;
+                }
                 else if let Some((_, reply)) = message.get("id").and_then(Value::as_u64).and_then(|id| debug_ports.remove(&id)) {
                     let result = if let Some(error) = message.get("error") { Err(LspError(format!("vscode.java.startDebugSession failed: {error}. Check java-debug/JDT LS compatibility and restart Java intelligence"))) }
                         else { message["result"].as_u64().and_then(|port| u16::try_from(port).ok()).filter(|port| *port != 0)
                             .ok_or_else(|| LspError("Java debug server returned an invalid loopback port".into())) };
                     let _ = reply.send(result);
                 }
-                else if let Some((_, reply)) = message.get("id").and_then(Value::as_u64).and_then(|id| classpaths.remove(&id)) {
-                    let result = if let Some(error) = message.get("error") { Err(LspError(format!("JDT LS classpath resolution failed: {error}"))) }
-                        else { serde_json::from_value(message["result"].clone()).map_err(|error| LspError(format!("Invalid runtime classpath response: {error}"))) };
-                    let _ = reply.send(result);
+                else if let Some(mut request) = message.get("id").and_then(Value::as_u64).and_then(|id| classpaths.remove(&id)) {
+                    if let Some(error) = message.get("error") {
+                        let _ = request.reply.send(Err(LspError(format!("JDT LS runtime project resolution failed: {error}"))));
+                    } else if let Some(mut paths) = request.paths.take() {
+                        match main_project_name(&message["result"], &request.main_class, &request.path) {
+                            Ok(name) => { paths.project_name = name; let _ = request.reply.send(Ok(paths)); }
+                            Err(error) => { let _ = request.reply.send(Err(error)); }
+                        }
+                    } else {
+                        match serde_json::from_value::<RuntimeClasspaths>(message["result"].clone()) {
+                            Ok(paths) if paths.project_name.as_deref().is_none_or(str::is_empty) && !bundles.is_empty() => {
+                                request.paths = Some(paths);
+                                let id = next_id; next_id += 1;
+                                classpaths.insert(id, request);
+                                send(input, json!({"jsonrpc":"2.0", "id":id, "method":"workspace/executeCommand", "params":{"command":"vscode.java.resolveMainClass", "arguments":[]}})).await?;
+                            }
+                            Ok(paths) => { let _ = request.reply.send(Ok(paths)); }
+                            Err(error) => { let _ = request.reply.send(Err(LspError(format!("Invalid runtime classpath response: {error}")))); }
+                        }
+                    }
                 }
                 else if let Some((query, _)) = message.get("id").and_then(Value::as_u64).and_then(|id| pending_symbols.remove(&id)) {
                     let result = if let Some(error) = message.get("error") {
@@ -1490,14 +1914,21 @@ async fn protocol(
                 }
             }
             _ = heartbeat.tick() => {
+                let expired_imports: Vec<_> = maven_imports.iter().filter(|(_, sent)| sent.elapsed() > Duration::from_secs(90)).map(|(id, _)| *id).collect();
+                for id in expired_imports {
+                    maven_imports.remove(&id);
+                    notify(input, "$/cancelRequest", json!({"id":id})).await?;
+                    let _ = events.send(LanguageEvent::ServerState("Maven import request timed out; refresh Maven and retry".into())).await;
+                }
+
                 let expired_debug: Vec<_> = debug_ports.iter().filter(|(_, (sent, reply))| reply.is_closed() || sent.elapsed() > Duration::from_secs(60)).map(|(id, _)| *id).collect();
                 for id in expired_debug {
                     if let Some((_, reply)) = debug_ports.remove(&id) { let _ = reply.send(Err(LspError("Debug server start request timed out or was cancelled".into()))); }
                     notify(input, "$/cancelRequest", json!({"id": id})).await?;
                 }
-                let expired_paths: Vec<_> = classpaths.iter().filter(|(_, (sent, reply))| reply.is_closed() || sent.elapsed() > Duration::from_secs(60)).map(|(id, _)| *id).collect();
+                let expired_paths: Vec<_> = classpaths.iter().filter(|(_, request)| request.reply.is_closed() || request.sent.elapsed() > Duration::from_secs(60)).map(|(id, _)| *id).collect();
                 for id in expired_paths {
-                    if let Some((_, reply)) = classpaths.remove(&id) { let _ = reply.send(Err(LspError("Runtime classpath request timed out or was cancelled".into()))); }
+                    if let Some(request) = classpaths.remove(&id) { let _ = request.reply.send(Err(LspError("Runtime classpath request timed out or was cancelled".into()))); }
                     notify(input, "$/cancelRequest", json!({"id": id})).await?;
                 }
                 let expired: Vec<_> = pending.iter().filter(|(_, request)| request.sent.elapsed() > Duration::from_secs(30)).map(|(id, _)| *id).collect();
@@ -3432,6 +3863,31 @@ fn maven_root_pom(
         .cloned()
 }
 
+fn maven_import_status(response: &Value) -> String {
+    match response.get("error") {
+        Some(error) => format!("Maven import failed: {error}"),
+        None => "Maven import request completed".into(),
+    }
+}
+
+#[cfg(test)]
+mod maven_import_status_tests {
+    use super::*;
+
+    #[test]
+    fn import_response_reports_server_errors_and_command_completion() {
+        let status = maven_import_status(
+            &json!({"id":7,"error":{"code":-32603,"message":"Import failed: invalid POM"}}),
+        );
+        assert!(status.starts_with("Maven import failed:"));
+        assert!(status.contains("invalid POM"));
+        assert_eq!(
+            maven_import_status(&json!({"id":8,"result":null})),
+            "Maven import request completed"
+        );
+    }
+}
+
 fn maven_import_arguments(root_pom_uri: &str) -> Value {
     json!([[root_pom_uri], [], []])
 }
@@ -3574,40 +4030,43 @@ pub fn render(ui: &mut eframe::egui::Ui, state: &mut crate::app::AppState) {
             }
         }
         if let Some(items) = state.language.diagnostics.get(path) {
-            egui::CollapsingHeader::new(format!("Java diagnostics ({})", items.len())).show(
+            egui::CollapsingHeader::new(crate::i18n::ui_format(
                 ui,
-                |ui| {
-                    egui::ScrollArea::vertical()
-                        .id_salt("java_diagnostics")
-                        .max_height(100.0)
-                        .show(ui, |ui| {
-                            for diagnostic in items {
-                                let severity = match diagnostic.severity {
-                                    Some(1) => "Error",
-                                    Some(2) => "Warning",
-                                    _ => "Info",
-                                };
-                                if ui
-                                    .selectable_label(
-                                        false,
-                                        format!(
-                                            "{severity} {}:{} {}",
-                                            diagnostic.range.start.line + 1,
-                                            diagnostic.range.start.character + 1,
-                                            diagnostic.message
-                                        ),
-                                    )
-                                    .clicked()
-                                {
-                                    events.push(AppEvent::OpenFileAtPosition(
-                                        path.clone(),
-                                        diagnostic.range.start,
-                                    ));
-                                }
+                "Java diagnostics ({count})",
+                &[("count", &items.len().to_string())],
+            ))
+            .show(ui, |ui| {
+                egui::ScrollArea::vertical()
+                    .id_salt("java_diagnostics")
+                    .max_height(100.0)
+                    .show(ui, |ui| {
+                        for diagnostic in items {
+                            let severity = match diagnostic.severity {
+                                Some(1) => "Error",
+                                Some(2) => "Warning",
+                                _ => "Info",
+                            };
+                            if ui
+                                .selectable_label(
+                                    false,
+                                    format!(
+                                        "{} {}:{} {}",
+                                        crate::i18n::ui_text(ui, severity),
+                                        diagnostic.range.start.line + 1,
+                                        diagnostic.range.start.character + 1,
+                                        diagnostic.message
+                                    ),
+                                )
+                                .clicked()
+                            {
+                                events.push(AppEvent::OpenFileAtPosition(
+                                    path.clone(),
+                                    diagnostic.range.start,
+                                ));
                             }
-                        });
-                },
-            );
+                        }
+                    });
+            });
         }
         if let Some((hover_path, text)) = &state.language.hover {
             if hover_path == path {

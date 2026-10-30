@@ -61,3 +61,231 @@ The command-line link accepts the same optional project or file path: `dist/inte
 The Run Console accepts line input for interactive Java processes. The Build panel summarizes Maven Surefire and Gradle test totals and lists failures from fresh Surefire, Failsafe, and Gradle XML reports; select a failure to open its conventional Java test source and stack-trace line when available, or use **Run class** to rerun that class. The **Problems** tool window combines available Java language-server diagnostics with the latest build diagnostics; selecting a result opens its source location.
 
 The first release targets macOS and Java projects using Maven or Gradle. Use **File → New Java Project…** to create a minimal Maven or Gradle starter locally; it creates no wrapper and downloads no tools. The starter includes a run configuration for `Main`; select an installed JDK before launching. **Run** builds the project first and asks before saving open project files with unsaved changes; a failed build does not launch the program. Start, stop, or manage configurations from the **Run** menu. Use a project-tree directory's context menu to create a Java class; an optional package name creates matching subdirectories beneath the selected directory. Set Java indentation to 1–8 spaces or tabs in **Settings**; the editor and Java formatter use the same preference. Parent, root, and nested `.editorconfig` files override these choices by file pattern up to the nearest `root=true`. Files up to 16 MiB are editable; files above 256 KiB use a bounded page editor that keeps the complete document available for save and find/replace. **Find in Project** also supports preview-first replacement: review and select matching files before applying edits to editor buffers, then save those files to keep the changes. Run configurations can select a Maven/Gradle module or detect one from the main class; the JPMS module name remains a separate launch option. The app also includes an integrated terminal, local Git operations, and a Java debugger. Java language services depend on installed or packaged JDT LS and Java Debug Server tooling; editing and builds remain available if optional Java tooling is unavailable.
+
+## IntelliJ reverse-engineering evidence
+
+The local reference inspected with REA 6.7.0 is IntelliJ IDEA Ultimate 2026.3,
+build `IU-263.7307.44`. Run REA with Node 26 when reproducing these observations.
+In this session, the default Node 20 invocation reported an integrity mismatch;
+Node 26 successfully inspected the same logpoint JAR with its previously recorded
+digest. Those failed invocations do not establish that the installed JAR changed.
+
+```sh
+node --version
+rea inspect-artifact "/Applications/IntelliJ IDEA.app/Contents/plugins/java/lib/modules/intellij.debugger.logpoints.java.jar"
+rea inspect-artifact "/Applications/IntelliJ IDEA.app/Contents/plugins/gradle-plugin/lib/gradle-plugin.jar"
+rea extract-artifact "/Applications/IntelliJ IDEA.app/Contents/plugins/gradle-plugin/lib/gradle-plugin.jar"
+```
+
+The Java logpoint inspection is evidence
+`ev_09ad380733826f3594a075bfd8d4c9758161201d866158b24808ec238e038e21`,
+with SHA-256 `9743442b241193d070c7916dc19867bf1ba4125deff5bb53facde4a591d462b0`.
+The Gradle inspection is evidence
+`ev_20efa51dedcc6166cb3e0be40bd89d1cbad8bc639ccb5627c8d4ac78920a81bf`,
+with SHA-256 `b9c8e1b2186d302bca9b0b7fe7b7070c2b18a7521d39e4a2f1d48968ef7ecce8`.
+Gradle extraction evidence
+`ev_4a4a5832b6e2241e69b3c07c4bf7de1892c285fb86ddb7f03b65f45220ec4aef`
+records verified containment and no integrity contradictions.
+
+The extracted `META-INF/plugin.xml` registers `Gradle.ExecuteTask`,
+`Gradle.ToggleOfflineAction`, and `Gradle.RefreshDependencies`, including toolbar
+or menu references. This proves the shipped action registrations; it does not
+establish their runtime behavior. Intelli-gen Settings now provides **Gradle offline mode** for CLI builds, tests,
+builds before Run, and task reports. It passes `--offline` so Gradle uses cached
+dependencies; missing cached dependencies cause Gradle to fail. It also configures the JDT LS Gradle importer through
+`java.import.gradle.offline.enabled`. Use **Apply / restart Java intelligence**
+after changing the preference to update an existing language session. A configured
+Gradle executable in a standard distribution (`bin/gradle` or `bin/gradle.bat`,
+with its launcher JAR under `lib`) also supplies the importer's Gradle home;
+the project wrapper retains precedence. Restart Java intelligence after changing
+that executable. After loading tasks, **Refresh dependencies** beside a `:dependencies` task runs
+that report with `--refresh-dependencies`, using the selected JDK and the normal
+Build output/cancellation flow. The action requires online mode and may contact
+repositories or download dependencies. No JetBrains implementation code is included in Intelli-gen.
+
+## Java tooling runtime verification
+
+A local protocol smoke test on 2026-10-30 started the packaged JDT LS 1.62.0
+with the existing IntelliJ JBR 25.0.4.1 runtime, a temporary workspace, and a
+writable copy of the packaged macOS configuration. It loaded the packaged Java
+Debug Server 0.53.2 plugin, completed LSP `initialize`, executed
+`vscode.java.startDebugSession`, connected to its loopback port, completed DAP
+`initialize`, and shut down JDT LS through LSP `shutdown` / `exit`.
+
+The same test inside the restricted agent sandbox initialized LSP but returned
+`-1` from `startDebugSession`; running it with permission to open local sockets
+succeeded.
+
+An extended test compiled a temporary Java program with debug information and
+registered it as an Eclipse Java project named `smoke`. JDT LS returned its runtime
+classpath. DAP launched the program with that classpath and `projectName`, verified
+a source breakpoint at line 4, and stopped there. Stack and scope requests exposed
+the local `value = 40`; evaluating `value + 2` returned `42`. Step over stopped at
+line 5 with `value = 42`. Continue, program termination, disconnect, and LSP
+shutdown all completed successfully. An earlier fixture without `projectName`
+could inspect locals but could not evaluate expressions; Intelli-gen's launch
+request already supplies that field.
+
+These observations verify the installed tools through direct protocol requests.
+They do not verify Intelli-gen's Rust worker integration, Maven/Gradle project
+import, or native UI interactions. The tests did not download tooling or change
+the IDE's configured JDK.
+
+The optional Rust test `live_java_debug_transport` also passed against that live
+adapter. It exercises the production `DapConnection` / `DapClient` transport,
+including concurrent launch/configuration requests, breakpoint verification,
+stack/scopes/locals, expression evaluation, step over, continue, termination,
+and disconnect. The app's session reducer and native widgets remain unverified.
+
+To run this test, start JDT LS with the debug plugin and import an Eclipse Java
+project named `smoke`. Compile the following `Main.java` into its `bin/` directory
+with `javac -g -d bin Main.java`; preserve these source line numbers:
+
+```java
+public class Main {
+  public static void main(String[] args) {
+    int value = 40;
+    value += 2;
+    System.out.println(value);
+  }
+}
+```
+
+Execute `vscode.java.startDebugSession` through LSP, then set
+`INTELLI_GEN_DAP_PORT` to the returned loopback port,
+`INTELLI_GEN_DAP_PROJECT` to the absolute project directory, and
+`INTELLI_GEN_DAP_JAVA` to the absolute Java executable. With JDT LS still running,
+execute `cargo test live_java_debug_transport -- --ignored`. Local socket
+permissions are required. The test launches and terminates this fixture program.
+
+When runtime classpaths omit `projectName`, Intelli-gen asks the installed Java
+Debug Server for `vscode.java.resolveMainClass` and matches both the main class
+and its source path. This preserves the server's logical project name when it
+differs from the source directory name, which is important for expression
+evaluation in remapped Gradle modules. Existing name inference remains available
+when the server returns no matching main class.
+
+The optional `live_worker_resolves_server_project_name` test passed using the
+production `JavaLanguageService` worker and `ClasspathResolver`. It started the
+packaged server, received runtime classpaths, resolved the server project name
+`smoke` rather than the deliberately incorrect model name `directory-fallback`,
+and joined the language worker after shutdown.
+
+For this test, use the same `smoke` fixture with an Eclipse `.project` declaring
+`org.eclipse.jdt.core.javanature` and a `.classpath` with the source root, JRE
+container, and `bin` output directory. Set `INTELLI_GEN_DAP_PROJECT` to the fixture,
+`INTELLI_GEN_JAVA_HOME` to a Java 25+ JDK home, and
+`INTELLI_GEN_JAVA_RESOURCES` to the packaged app's `Contents/Resources` directory.
+Run `cargo test live_worker_resolves_server_project_name -- --ignored`. This test
+starts its own JDT LS process and uses a sibling `rust-worker-workspace` directory
+for temporary language-server data; run it with a disposable fixture directory.
+
+The same live worker test now also starts the production `DebugService` with an
+initial source breakpoint. It verifies the `Stopped` state, stack location,
+expression result, step over, final console output `42`, normal termination,
+worker reaping, and cleanup without requiring a language-host restart. The Java
+adapter in this run omitted an exit code; the session correctly retained `None`
+rather than inventing a successful code. This covers the debug session worker;
+the app event reducer and native UI still require end-to-end verification.
+
+The live worker test additionally reuses the same language host for a second
+debug session. It builds the initial requests through the production breakpoint
+model: a conditional logpoint at line 4 emits `smoke=40`, and an ordinary
+breakpoint stops at line 5. The assertion checks that the logpoint did not
+suspend execution. Cancelling this stopped session joins its worker and leaves
+the host reusable without a restart request.
+
+The standard test `italian_gutter_menu_emits_enable_and_disable_intents` drives
+real egui frames with pointer events. It opens the editor gutter popup, locates
+the rendered Italian action label, clicks it, and checks the resulting enable or
+disable intent for breakpoints and logpoints. This verifies the widget flow
+without an OS window; it does not verify native window rendering.
+
+The optional `live_gradle_worker_builds_and_cleans_remapped_module` test passed
+with installed Gradle 6.7.1 and Corretto JDK 8, offline and with an isolated Gradle
+user home. It invokes the production build worker for Build, Test, and Clean, checks
+successful completion events and selected JDK reporting, confirms compilation of
+`custom/app/src/main/java/Main.java`, and checks that Clean removes its `.class`.
+The fixture's settings include `:app` with
+`project(':app').projectDir = file('custom/app')`; its module applies the Java
+plugin and uses only local JUnit/Hamcrest JARs for its test dependencies.
+
+To repeat it, set `INTELLI_GEN_GRADLE_PROJECT` to a disposable fixture root,
+`INTELLI_GEN_GRADLE` to the installed executable, and
+`INTELLI_GEN_BUILD_JAVA_HOME` to a compatible JDK home. Set `GRADLE_USER_HOME` to a
+temporary directory and run
+`cargo test live_gradle_worker_builds_and_cleans_remapped_module -- --ignored`.
+It executes Clean, so use only a disposable fixture. The test expects two JUnit tests, one deliberately failing. It checks exit code
+`1`, totals of two tests / one passed / one failed, and the failed method’s source
+path and line parsed from the XML report. The native Build panel remains
+unverified.
+
+For the extended Gradle fixture, place locally installed `junit-4.13.jar` and
+`hamcrest-core-1.3.jar` in `custom/app/lib/` and declare
+`testImplementation files('lib/junit-4.13.jar', 'lib/hamcrest-core-1.3.jar')` in the
+module's `dependencies` block. The tested local copies came from the installed
+Gradle distribution. Add `custom/app/src/test/java/MainTest.java`:
+
+```java
+import org.junit.Test;
+import static org.junit.Assert.*;
+public class MainTest {
+  @Test public void passing() { assertEquals(42, 42); }
+  @Test public void failing() { assertEquals(41, 42); }
+}
+```
+
+The optional `live_maven_worker_prefers_wrapper_and_reports_test_failures` test
+passed with Maven 3.9.9, Corretto JDK 8, and a reactor containing `custom/app`.
+It shares the build/test/clean assertions with the Gradle worker test, which also
+passed again after that refactor. The Maven fixture provides an executable
+`mvnw` that invokes the installed Maven with `--offline`; the configured Maven
+path is deliberately nonexistent to verify wrapper precedence.
+
+Set `INTELLI_GEN_MAVEN_PROJECT` to this disposable reactor and
+`INTELLI_GEN_BUILD_JAVA_HOME` to its JDK, then run
+`cargo test live_maven_worker -- --ignored`. Use the same `Main.java` and JUnit
+`MainTest.java` fixture described above. Its parent POM declares `custom/app`,
+Java source/target 8, and cached plugin versions: compiler 3.11.0, resources 3.3.1,
+jar 3.3.0, Surefire 2.22.1, and clean 3.2.0. The module uses local system-scoped
+`junit:junit:4.13` and `org.hamcrest:hamcrest-core:1.3` JARs. These coordinates are
+needed for Surefire to select JUnit 4. All plugin dependencies and the JUnit 4
+provider must already exist in the local Maven cache; the test downloads nothing.
+
+The live language/debug worker test also passed with a minimal Maven project
+containing only a POM and conventional Java sources, without an Eclipse
+`.project` or `.classpath`. In this case it discovers the Maven model, issues the
+production `RefreshMaven` command, waits for `Maven import request completed`,
+then polls for up to 60 seconds for the imported `target/classes` classpath
+(command acknowledgement can precede import completion). It checks the server
+project name and runs the same two debug
+sessions (breakpoint/evaluation/stepping plus conditional logpoint/cancellation).
+
+To reproduce this variant, use the same environment and ignored test command,
+but provide a POM with group/artifact `smoke:smoke`, version `1`, and Java
+source/target/release `25`, without dependencies. Put the seven-line `Main.java`
+fixture in `src/main/java/` and compile it with debug information into
+`target/classes` before the test. The fixture intentionally uses a different
+physical directory name from its Maven artifact name. This verifies the import
+and debug workers together; native project opening and widget routing remain
+outside this test.
+
+The same live worker test passed for a Gradle 8.12.1 project with no Eclipse
+metadata or wrapper, using its local distribution and an isolated Gradle cache
+in offline mode. The project JDK was GraalVM Java 23; the language server and
+debug launch used JBR Java 25. It checked the server project name `smoke-project`,
+the imported `bin/main` classpath and compiled `Main.class`, then completed both
+debug sessions. Evaluating `System.getProperty("java.specification.version")`
+inside the debuggee confirmed Java 25. These are worker-level checks, not native
+UI verification.
+
+To reproduce the Gradle variant, use a disposable directory named `project`,
+`settings.gradle` containing `rootProject.name = 'smoke'`, and `build.gradle`
+containing `plugins { id 'java' }`. Put the same seven-line `Main.java` under
+`src/main/java/` and run the installed Gradle's `--offline --no-daemon classes`
+with Java 23 first. Set `INTELLI_GEN_DAP_PROJECT`, `INTELLI_GEN_JAVA_HOME` and
+`INTELLI_GEN_JAVA_RESOURCES` as above, plus `INTELLI_GEN_PROJECT_JAVA_HOME` to
+Java 23 and `INTELLI_GEN_GRADLE_HOME` to the Gradle distribution root. Keep
+`GRADLE_USER_HOME` on the same disposable cache for the build and test. Run
+`cargo test live_worker_resolves_server_project_name -- --ignored`; it starts
+JDT LS and uses the same breakpoint, stepping, evaluation and logpoint checks.
