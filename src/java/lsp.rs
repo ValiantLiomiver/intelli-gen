@@ -528,6 +528,74 @@ fn main_project_name(
 mod main_project_tests {
     use super::*;
 
+    #[tokio::test]
+    #[ignore = "requires INTELLI_GEN_JAVA_HOME, INTELLI_GEN_JAVA_RESOURCES and INTELLI_GEN_DAP_PROJECT smoke fixture"]
+    async fn live_worker_resolves_server_project_name() {
+        let root = PathBuf::from(std::env::var_os("INTELLI_GEN_DAP_PROJECT").unwrap());
+        let home = PathBuf::from(std::env::var_os("INTELLI_GEN_JAVA_HOME").unwrap());
+        let resources = PathBuf::from(std::env::var_os("INTELLI_GEN_JAVA_RESOURCES").unwrap());
+        let jdk = crate::java::jdk::JdkCatalog::add(&home).unwrap();
+        let executable = resources.parent().unwrap().join("MacOS/intelli-gen");
+        let resolved = crate::java::lsp_config::resolve_jdtls(
+            &crate::settings::UserSettings::default(),
+            &executable,
+        )
+        .unwrap();
+        let bundle = crate::java::lsp_config::resolve_debug_bundle(
+            &crate::settings::UserSettings::default(),
+            &executable,
+        )
+        .unwrap();
+        let config = JdtlsConfig {
+            executable: resolved.display_path,
+            launcher_arguments: resolved.arguments,
+            lombok_agent: None,
+            lombok_declared: false,
+            shared_configuration: resolved.shared_configuration,
+            package_version: resolved.package_version,
+            runtime_jdk_id: jdk.id.clone(),
+            project_jdk_id: Some(jdk.id.clone()),
+            gradle_offline: true,
+            workspace_data: root.parent().unwrap().join("rust-worker-workspace"),
+            jdks: vec![jdk],
+            debug_bundle: Some(bundle),
+            debug_bundle_error: None,
+        };
+        let project = ProjectModel {
+            root: root.clone(),
+            name: "directory-fallback".into(),
+            kind: crate::project::ProjectKind::Unknown,
+            modules: Vec::new(),
+            wrapper: None,
+        };
+        let mut session = JavaLanguageService::start(&project, &config).unwrap();
+        tokio::time::timeout(Duration::from_secs(90), async {
+            loop {
+                let update = session.events.recv().await.expect("language worker event");
+                if let LanguageEvent::ServerState(message) = update.event {
+                    assert!(
+                        !message.starts_with("Java intelligence unavailable:"),
+                        "{message}"
+                    );
+                    if message == "Java intelligence ready" {
+                        break;
+                    }
+                }
+            }
+        })
+        .await
+        .expect("language worker ready");
+        let resolver = ClasspathResolver {
+            commands: session.commands.clone(),
+            root,
+        };
+        let paths = resolver.resolve(&project, "Main", None).await.unwrap();
+        assert_eq!(paths.project_name.as_deref(), Some("smoke"));
+        assert!(paths.classpaths.iter().any(|path| path.ends_with("bin")));
+        session.shutdown();
+        session.worker.take().unwrap().join().unwrap();
+    }
+
     #[test]
     fn server_project_name_is_selected_by_main_class_and_source() {
         let result = json!([

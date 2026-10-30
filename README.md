@@ -160,3 +160,18 @@ and its source path. This preserves the server's logical project name when it
 differs from the source directory name, which is important for expression
 evaluation in remapped Gradle modules. Existing name inference remains available
 when the server returns no matching main class.
+
+The optional `live_worker_resolves_server_project_name` test passed using the
+production `JavaLanguageService` worker and `ClasspathResolver`. It started the
+packaged server, received runtime classpaths, resolved the server project name
+`smoke` rather than the deliberately incorrect model name `directory-fallback`,
+and joined the language worker after shutdown.
+
+For this test, use the same `smoke` fixture with an Eclipse `.project` declaring
+`org.eclipse.jdt.core.javanature` and a `.classpath` with the source root, JRE
+container, and `bin` output directory. Set `INTELLI_GEN_DAP_PROJECT` to the fixture,
+`INTELLI_GEN_JAVA_HOME` to a Java 25+ JDK home, and
+`INTELLI_GEN_JAVA_RESOURCES` to the packaged app's `Contents/Resources` directory.
+Run `cargo test live_worker_resolves_server_project_name -- --ignored`. This test
+starts its own JDT LS process and uses a sibling `rust-worker-workspace` directory
+for temporary language-server data; run it with a disposable fixture directory.
