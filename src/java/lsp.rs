@@ -1702,6 +1702,7 @@ async fn protocol(
     let mut debug_ports: HashMap<u64, (Instant, oneshot::Sender<Result<u16, LspError>>)> =
         HashMap::new();
     let mut classpaths: HashMap<u64, PendingClasspaths> = HashMap::new();
+    let mut maven_imports: HashMap<u64, Instant> = HashMap::new();
     let mut heartbeat = tokio::time::interval(Duration::from_secs(1));
     loop {
         if *cancellation.borrow() {
@@ -1731,10 +1732,15 @@ async fn protocol(
                         }})).await?;
                     }
                     LanguageCommand::RefreshMaven { root_pom } => {
+                        if maven_imports.len() >= 8 {
+                            let _ = events.send(LanguageEvent::ServerState("Too many Maven imports pending; wait and retry".into())).await;
+                            continue;
+                        }
                         settings = crate::java::lsp_config::java_settings_for_maven_refresh(&settings);
                         notify(input, "workspace/didChangeConfiguration", json!({"settings": settings.clone()})).await?;
                         let id = next_id;
                         next_id += 1;
+                        maven_imports.insert(id, Instant::now());
                         send(input, json!({"jsonrpc": "2.0", "id": id, "method": "workspace/executeCommand", "params": {
                             "command": "java.project.changeImportedProjects",
                             "arguments": maven_import_arguments(&uri(&root_pom)?)
@@ -1793,6 +1799,9 @@ async fn protocol(
             message = messages.recv() => {
                 let message = message.ok_or_else(|| LspError("JDT LS disconnected".into()))??;
                 if message.get("method").is_some() { server_message(input, &message, &settings, &root_uri, events).await?; }
+                else if message.get("id").and_then(Value::as_u64).is_some_and(|id| maven_imports.remove(&id).is_some()) {
+                    let _ = events.send(LanguageEvent::ServerState(maven_import_status(&message))).await;
+                }
                 else if let Some((_, reply)) = message.get("id").and_then(Value::as_u64).and_then(|id| debug_ports.remove(&id)) {
                     let result = if let Some(error) = message.get("error") { Err(LspError(format!("vscode.java.startDebugSession failed: {error}. Check java-debug/JDT LS compatibility and restart Java intelligence"))) }
                         else { message["result"].as_u64().and_then(|port| u16::try_from(port).ok()).filter(|port| *port != 0)
@@ -1835,6 +1844,13 @@ async fn protocol(
                 }
             }
             _ = heartbeat.tick() => {
+                let expired_imports: Vec<_> = maven_imports.iter().filter(|(_, sent)| sent.elapsed() > Duration::from_secs(90)).map(|(id, _)| *id).collect();
+                for id in expired_imports {
+                    maven_imports.remove(&id);
+                    notify(input, "$/cancelRequest", json!({"id":id})).await?;
+                    let _ = events.send(LanguageEvent::ServerState("Maven import request timed out; refresh Maven and retry".into())).await;
+                }
+
                 let expired_debug: Vec<_> = debug_ports.iter().filter(|(_, (sent, reply))| reply.is_closed() || sent.elapsed() > Duration::from_secs(60)).map(|(id, _)| *id).collect();
                 for id in expired_debug {
                     if let Some((_, reply)) = debug_ports.remove(&id) { let _ = reply.send(Err(LspError("Debug server start request timed out or was cancelled".into()))); }
@@ -3775,6 +3791,31 @@ fn maven_root_pom(
         .iter()
         .min_by_key(|path| path.components().count())
         .cloned()
+}
+
+fn maven_import_status(response: &Value) -> String {
+    match response.get("error") {
+        Some(error) => format!("Maven import failed: {error}"),
+        None => "Maven import request completed".into(),
+    }
+}
+
+#[cfg(test)]
+mod maven_import_status_tests {
+    use super::*;
+
+    #[test]
+    fn import_response_reports_server_errors_and_command_completion() {
+        let status = maven_import_status(
+            &json!({"id":7,"error":{"code":-32603,"message":"Import failed: invalid POM"}}),
+        );
+        assert!(status.starts_with("Maven import failed:"));
+        assert!(status.contains("invalid POM"));
+        assert_eq!(
+            maven_import_status(&json!({"id":8,"result":null})),
+            "Maven import request completed"
+        );
+    }
 }
 
 fn maven_import_arguments(root_pom_uri: &str) -> Value {
