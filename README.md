@@ -92,6 +92,7 @@ The extracted `META-INF/plugin.xml` registers `Gradle.ExecuteTask`,
 or menu references. This proves the shipped action registrations; it does not
 establish their runtime behavior. Intelli-gen Settings now provides **Gradle offline mode** for CLI builds, tests,
 builds before Run, and task reports. It passes `--offline` so Gradle uses cached
-dependencies; missing cached dependencies cause Gradle to fail. This preference
-does not configure the separate JDT LS Gradle importer. Dependency refresh remains
+dependencies; missing cached dependencies cause Gradle to fail. It also configures the JDT LS Gradle importer through
+`java.import.gradle.offline.enabled`. Use **Apply / restart Java intelligence**
+after changing the preference to update an existing language session. Dependency refresh remains
 a comparison target for further implementation. No JetBrains implementation code is included in Intelli-gen.

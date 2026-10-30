@@ -14,10 +14,26 @@ mod maven_import_tests {
 
     #[test]
     fn default_settings_disable_maven_import_and_keep_gradle_enabled() {
-        let imports = default_java_import_settings(json!("/jdk/home"));
+        let imports = default_java_import_settings(json!("/jdk/home"), false);
         assert_eq!(imports["maven"]["enabled"], false);
         assert_eq!(imports["gradle"]["enabled"], true);
         assert_eq!(imports["gradle"]["java"]["home"], "/jdk/home");
+        assert_eq!(imports["gradle"]["offline"]["enabled"], false);
+    }
+
+    #[test]
+    fn gradle_offline_import_setting_survives_maven_refresh() {
+        let initial =
+            json!({"java": {"import": default_java_import_settings(json!("/jdk/home"), true)}});
+        let refreshed = java_settings_for_maven_refresh(&initial);
+        assert_eq!(
+            refreshed["java"]["import"]["gradle"]["offline"]["enabled"],
+            true
+        );
+        assert_eq!(
+            refreshed["java"]["import"]["gradle"]["java"]["home"],
+            "/jdk/home"
+        );
     }
 
     #[test]
@@ -214,6 +230,7 @@ pub struct JdtlsConfig {
     pub shared_configuration: Option<PathBuf>,
     pub package_version: Option<OsString>,
     pub runtime_jdk_id: String,
+    pub gradle_offline: bool,
     pub workspace_data: PathBuf,
     pub jdks: Vec<JdkInstallation>,
     pub project_jdk_id: Option<String>,
@@ -221,10 +238,10 @@ pub struct JdtlsConfig {
     pub debug_bundle_error: Option<String>,
 }
 
-pub(crate) fn default_java_import_settings(gradle_java_home: Value) -> Value {
+pub(crate) fn default_java_import_settings(gradle_java_home: Value, offline: bool) -> Value {
     json!({
         "maven": {"enabled": false},
-        "gradle": {"enabled": true, "java": {"home": gradle_java_home}}
+        "gradle": {"enabled": true, "java": {"home": gradle_java_home}, "offline": {"enabled": offline}}
     })
 }
 
@@ -266,6 +283,7 @@ impl JdtlsConfig {
             shared_configuration: resolved.shared_configuration,
             package_version: resolved.package_version,
             runtime_jdk_id,
+            gradle_offline: settings.gradle_offline,
             workspace_data: dirs
                 .data_local_dir()
                 .join("jdtls")
@@ -343,7 +361,7 @@ impl JdtlsConfig {
             // This preference is shared with Gradle, so retain automatic
             // updates while the Maven importer itself is disabled by default.
             "configuration": {"runtimes": runtimes, "updateBuildConfiguration": "automatic"},
-            "import": default_java_import_settings(json!(project_jdk.home)),
+            "import": default_java_import_settings(json!(project_jdk.home), self.gradle_offline),
             "autobuild": {"enabled": true}
         }}))
     }

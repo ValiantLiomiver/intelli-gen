@@ -3791,7 +3791,7 @@ pub fn jdk_settings_ui(ui: &mut egui::Ui, state: &mut AppState) {
         )
         .on_hover_text(crate::i18n::ui_text(
             ui,
-            "Use cached dependencies for Gradle builds and task reports.",
+            "Use cached dependencies for Gradle builds, task reports, and Java imports. Restart Java intelligence to update imports.",
         ))
         .changed();
     if changed {
