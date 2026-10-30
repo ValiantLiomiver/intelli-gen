@@ -199,17 +199,34 @@ without an OS window; it does not verify native window rendering.
 
 The optional `live_gradle_worker_builds_and_cleans_remapped_module` test passed
 with installed Gradle 6.7.1 and Corretto JDK 8, offline and with an isolated Gradle
-user home. It invokes the production build worker for Build and Clean, checks
+user home. It invokes the production build worker for Build, Test, and Clean, checks
 successful completion events and selected JDK reporting, confirms compilation of
 `custom/app/src/main/java/Main.java`, and checks that Clean removes its `.class`.
 The fixture's settings include `:app` with
 `project(':app').projectDir = file('custom/app')`; its module applies the Java
-plugin and has no external dependencies.
+plugin and uses only local JUnit/Hamcrest JARs for its test dependencies.
 
 To repeat it, set `INTELLI_GEN_GRADLE_PROJECT` to a disposable fixture root,
 `INTELLI_GEN_GRADLE` to the installed executable, and
 `INTELLI_GEN_BUILD_JAVA_HOME` to a compatible JDK home. Set `GRADLE_USER_HOME` to a
 temporary directory and run
 `cargo test live_gradle_worker_builds_and_cleans_remapped_module -- --ignored`.
-It executes Clean, so use only a disposable fixture. This test does not cover
-JUnit execution or the native Build panel.
+It executes Clean, so use only a disposable fixture. The test expects two JUnit tests, one deliberately failing. It checks exit code
+`1`, totals of two tests / one passed / one failed, and the failed method’s source
+path and line parsed from the XML report. The native Build panel remains
+unverified.
+
+For the extended Gradle fixture, place locally installed `junit-4.13.jar` and
+`hamcrest-core-1.3.jar` in `custom/app/lib/` and declare
+`testImplementation files('lib/junit-4.13.jar', 'lib/hamcrest-core-1.3.jar')` in the
+module's `dependencies` block. The tested local copies came from the installed
+Gradle distribution. Add `custom/app/src/test/java/MainTest.java`:
+
+```java
+import org.junit.Test;
+import static org.junit.Assert.*;
+public class MainTest {
+  @Test public void passing() { assertEquals(42, 42); }
+  @Test public void failing() { assertEquals(41, 42); }
+}
+```

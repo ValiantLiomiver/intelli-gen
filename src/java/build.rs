@@ -478,7 +478,7 @@ mod gradle_argument_tests {
         let class = project
             .root
             .join("custom/app/build/classes/java/main/Main.class");
-        for task in [BuildTask::Build, BuildTask::Clean] {
+        for task in [BuildTask::Build, BuildTask::Test, BuildTask::Clean] {
             let mut handle = BuildService::start_with_executable(
                 BuildRequest {
                     project: project.clone(),
@@ -493,10 +493,14 @@ mod gradle_argument_tests {
             )
             .unwrap();
             let mut output = String::new();
+            let mut summary = None;
+            let mut failures = Vec::new();
             tokio::time::timeout(Duration::from_secs(120), async {
                 loop {
                     match handle.events.recv().await.expect("build worker completion") {
                         BuildEvent::Output { text, .. } => output.push_str(&text),
+                        BuildEvent::Tests(totals) => summary = Some(totals),
+                        BuildEvent::TestFailures(items) => failures.extend(items),
                         BuildEvent::Finished {
                             exit_code,
                             cancelled,
@@ -504,7 +508,11 @@ mod gradle_argument_tests {
                             jdk: selected,
                             ..
                         } => {
-                            assert_eq!(exit_code, Some(0), "{error:?}\n{output}");
+                            assert_eq!(
+                                exit_code,
+                                Some(if task == BuildTask::Test { 1 } else { 0 }),
+                                "{error:?}\n{output}"
+                            );
                             assert!(!cancelled);
                             assert!(error.is_none(), "{error:?}");
                             assert!(selected.contains(&jdk.home.display().to_string()));
@@ -517,8 +525,34 @@ mod gradle_argument_tests {
             .await
             .expect("build worker completed before timeout");
             handle.worker.take().unwrap().join().unwrap();
-            assert!(output.contains("BUILD SUCCESSFUL"), "{output}");
-            assert_eq!(class.is_file(), task == BuildTask::Build);
+            if task == BuildTask::Test {
+                assert!(output.contains("BUILD FAILED"), "{output}");
+                assert_eq!(
+                    summary,
+                    Some(diagnostics::TestSummary {
+                        total: 2,
+                        passed: 1,
+                        failed: 1,
+                        skipped: 0
+                    })
+                );
+                assert_eq!(failures.len(), 1);
+                assert_eq!(failures[0].class_name, "MainTest");
+                assert_eq!(failures[0].test_name, "failing");
+                assert_eq!(
+                    failures[0].source_path.as_deref(),
+                    Some(
+                        project
+                            .root
+                            .join("custom/app/src/test/java/MainTest.java")
+                            .as_path()
+                    )
+                );
+                assert!(failures[0].source_line.is_some());
+            } else {
+                assert!(output.contains("BUILD SUCCESSFUL"), "{output}");
+            }
+            assert_eq!(class.is_file(), task != BuildTask::Clean);
         }
     }
 
