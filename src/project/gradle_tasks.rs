@@ -324,15 +324,19 @@ fn parse_task_report(project_path: &str, output: &str) -> Vec<GradleTask> {
         }
         let (name, description) = line.split_once(" - ").map_or((line, ""), |parts| parts);
         let name = name.trim();
-        if !valid_task_name(name) {
-            continue;
-        }
         let prefix = if project_path == ":" {
             String::new()
         } else {
             project_path.trim_end_matches(':').to_owned()
         };
-        let path = format!("{prefix}:{name}");
+        let path = if name.starts_with(':') {
+            name.to_owned()
+        } else {
+            format!("{prefix}:{name}")
+        };
+        if !valid_project_path(&path) {
+            continue;
+        }
         tasks.push(GradleTask {
             path,
             description: description.trim().to_owned(),
@@ -359,6 +363,24 @@ fn valid_project_path(path: &str) -> bool {
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn task_report_keeps_qualified_subproject_tasks() {
+        let report = "Tasks runnable from root project\nBuild tasks\n---\napp:build - Assembles and tests this project.\napp:nested:test - Runs tests.\n:other:check - Checks another project.\n../invalid:task - Invalid\napp::task - Invalid\nBUILD SUCCESSFUL\n";
+        let tasks = parse_task_report(":", report);
+        assert_eq!(
+            tasks
+                .iter()
+                .map(|task| task.path.as_str())
+                .collect::<Vec<_>>(),
+            [":app:build", ":app:nested:test", ":other:check"]
+        );
+        let tasks = parse_task_report(
+            ":app",
+            "Tasks runnable from project ':app'\nnested:test - Runs tests.\n",
+        );
+        assert_eq!(tasks[0].path, ":app:nested:test");
+    }
 
     #[test]
     fn task_report_uses_discovered_project_directory_and_gradle_name() {
