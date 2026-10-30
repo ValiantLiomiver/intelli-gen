@@ -477,82 +477,87 @@ pub fn editor_gutter(
             .data(|data| data.get_temp::<String>(draft_id))
             .unwrap_or_default();
         if breakpoints.is_some() {
-            egui::Popup::menu(&response).show(|ui| {
-                if is_disabled {
-                    if ui
-                        .button(crate::i18n::ui_text(ui, "Enable breakpoint"))
-                        .clicked()
-                    {
-                        action = Some(GutterBreakpointAction::SetEnabled {
-                            line,
-                            enabled: true,
-                        });
-                        ui.close();
-                    }
-                } else if is_logpoint {
-                    if ui
-                        .button(crate::i18n::ui_text(ui, "Remove logpoint"))
-                        .clicked()
-                    {
-                        action = Some(GutterBreakpointAction::Toggle(line));
-                        ui.close();
-                    }
-                    if ui
-                        .button(crate::i18n::ui_text(ui, "Disable breakpoint"))
-                        .clicked()
-                    {
-                        action = Some(GutterBreakpointAction::SetEnabled {
-                            line,
-                            enabled: false,
-                        });
-                        ui.close();
-                    }
-                } else {
-                    let label = if has_breakpoint {
-                        "Remove breakpoint"
-                    } else {
-                        "Add breakpoint"
-                    };
-                    if ui.button(crate::i18n::ui_text(ui, label)).clicked() {
-                        action = Some(GutterBreakpointAction::Toggle(line));
-                        ui.close();
-                    }
-                    if has_breakpoint
-                        && ui
+            egui::Popup::menu(&response)
+                .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                .show(|ui| {
+                    if is_disabled {
+                        if ui
+                            .button(crate::i18n::ui_text(ui, "Enable breakpoint"))
+                            .clicked()
+                        {
+                            action = Some(GutterBreakpointAction::SetEnabled {
+                                line,
+                                enabled: true,
+                            });
+                            ui.close();
+                        }
+                    } else if is_logpoint {
+                        if ui
+                            .button(crate::i18n::ui_text(ui, "Remove logpoint"))
+                            .clicked()
+                        {
+                            action = Some(GutterBreakpointAction::Toggle(line));
+                            ui.close();
+                        }
+                        if ui
                             .button(crate::i18n::ui_text(ui, "Disable breakpoint"))
                             .clicked()
-                    {
-                        action = Some(GutterBreakpointAction::SetEnabled {
-                            line,
-                            enabled: false,
-                        });
-                        ui.close();
+                        {
+                            action = Some(GutterBreakpointAction::SetEnabled {
+                                line,
+                                enabled: false,
+                            });
+                            ui.close();
+                        }
+                    } else {
+                        let label = if has_breakpoint {
+                            "Remove breakpoint"
+                        } else {
+                            "Add breakpoint"
+                        };
+                        if ui.button(crate::i18n::ui_text(ui, label)).clicked() {
+                            action = Some(GutterBreakpointAction::Toggle(line));
+                            ui.close();
+                        }
+                        if has_breakpoint
+                            && ui
+                                .button(crate::i18n::ui_text(ui, "Disable breakpoint"))
+                                .clicked()
+                        {
+                            action = Some(GutterBreakpointAction::SetEnabled {
+                                line,
+                                enabled: false,
+                            });
+                            ui.close();
+                        }
+                        ui.separator();
+                        ui.label(crate::i18n::ui_text(ui, "Logpoint message"));
+                        ui.add(
+                            egui::TextEdit::singleline(&mut draft)
+                                .desired_width(220.0)
+                                .char_limit(4096)
+                                .hint_text(crate::i18n::ui_text(
+                                    ui,
+                                    "Message with Java expressions",
+                                )),
+                        );
+                        if ui
+                            .add_enabled(
+                                !draft.trim().is_empty(),
+                                egui::Button::new(crate::i18n::ui_text(ui, "Add logpoint")),
+                            )
+                            .clicked()
+                        {
+                            action = Some(GutterBreakpointAction::SetLogpoint {
+                                line,
+                                message: draft.clone(),
+                            });
+                            draft.clear();
+                            ui.close();
+                        }
                     }
-                    ui.separator();
-                    ui.label(crate::i18n::ui_text(ui, "Logpoint message"));
-                    ui.add(
-                        egui::TextEdit::singleline(&mut draft)
-                            .desired_width(220.0)
-                            .char_limit(4096)
-                            .hint_text(crate::i18n::ui_text(ui, "Message with Java expressions")),
-                    );
-                    if ui
-                        .add_enabled(
-                            !draft.trim().is_empty(),
-                            egui::Button::new(crate::i18n::ui_text(ui, "Add logpoint")),
-                        )
-                        .clicked()
-                    {
-                        action = Some(GutterBreakpointAction::SetLogpoint {
-                            line,
-                            message: draft.clone(),
-                        });
-                        draft.clear();
-                        ui.close();
-                    }
-                }
-                ui.data_mut(|data| data.insert_temp(draft_id, draft));
-            });
+                    ui.data_mut(|data| data.insert_temp(draft_id, draft));
+                });
         }
     }
     action
@@ -640,6 +645,7 @@ mod gutter_ui_tests {
         events: Vec<egui::Event>,
         disabled: bool,
         logpoint: bool,
+        empty: bool,
     ) -> (egui::FullOutput, Option<GutterBreakpointAction>, egui::Pos2) {
         let mut action = None;
         let mut target = egui::Pos2::ZERO;
@@ -667,7 +673,7 @@ mod gutter_ui_tests {
                             &editor,
                             std::path::Path::new("Main.java"),
                             1,
-                            Some(if disabled { &[] } else { &[1] }),
+                            Some(if disabled || empty { &[] } else { &[1] }),
                             Some(if logpoint && !disabled { &[1] } else { &[] }),
                             Some(if disabled { &[1] } else { &[] }),
                             None,
@@ -708,6 +714,7 @@ mod gutter_ui_tests {
             egui::epaint::Shape::Vec(shapes) => {
                 shapes.iter().find_map(|shape| text_position(shape, label))
             }
+
             _ => None,
         }
     }
@@ -724,19 +731,70 @@ mod gutter_ui_tests {
             let (translator, _) =
                 crate::i18n::Translator::load(crate::i18n::LanguagePreference::Italian, None);
             crate::i18n::install(&ctx, &translator);
-            let (_, _, gutter) = frame(&ctx, vec![], disabled, logpoint);
-            frame(&ctx, click(gutter), disabled, logpoint);
-            let (output, _, _) = frame(&ctx, vec![], disabled, logpoint);
+            let (_, _, gutter) = frame(&ctx, vec![], disabled, logpoint, false);
+            frame(&ctx, click(gutter), disabled, logpoint, false);
+            let (output, _, _) = frame(&ctx, vec![], disabled, logpoint, false);
             let button = output
                 .shapes
                 .iter()
                 .find_map(|shape| text_position(&shape.shape, label))
                 .expect("localized gutter menu action");
-            let (_, action, _) = frame(&ctx, click(button), disabled, logpoint);
+            let (_, action, _) = frame(&ctx, click(button), disabled, logpoint, false);
             assert!(
                 matches!(action, Some(GutterBreakpointAction::SetEnabled { line: 1, enabled: value }) if value == enabled),
                 "{action:?}"
             );
+        }
+    }
+
+    #[test]
+    fn gutter_logpoint_dialog_requires_a_message_and_emits_it_in_both_languages() {
+        for (language, hint, add) in [
+            (
+                crate::i18n::LanguagePreference::English,
+                "Message with Java expressions",
+                "Add logpoint",
+            ),
+            (
+                crate::i18n::LanguagePreference::Italian,
+                "Messaggio con espressioni Java",
+                "Aggiungi logpoint",
+            ),
+        ] {
+            for empty_message in [true, false] {
+                let ctx = egui::Context::default();
+                ctx.global_style_mut(|style| style.animation_time = 0.0);
+                let (translator, _) = crate::i18n::Translator::load(language, None);
+                crate::i18n::install(&ctx, &translator);
+                let render = |events| frame(&ctx, events, false, false, true);
+                let (_, _, gutter) = render(vec![]);
+                render(click(gutter));
+                let (mut output, _, _) = render(vec![]);
+                let position = |output: &egui::FullOutput, label| {
+                    output
+                        .shapes
+                        .iter()
+                        .find_map(|shape| text_position(&shape.shape, label))
+                        .unwrap_or_else(|| panic!("missing logpoint control: {label}"))
+                };
+                if !empty_message {
+                    render(click(position(&output, hint)));
+                    let (_, action, _) = render(vec![egui::Event::Text("value={value}".into())]);
+                    assert!(action.is_none(), "typing must not create the logpoint");
+                    output = render(vec![]).0;
+                }
+                let (_, action, _) = render(click(position(&output, add)));
+                if empty_message {
+                    assert!(
+                        action.is_none(),
+                        "empty messages must not create a logpoint"
+                    );
+                } else {
+                    assert!(
+                        matches!(action, Some(GutterBreakpointAction::SetLogpoint { line: 1, message }) if message == "value={value}")
+                    );
+                }
+            }
         }
     }
 }
