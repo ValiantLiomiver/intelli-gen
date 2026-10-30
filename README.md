@@ -175,3 +175,11 @@ container, and `bin` output directory. Set `INTELLI_GEN_DAP_PROJECT` to the fixt
 Run `cargo test live_worker_resolves_server_project_name -- --ignored`. This test
 starts its own JDT LS process and uses a sibling `rust-worker-workspace` directory
 for temporary language-server data; run it with a disposable fixture directory.
+
+The same live worker test now also starts the production `DebugService` with an
+initial source breakpoint. It verifies the `Stopped` state, stack location,
+expression result, step over, final console output `42`, normal termination,
+worker reaping, and cleanup without requiring a language-host restart. The Java
+adapter in this run omitted an exit code; the session correctly retained `None`
+rather than inventing a successful code. This covers the debug session worker;
+the app event reducer and native UI still require end-to-end verification.

@@ -592,6 +592,112 @@ mod main_project_tests {
         let paths = resolver.resolve(&project, "Main", None).await.unwrap();
         assert_eq!(paths.project_name.as_deref(), Some("smoke"));
         assert!(paths.classpaths.iter().any(|path| path.ends_with("bin")));
+        let resolver = DebugAdapterResolver {
+            commands: session.commands.clone(),
+            root: project.root.clone(),
+            bundle: config.debug_bundle.clone(),
+        };
+        let service = crate::debugger::DebugService::new(
+            resolver,
+            config.debug_bundle.clone().unwrap(),
+        )
+        .with_initial_requests(vec![(
+            "setBreakpoints".into(),
+            json!({"source":{"path":project.root.join("Main.java")},"breakpoints":[{"line":4}]}),
+        )]);
+        let mut run = crate::java::run_config::RunConfiguration::new(&project.root);
+        run.main_class = "Main".into();
+        let mut debug = service.start(&run, &project, &config.jdks[0]).unwrap();
+        async fn stopped(debug: &mut crate::debugger::session::DebugSession) -> i64 {
+            tokio::time::timeout(Duration::from_secs(30), async {
+                loop {
+                    for event in debug.poll() {
+                        match event {
+                            crate::debugger::session::DebugEvent::Stopped { thread_id, .. } => {
+                                return thread_id.unwrap();
+                            }
+                            crate::debugger::session::DebugEvent::Failed(error) => {
+                                panic!("debug worker failed: {error}")
+                            }
+                            _ => {}
+                        }
+                    }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await
+            .expect("debug worker stopped at breakpoint")
+        }
+        let thread = stopped(&mut debug).await;
+        assert!(matches!(
+            debug.state(),
+            crate::debugger::DebugState::Stopped
+        ));
+        let client = debug.client();
+        let stack = client
+            .request("stackTrace", json!({"threadId":thread}))
+            .await
+            .unwrap();
+        let frame = &stack["stackFrames"][0];
+        assert_eq!(frame["line"], 4);
+        let value = client
+            .request(
+                "evaluate",
+                json!({"frameId":frame["id"],"expression":"value + 2","context":"watch"}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(value["result"], "42");
+        client
+            .request("next", json!({"threadId":thread}))
+            .await
+            .unwrap();
+        let thread = stopped(&mut debug).await;
+        let stack = client
+            .request("stackTrace", json!({"threadId":thread}))
+            .await
+            .unwrap();
+        assert_eq!(stack["stackFrames"][0]["line"], 5);
+        client
+            .request("continue", json!({"threadId":thread}))
+            .await
+            .unwrap();
+        let mut output_seen = false;
+        tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                for event in debug.poll() {
+                    match event {
+                        crate::debugger::session::DebugEvent::Failed(error) => {
+                            panic!("debug worker failed: {error}")
+                        }
+                        crate::debugger::session::DebugEvent::Output { text, .. } => {
+                            output_seen |= text.lines().any(|line| line.trim() == "42")
+                        }
+                        _ => {}
+                    }
+                }
+                if let Some(result) = debug.reap() {
+                    result.unwrap();
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("debug worker terminated and joined");
+        match debug.state() {
+            crate::debugger::DebugState::Terminated {
+                exit_code,
+                cancelled: false,
+            } => {
+                if let Some(code) = exit_code {
+                    assert_eq!(code, 0);
+                }
+            }
+            state => panic!("unexpected final state: {state:?}"),
+        }
+        assert!(output_seen, "debuggee must print its final value");
+        assert!(!debug.needs_host_restart());
         session.shutdown();
         session.worker.take().unwrap().join().unwrap();
     }
