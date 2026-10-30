@@ -299,6 +299,41 @@ mod tests {
     use super::*;
 
     #[test]
+    fn builtin_catalogs_parse_and_preserve_translation_parameters() {
+        let english = parse_catalog(ENGLISH).expect("valid English catalog");
+        let italian = parse_catalog(ITALIAN).expect("valid Italian catalog");
+        assert_eq!(
+            english.keys().collect::<std::collections::BTreeSet<_>>(),
+            italian.keys().collect::<std::collections::BTreeSet<_>>(),
+            "built-in catalogs must expose the same keys"
+        );
+        let parameters = |text: &str| {
+            text.match_indices('{')
+                .filter_map(|(start, _)| {
+                    text[start + 1..]
+                        .find('}')
+                        .map(|end| text[start + 1..start + 1 + end].to_owned())
+                })
+                .collect::<std::collections::BTreeSet<_>>()
+        };
+        for (key, value) in &english {
+            let translated = italian
+                .get(key)
+                .unwrap_or_else(|| panic!("missing Italian key: {key}"));
+            assert_eq!(
+                parameters(key),
+                parameters(value),
+                "English parameters: {key}"
+            );
+            assert_eq!(
+                parameters(key),
+                parameters(translated),
+                "Italian parameters: {key}"
+            );
+        }
+    }
+
+    #[test]
     fn ini_catalog_parses_escaped_equals_and_newlines() {
         let catalog =
             parse_catalog("# comment\nEnvironment (NAME\\=value)=A\\=B\\nnext line\n; comment\n")
