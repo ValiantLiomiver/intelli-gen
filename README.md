@@ -110,7 +110,19 @@ Debug Server 0.53.2 plugin, completed LSP `initialize`, executed
 
 The same test inside the restricted agent sandbox initialized LSP but returned
 `-1` from `startDebugSession`; running it with permission to open local sockets
-succeeded. This observation verifies startup and protocol compatibility of the
-installed tools. It does not verify Intelli-gen's Rust worker integration, a Java
-program launch, breakpoints, stepping, or native UI interactions. The test did not
-download tooling or change the IDE's configured JDK.
+succeeded.
+
+An extended test compiled a temporary Java program with debug information and
+registered it as an Eclipse Java project named `smoke`. JDT LS returned its runtime
+classpath. DAP launched the program with that classpath and `projectName`, verified
+a source breakpoint at line 4, and stopped there. Stack and scope requests exposed
+the local `value = 40`; evaluating `value + 2` returned `42`. Step over stopped at
+line 5 with `value = 42`. Continue, program termination, disconnect, and LSP
+shutdown all completed successfully. An earlier fixture without `projectName`
+could inspect locals but could not evaluate expressions; Intelli-gen's launch
+request already supplies that field.
+
+These observations verify the installed tools through direct protocol requests.
+They do not verify Intelli-gen's Rust worker integration, Maven/Gradle project
+import, or native UI interactions. The tests did not download tooling or change
+the IDE's configured JDK.
