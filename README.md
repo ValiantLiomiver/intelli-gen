@@ -94,7 +94,11 @@ establish their runtime behavior. Intelli-gen Settings now provides **Gradle off
 builds before Run, and task reports. It passes `--offline` so Gradle uses cached
 dependencies; missing cached dependencies cause Gradle to fail. It also configures the JDT LS Gradle importer through
 `java.import.gradle.offline.enabled`. Use **Apply / restart Java intelligence**
-after changing the preference to update an existing language session. After loading tasks, **Refresh dependencies** beside a `:dependencies` task runs
+after changing the preference to update an existing language session. A configured
+Gradle executable in a standard distribution (`bin/gradle` or `bin/gradle.bat`,
+with its launcher JAR under `lib`) also supplies the importer's Gradle home;
+the project wrapper retains precedence. Restart Java intelligence after changing
+that executable. After loading tasks, **Refresh dependencies** beside a `:dependencies` task runs
 that report with `--refresh-dependencies`, using the selected JDK and the normal
 Build output/cancellation flow. The action requires online mode and may contact
 repositories or download dependencies. No JetBrains implementation code is included in Intelli-gen.
@@ -252,7 +256,9 @@ The live language/debug worker test also passed with a minimal Maven project
 containing only a POM and conventional Java sources, without an Eclipse
 `.project` or `.classpath`. In this case it discovers the Maven model, issues the
 production `RefreshMaven` command, waits for `Maven import request completed`,
-resolves `target/classes` and the server project name, and runs the same two debug
+then polls for up to 60 seconds for the imported `target/classes` classpath
+(command acknowledgement can precede import completion). It checks the server
+project name and runs the same two debug
 sessions (breakpoint/evaluation/stepping plus conditional logpoint/cancellation).
 
 To reproduce this variant, use the same environment and ignored test command,
@@ -263,3 +269,23 @@ fixture in `src/main/java/` and compile it with debug information into
 physical directory name from its Maven artifact name. This verifies the import
 and debug workers together; native project opening and widget routing remain
 outside this test.
+
+The same live worker test passed for a Gradle 8.12.1 project with no Eclipse
+metadata or wrapper, using its local distribution and an isolated Gradle cache
+in offline mode. The project JDK was GraalVM Java 23; the language server and
+debug launch used JBR Java 25. It checked the server project name `smoke-project`,
+the imported `bin/main` classpath and compiled `Main.class`, then completed both
+debug sessions. Evaluating `System.getProperty("java.specification.version")`
+inside the debuggee confirmed Java 25. These are worker-level checks, not native
+UI verification.
+
+To reproduce the Gradle variant, use a disposable directory named `project`,
+`settings.gradle` containing `rootProject.name = 'smoke'`, and `build.gradle`
+containing `plugins { id 'java' }`. Put the same seven-line `Main.java` under
+`src/main/java/` and run the installed Gradle's `--offline --no-daemon classes`
+with Java 23 first. Set `INTELLI_GEN_DAP_PROJECT`, `INTELLI_GEN_JAVA_HOME` and
+`INTELLI_GEN_JAVA_RESOURCES` as above, plus `INTELLI_GEN_PROJECT_JAVA_HOME` to
+Java 23 and `INTELLI_GEN_GRADLE_HOME` to the Gradle distribution root. Keep
+`GRADLE_USER_HOME` on the same disposable cache for the build and test. Run
+`cargo test live_worker_resolves_server_project_name -- --ignored`; it starts
+JDT LS and uses the same breakpoint, stepping, evaluation and logpoint checks.

@@ -535,6 +535,9 @@ mod main_project_tests {
         let home = PathBuf::from(std::env::var_os("INTELLI_GEN_JAVA_HOME").unwrap());
         let resources = PathBuf::from(std::env::var_os("INTELLI_GEN_JAVA_RESOURCES").unwrap());
         let jdk = crate::java::jdk::JdkCatalog::add(&home).unwrap();
+        let project_jdk = std::env::var_os("INTELLI_GEN_PROJECT_JAVA_HOME")
+            .map(|home| crate::java::jdk::JdkCatalog::add(Path::new(&home)).unwrap())
+            .unwrap_or_else(|| jdk.clone());
         let executable = resources.parent().unwrap().join("MacOS/intelli-gen");
         let resolved = crate::java::lsp_config::resolve_jdtls(
             &crate::settings::UserSettings::default(),
@@ -554,16 +557,17 @@ mod main_project_tests {
             shared_configuration: resolved.shared_configuration,
             package_version: resolved.package_version,
             runtime_jdk_id: jdk.id.clone(),
-            project_jdk_id: Some(jdk.id.clone()),
+            project_jdk_id: Some(project_jdk.id.clone()),
             gradle_offline: true,
-            gradle_home: None,
+            gradle_home: std::env::var_os("INTELLI_GEN_GRADLE_HOME").map(PathBuf::from),
             workspace_data: root.parent().unwrap().join("rust-worker-workspace"),
-            jdks: vec![jdk],
+            jdks: vec![jdk, project_jdk],
             debug_bundle: Some(bundle),
             debug_bundle_error: None,
         };
         let maven = root.join("pom.xml").is_file();
-        let mut project = if maven {
+        let gradle = root.join("build.gradle").is_file();
+        let mut project = if maven || gradle {
             ProjectModel::discover(&root).unwrap()
         } else {
             ProjectModel {
@@ -575,7 +579,7 @@ mod main_project_tests {
             }
         };
         project.name = "directory-fallback".into();
-        let source = project.root.join(if maven {
+        let source = project.root.join(if maven || gradle {
             "src/main/java/Main.java"
         } else {
             "Main.java"
@@ -625,13 +629,31 @@ mod main_project_tests {
             commands: session.commands.clone(),
             root,
         };
-        let paths = resolver.resolve(&project, "Main", None).await.unwrap();
-        assert_eq!(paths.project_name.as_deref(), Some("smoke"));
-        assert!(paths.classpaths.iter().any(|path| path.ends_with(if maven {
+        let expected_output = if maven {
             "target/classes"
+        } else if gradle {
+            "bin/main"
         } else {
             "bin"
-        })));
+        };
+        // Import command acknowledgement can precede the asynchronous workspace update.
+        let paths = tokio::time::timeout(Duration::from_secs(60), async {
+            loop {
+                let paths = resolver.resolve(&project, "Main", None).await.unwrap();
+                if paths.classpaths.iter().any(|path| {
+                    path.ends_with(expected_output) && path.join("Main.class").is_file()
+                }) {
+                    break paths;
+                }
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+        })
+        .await
+        .expect("imported project classpath and compiled main class");
+        assert_eq!(
+            paths.project_name.as_deref(),
+            Some(if gradle { "smoke-project" } else { "smoke" })
+        );
         let resolver = DebugAdapterResolver {
             commands: session.commands.clone(),
             root: project.root.clone(),
@@ -678,6 +700,17 @@ mod main_project_tests {
             .unwrap();
         let frame = &stack["stackFrames"][0];
         assert_eq!(frame["line"], 4);
+        let runtime_version = client
+            .request(
+                "evaluate",
+                json!({"frameId":frame["id"],"expression":"System.getProperty(\"java.specification.version\")","context":"watch"}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            runtime_version["result"],
+            format!("\"{}\"", config.jdks[0].version.major)
+        );
         let value = client
             .request(
                 "evaluate",
