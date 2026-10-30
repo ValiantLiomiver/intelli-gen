@@ -98,3 +98,19 @@ after changing the preference to update an existing language session. After load
 that report with `--refresh-dependencies`, using the selected JDK and the normal
 Build output/cancellation flow. The action requires online mode and may contact
 repositories or download dependencies. No JetBrains implementation code is included in Intelli-gen.
+
+## Java tooling runtime verification
+
+A local protocol smoke test on 2026-10-30 started the packaged JDT LS 1.62.0
+with the existing IntelliJ JBR 25.0.4.1 runtime, a temporary workspace, and a
+writable copy of the packaged macOS configuration. It loaded the packaged Java
+Debug Server 0.53.2 plugin, completed LSP `initialize`, executed
+`vscode.java.startDebugSession`, connected to its loopback port, completed DAP
+`initialize`, and shut down JDT LS through LSP `shutdown` / `exit`.
+
+The same test inside the restricted agent sandbox initialized LSP but returned
+`-1` from `startDebugSession`; running it with permission to open local sockets
+succeeded. This observation verifies startup and protocol compatibility of the
+installed tools. It does not verify Intelli-gen's Rust worker integration, a Java
+program launch, breakpoints, stepping, or native UI interactions. The test did not
+download tooling or change the IDE's configured JDK.
