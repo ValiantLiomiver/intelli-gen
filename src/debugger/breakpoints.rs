@@ -557,11 +557,7 @@ impl Breakpoints {
         }
         let entries = self.sources.entry(source.clone()).or_default();
         if let Some(index) = entries.iter().position(|point| point.line == line) {
-            if entries[index].enabled {
-                entries.remove(index);
-            } else {
-                entries[index].enabled = true;
-            }
+            entries.remove(index);
         } else {
             entries.push(Breakpoint {
                 source: source.clone(),
@@ -728,7 +724,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn toggling_disabled_breakpoint_reenables_without_losing_metadata() {
+    fn updating_disabled_breakpoint_reenables_without_losing_metadata() {
         let source = PathBuf::from("src/Main.java");
         let mut breakpoints = Breakpoints::default();
         breakpoints.sources.insert(
@@ -743,7 +739,13 @@ mod tests {
         );
         assert_eq!(breakpoints.disabled_lines(&source), [12]);
 
-        breakpoints.toggle(source.clone(), 12);
+        assert!(breakpoints.update(
+            &source,
+            12,
+            Some("ready".into()),
+            Some("value={value}".into()),
+            true,
+        ));
 
         let point = &breakpoints.sources[&source][0];
         assert!(point.enabled);
@@ -754,5 +756,8 @@ mod tests {
             breakpoints.arguments(&source)["breakpoints"][0]["logMessage"],
             "value={value}"
         );
+
+        breakpoints.toggle(source.clone(), 12);
+        assert!(breakpoints.sources[&source].is_empty());
     }
 }
