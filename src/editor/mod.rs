@@ -513,7 +513,7 @@ pub fn editor_gutter(
                     } else {
                         "Add breakpoint"
                     };
-                    if ui.button(label).clicked() {
+                    if ui.button(crate::i18n::ui_text(ui, label)).clicked() {
                         action = Some(GutterBreakpointAction::Toggle(line));
                         ui.close();
                     }

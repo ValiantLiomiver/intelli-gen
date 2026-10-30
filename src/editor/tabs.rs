@@ -1076,7 +1076,7 @@ impl EditorTab {
         insert_spaces: bool,
     ) -> Option<super::GutterBreakpointAction> {
         ui.colored_label(ui.visuals().warn_fg_color,
-            "Large file: editing is limited to the visible page. Save writes the complete document.");
+            crate::i18n::ui_text(ui, "Large file: editing is limited to the visible page. Save writes the complete document."));
         let mut start = None;
         if let Some(line) = self.pending_line.take() {
             start = Some(

@@ -574,7 +574,7 @@ pub fn render(ui: &mut eframe::egui::Ui, state: &mut crate::app::AppState) {
                                             .hint_text(crate::i18n::ui_text(ui, "Condition (optional)")),
                                     )
                                     .on_hover_text(
-                                        "Java expression evaluated when this breakpoint is reached",
+                                        crate::i18n::ui_text(ui, "Java expression evaluated when this breakpoint is reached"),
                                     )
                                     .changed();
                                 if point.log_message.is_some() {
@@ -586,7 +586,7 @@ pub fn render(ui: &mut eframe::egui::Ui, state: &mut crate::app::AppState) {
                                                 .hint_text(crate::i18n::ui_text(ui, "Logpoint message")),
                                         )
                                         .on_hover_text(
-                                            "Message written when execution reaches this line; Java expressions use {expression}",
+                                            crate::i18n::ui_text(ui, "Message written when execution reaches this line; Java expressions use {expression}"),
                                         )
                                         .changed();
                                 } else {
