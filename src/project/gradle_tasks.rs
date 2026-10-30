@@ -116,6 +116,7 @@ impl GradleTaskLoader {
                     &worker_root,
                     program,
                     module_name.as_deref(),
+                    project_path.as_deref(),
                     environment,
                     worker_cancel,
                 );
@@ -214,25 +215,12 @@ fn load_tasks(
     root: &Path,
     program: PathBuf,
     module_name: Option<&str>,
+    project_path: Option<&Path>,
     environment: Vec<(OsString, OsString)>,
     cancellation: Arc<AtomicBool>,
 ) -> Result<Vec<GradleTask>, String> {
     check_cancel(&cancellation)?;
-    if let Some(module_name) = module_name {
-        let module = module_name
-            .strip_prefix(':')
-            .ok_or("Invalid Gradle project path")?;
-        let mut path = root.to_path_buf();
-        for component in module.split(':') {
-            if component.is_empty()
-                || component == "."
-                || component == ".."
-                || component.contains(['/', '\\'])
-            {
-                return Err("Invalid Gradle project path".into());
-            }
-            path.push(component);
-        }
+    if let Some(path) = project_path {
         let reactor = root
             .canonicalize()
             .map_err(|error| format!("Cannot inspect Gradle project: {error}"))?;
@@ -365,6 +353,47 @@ fn valid_task_name(name: &str) -> bool {
 
 fn valid_project_path(path: &str) -> bool {
     path.starts_with(':') && path[1..].split(':').all(valid_task_name)
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn task_report_uses_discovered_project_directory_and_gradle_name() {
+        let scratch = Scratch::create().unwrap();
+        let module = scratch.0.join("custom/app");
+        fs::create_dir_all(&module).unwrap();
+        let program = scratch.0.join("gradle");
+        fs::write(
+            &program,
+            "#!/bin/sh\n[ \"$3\" = ':app:tasks' ] || exit 1\nprintf \"Tasks runnable from project ':app'\\n\\nbuild - Builds the project\\n\"\n",
+        ).unwrap();
+        fs::set_permissions(&program, fs::Permissions::from_mode(0o700)).unwrap();
+        let tasks = load_tasks(
+            &scratch.0,
+            program.clone(),
+            Some(":app"),
+            Some(&module),
+            Vec::new(),
+            Arc::new(AtomicBool::new(false)),
+        )
+        .unwrap();
+        assert_eq!(tasks[0].path, ":app:build");
+
+        let outside = Scratch::create().unwrap();
+        let error = load_tasks(
+            &scratch.0,
+            program,
+            Some(":app"),
+            Some(&outside.0),
+            Vec::new(),
+            Arc::new(AtomicBool::new(false)),
+        )
+        .unwrap_err();
+        assert!(error.contains("outside the opened build"));
+    }
 }
 
 fn output_tail(bytes: &[u8]) -> String {
