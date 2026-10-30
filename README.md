@@ -61,3 +61,35 @@ The command-line link accepts the same optional project or file path: `dist/inte
 The Run Console accepts line input for interactive Java processes. The Build panel summarizes Maven Surefire and Gradle test totals and lists failures from fresh Surefire, Failsafe, and Gradle XML reports; select a failure to open its conventional Java test source and stack-trace line when available, or use **Run class** to rerun that class. The **Problems** tool window combines available Java language-server diagnostics with the latest build diagnostics; selecting a result opens its source location.
 
 The first release targets macOS and Java projects using Maven or Gradle. Use **File → New Java Project…** to create a minimal Maven or Gradle starter locally; it creates no wrapper and downloads no tools. The starter includes a run configuration for `Main`; select an installed JDK before launching. **Run** builds the project first and asks before saving open project files with unsaved changes; a failed build does not launch the program. Start, stop, or manage configurations from the **Run** menu. Use a project-tree directory's context menu to create a Java class; an optional package name creates matching subdirectories beneath the selected directory. Set Java indentation to 1–8 spaces or tabs in **Settings**; the editor and Java formatter use the same preference. Parent, root, and nested `.editorconfig` files override these choices by file pattern up to the nearest `root=true`. Files up to 16 MiB are editable; files above 256 KiB use a bounded page editor that keeps the complete document available for save and find/replace. **Find in Project** also supports preview-first replacement: review and select matching files before applying edits to editor buffers, then save those files to keep the changes. Run configurations can select a Maven/Gradle module or detect one from the main class; the JPMS module name remains a separate launch option. The app also includes an integrated terminal, local Git operations, and a Java debugger. Java language services depend on installed or packaged JDT LS and Java Debug Server tooling; editing and builds remain available if optional Java tooling is unavailable.
+
+## IntelliJ reverse-engineering evidence
+
+The local reference inspected with REA 6.7.0 is IntelliJ IDEA Ultimate 2026.3,
+build `IU-263.7307.44`. Run REA with Node 26 when reproducing these observations.
+In this session, the default Node 20 invocation reported an integrity mismatch;
+Node 26 successfully inspected the same logpoint JAR with its previously recorded
+digest. Those failed invocations do not establish that the installed JAR changed.
+
+```sh
+node --version
+rea inspect-artifact "/Applications/IntelliJ IDEA.app/Contents/plugins/java/lib/modules/intellij.debugger.logpoints.java.jar"
+rea inspect-artifact "/Applications/IntelliJ IDEA.app/Contents/plugins/gradle-plugin/lib/gradle-plugin.jar"
+rea extract-artifact "/Applications/IntelliJ IDEA.app/Contents/plugins/gradle-plugin/lib/gradle-plugin.jar"
+```
+
+The Java logpoint inspection is evidence
+`ev_09ad380733826f3594a075bfd8d4c9758161201d866158b24808ec238e038e21`,
+with SHA-256 `9743442b241193d070c7916dc19867bf1ba4125deff5bb53facde4a591d462b0`.
+The Gradle inspection is evidence
+`ev_20efa51dedcc6166cb3e0be40bd89d1cbad8bc639ccb5627c8d4ac78920a81bf`,
+with SHA-256 `b9c8e1b2186d302bca9b0b7fe7b7070c2b18a7521d39e4a2f1d48968ef7ecce8`.
+Gradle extraction evidence
+`ev_4a4a5832b6e2241e69b3c07c4bf7de1892c285fb86ddb7f03b65f45220ec4aef`
+records verified containment and no integrity contradictions.
+
+The extracted `META-INF/plugin.xml` registers `Gradle.ExecuteTask`,
+`Gradle.ToggleOfflineAction`, and `Gradle.RefreshDependencies`, including toolbar
+or menu references. This proves the shipped action registrations; it does not
+establish their runtime behavior. Offline mode and dependency refresh are
+comparison targets for further implementation, not capabilities claimed by
+Intelli-gen here. No JetBrains implementation code is included in Intelli-gen.
