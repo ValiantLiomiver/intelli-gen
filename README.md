@@ -94,5 +94,7 @@ establish their runtime behavior. Intelli-gen Settings now provides **Gradle off
 builds before Run, and task reports. It passes `--offline` so Gradle uses cached
 dependencies; missing cached dependencies cause Gradle to fail. It also configures the JDT LS Gradle importer through
 `java.import.gradle.offline.enabled`. Use **Apply / restart Java intelligence**
-after changing the preference to update an existing language session. Dependency refresh remains
-a comparison target for further implementation. No JetBrains implementation code is included in Intelli-gen.
+after changing the preference to update an existing language session. After loading tasks, **Refresh dependencies** beside a `:dependencies` task runs
+that report with `--refresh-dependencies`, using the selected JDK and the normal
+Build output/cancellation flow. The action requires online mode and may contact
+repositories or download dependencies. No JetBrains implementation code is included in Intelli-gen.

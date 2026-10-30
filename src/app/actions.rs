@@ -1591,6 +1591,7 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                     generation,
                     project_path,
                     task_path,
+                    refresh_dependencies,
                 } => {
                     if state.pending_run.is_some() {
                         state.last_error = Some(
@@ -1623,6 +1624,7 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                         let jdk = state.settings.selected_jdk(&project.root, None)?.clone();
                         Ok(crate::java::build::GradleTaskRequest {
                             offline: state.settings.gradle_offline,
+                            refresh_dependencies,
                             project: model,
                             task_path,
                             jdk,

@@ -1056,6 +1056,16 @@ fn render_gradle_sidebar(ui: &mut egui::Ui, state: &mut AppState) {
                         generation,
                         project_path: module.clone(),
                         task_path: task.path.clone(),
+                        refresh_dependencies: false,
+                    }));
+                }
+                if task.path.ends_with(":dependencies") && ui.add_enabled(
+                    enabled && !state.settings.gradle_offline,
+                    egui::Button::new(crate::i18n::ui_text(ui, "Refresh dependencies")),
+                ).on_hover_text(crate::i18n::ui_text(ui, "Recheck cached Gradle dependencies against repositories; requires online mode.")).clicked() {
+                    actions.push(AppEvent::Gradle(GradleAction::RunTask {
+                        root: root.clone(), generation, project_path: module.clone(),
+                        task_path: task.path.clone(), refresh_dependencies: true,
                     }));
                 }
                 if !task.description.is_empty() {

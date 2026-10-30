@@ -55,6 +55,7 @@ pub struct MavenTaskRequest {
 #[derive(Clone, Debug)]
 pub struct GradleTaskRequest {
     pub offline: bool,
+    pub refresh_dependencies: bool,
     pub project: ProjectModel,
     pub task_path: String,
     pub jdk: JdkInstallation,
@@ -359,20 +360,12 @@ impl BuildService {
         if request.project.kind != ProjectKind::Gradle {
             return Err(BuildError("Open a Gradle build first".into()));
         }
-        if !valid_gradle_task_path(&request.task_path) {
-            return Err(BuildError(
-                "Choose a valid discovered Gradle task path".into(),
-            ));
-        }
+        let args = gradle_task_arguments(
+            &request.task_path,
+            request.offline,
+            request.refresh_dependencies,
+        )?;
         let program = build_program(&request.project, executable)?;
-        let mut args = vec![
-            OsString::from("--console=plain"),
-            OsString::from("--no-daemon"),
-            OsString::from(request.task_path),
-        ];
-        if request.offline {
-            args.push(OsString::from("--offline"));
-        }
         Self::launch(request.project, request.jdk, program, None, args)
     }
 
@@ -422,6 +415,35 @@ impl BuildService {
     }
 }
 
+fn gradle_task_arguments(
+    task: &str,
+    offline: bool,
+    refresh: bool,
+) -> Result<Vec<OsString>, BuildError> {
+    if !valid_gradle_task_path(task) {
+        return Err(BuildError(
+            "Choose a valid discovered Gradle task path".into(),
+        ));
+    }
+    if refresh && (offline || !task.ends_with(":dependencies")) {
+        return Err(BuildError(
+            "Refresh dependencies requires online mode and a Gradle dependencies task".into(),
+        ));
+    }
+    let mut args = vec![
+        OsString::from("--console=plain"),
+        OsString::from("--no-daemon"),
+        OsString::from(task),
+    ];
+    if offline {
+        args.push(OsString::from("--offline"));
+    }
+    if refresh {
+        args.push(OsString::from("--refresh-dependencies"));
+    }
+    Ok(args)
+}
+
 fn valid_gradle_task_path(path: &str) -> bool {
     path.starts_with(':')
         && path[1..].split(':').all(|segment| {
@@ -432,6 +454,34 @@ fn valid_gradle_task_path(path: &str) -> bool {
                 && bytes
                     .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
         })
+}
+
+#[cfg(test)]
+mod gradle_argument_tests {
+    use super::*;
+
+    #[test]
+    fn refresh_dependencies_keeps_module_and_rejects_offline_execution() {
+        let args = gradle_task_arguments(":app:dependencies", false, true).unwrap();
+        assert_eq!(
+            args,
+            [
+                "--console=plain",
+                "--no-daemon",
+                ":app:dependencies",
+                "--refresh-dependencies"
+            ]
+            .map(OsString::from)
+        );
+        assert!(gradle_task_arguments(":app:dependencies", true, true).is_err());
+        assert!(gradle_task_arguments(":app:build", false, true).is_err());
+        assert!(gradle_task_arguments("--invalid", false, false).is_err());
+        assert!(
+            gradle_task_arguments(":app:build", true, false)
+                .unwrap()
+                .contains(&OsString::from("--offline"))
+        );
+    }
 }
 
 pub(crate) fn valid_java_class_name(class_name: &str) -> bool {
