@@ -153,3 +153,10 @@ Execute `vscode.java.startDebugSession` through LSP, then set
 `INTELLI_GEN_DAP_JAVA` to the absolute Java executable. With JDT LS still running,
 execute `cargo test live_java_debug_transport -- --ignored`. Local socket
 permissions are required. The test launches and terminates this fixture program.
+
+When runtime classpaths omit `projectName`, Intelli-gen asks the installed Java
+Debug Server for `vscode.java.resolveMainClass` and matches both the main class
+and its source path. This preserves the server's logical project name when it
+differs from the source directory name, which is important for expression
+evaluation in remapped Gradle modules. Existing name inference remains available
+when the server returns no matching main class.

@@ -480,6 +480,85 @@ pub struct RuntimeClasspaths {
     #[serde(default, alias = "project_name")]
     pub project_name: Option<String>,
 }
+struct PendingClasspaths {
+    sent: Instant,
+    reply: oneshot::Sender<Result<RuntimeClasspaths, LspError>>,
+    path: PathBuf,
+    main_class: String,
+    paths: Option<RuntimeClasspaths>,
+}
+
+fn main_project_name(
+    result: &Value,
+    main_class: &str,
+    source: &Path,
+) -> Result<Option<String>, LspError> {
+    let items = result
+        .as_array()
+        .ok_or_else(|| LspError("Invalid Java main-class response".into()))?;
+    let source = source
+        .canonicalize()
+        .unwrap_or_else(|_| source.to_path_buf());
+    let mut names = std::collections::BTreeSet::new();
+    for item in items {
+        if item["mainClass"].as_str() != Some(main_class) {
+            continue;
+        }
+        let Some(path) = item["filePath"].as_str().map(PathBuf::from) else {
+            continue;
+        };
+        let path = path.canonicalize().unwrap_or(path);
+        if path != source && !(source.is_dir() && path.starts_with(&source)) {
+            continue;
+        }
+        if let Some(name) = item["projectName"].as_str().filter(|name| !name.is_empty()) {
+            names.insert(name.to_owned());
+        }
+    }
+    if names.len() > 1 {
+        return Err(LspError(
+            "Multiple Java projects contain the selected main class; choose a project module"
+                .into(),
+        ));
+    }
+    Ok(names.into_iter().next())
+}
+
+#[cfg(test)]
+mod main_project_tests {
+    use super::*;
+
+    #[test]
+    fn server_project_name_is_selected_by_main_class_and_source() {
+        let result = json!([
+            {"mainClass":"Main","projectName":"wrong-module","filePath":"/workspace/other/Main.java"},
+            {"mainClass":"Main","projectName":"logical-gradle-name","filePath":"/workspace/custom/service/Main.java"}
+        ]);
+        assert_eq!(
+            main_project_name(
+                &result,
+                "Main",
+                Path::new("/workspace/custom/service/Main.java")
+            )
+            .unwrap()
+            .as_deref(),
+            Some("logical-gradle-name")
+        );
+        assert!(
+            main_project_name(
+                &result,
+                "Missing",
+                Path::new("/workspace/custom/service/Main.java")
+            )
+            .unwrap()
+            .is_none()
+        );
+        assert!(
+            main_project_name(&json!(null), "Main", Path::new("/workspace/Main.java")).is_err()
+        );
+    }
+}
+
 /// This sender belongs to one language session. Restarting drops its receiver;
 /// a response cannot be delivered by a replacement session.
 #[derive(Clone)]
@@ -597,6 +676,7 @@ impl ClasspathResolver {
         self.commands
             .try_send(LanguageCommand::Classpaths {
                 path: source,
+                main_class: main_class.to_owned(),
                 reply,
             })
             .map_err(|error| LspError(format!("Java language service unavailable: {error}")))?;
@@ -676,6 +756,7 @@ enum LanguageCommand {
     },
     Classpaths {
         path: PathBuf,
+        main_class: String,
         reply: oneshot::Sender<Result<RuntimeClasspaths, LspError>>,
     },
     Open {
@@ -1366,13 +1447,7 @@ async fn protocol(
     let mut pending_symbols: HashMap<u64, (String, Instant)> = HashMap::new();
     let mut debug_ports: HashMap<u64, (Instant, oneshot::Sender<Result<u16, LspError>>)> =
         HashMap::new();
-    let mut classpaths: HashMap<
-        u64,
-        (
-            Instant,
-            oneshot::Sender<Result<RuntimeClasspaths, LspError>>,
-        ),
-    > = HashMap::new();
+    let mut classpaths: HashMap<u64, PendingClasspaths> = HashMap::new();
     let mut heartbeat = tokio::time::interval(Duration::from_secs(1));
     loop {
         if *cancellation.borrow() {
@@ -1392,11 +1467,11 @@ async fn protocol(
                             "command": "vscode.java.startDebugSession", "arguments": []
                         }})).await?;
                     }
-                    LanguageCommand::Classpaths { path, reply } => {
+                    LanguageCommand::Classpaths { path, main_class, reply } => {
                         if classpaths.len() >= 8 { let _ = reply.send(Err(LspError("Too many classpath requests pending".into()))); continue; }
                         let id = next_id; next_id += 1;
                         let source_uri = uri(&path)?;
-                        classpaths.insert(id, (Instant::now(), reply));
+                        classpaths.insert(id, PendingClasspaths { sent: Instant::now(), reply, path, main_class, paths: None });
                         send(input, json!({"jsonrpc": "2.0", "id": id, "method": "workspace/executeCommand", "params": {
                             "command": "java.project.getClasspaths", "arguments": [source_uri, "{\"scope\":\"runtime\"}"]
                         }})).await?;
@@ -1470,10 +1545,26 @@ async fn protocol(
                             .ok_or_else(|| LspError("Java debug server returned an invalid loopback port".into())) };
                     let _ = reply.send(result);
                 }
-                else if let Some((_, reply)) = message.get("id").and_then(Value::as_u64).and_then(|id| classpaths.remove(&id)) {
-                    let result = if let Some(error) = message.get("error") { Err(LspError(format!("JDT LS classpath resolution failed: {error}"))) }
-                        else { serde_json::from_value(message["result"].clone()).map_err(|error| LspError(format!("Invalid runtime classpath response: {error}"))) };
-                    let _ = reply.send(result);
+                else if let Some(mut request) = message.get("id").and_then(Value::as_u64).and_then(|id| classpaths.remove(&id)) {
+                    if let Some(error) = message.get("error") {
+                        let _ = request.reply.send(Err(LspError(format!("JDT LS runtime project resolution failed: {error}"))));
+                    } else if let Some(mut paths) = request.paths.take() {
+                        match main_project_name(&message["result"], &request.main_class, &request.path) {
+                            Ok(name) => { paths.project_name = name; let _ = request.reply.send(Ok(paths)); }
+                            Err(error) => { let _ = request.reply.send(Err(error)); }
+                        }
+                    } else {
+                        match serde_json::from_value::<RuntimeClasspaths>(message["result"].clone()) {
+                            Ok(paths) if paths.project_name.as_deref().is_none_or(str::is_empty) && !bundles.is_empty() => {
+                                request.paths = Some(paths);
+                                let id = next_id; next_id += 1;
+                                classpaths.insert(id, request);
+                                send(input, json!({"jsonrpc":"2.0", "id":id, "method":"workspace/executeCommand", "params":{"command":"vscode.java.resolveMainClass", "arguments":[]}})).await?;
+                            }
+                            Ok(paths) => { let _ = request.reply.send(Ok(paths)); }
+                            Err(error) => { let _ = request.reply.send(Err(LspError(format!("Invalid runtime classpath response: {error}")))); }
+                        }
+                    }
                 }
                 else if let Some((query, _)) = message.get("id").and_then(Value::as_u64).and_then(|id| pending_symbols.remove(&id)) {
                     let result = if let Some(error) = message.get("error") {
@@ -1495,9 +1586,9 @@ async fn protocol(
                     if let Some((_, reply)) = debug_ports.remove(&id) { let _ = reply.send(Err(LspError("Debug server start request timed out or was cancelled".into()))); }
                     notify(input, "$/cancelRequest", json!({"id": id})).await?;
                 }
-                let expired_paths: Vec<_> = classpaths.iter().filter(|(_, (sent, reply))| reply.is_closed() || sent.elapsed() > Duration::from_secs(60)).map(|(id, _)| *id).collect();
+                let expired_paths: Vec<_> = classpaths.iter().filter(|(_, request)| request.reply.is_closed() || request.sent.elapsed() > Duration::from_secs(60)).map(|(id, _)| *id).collect();
                 for id in expired_paths {
-                    if let Some((_, reply)) = classpaths.remove(&id) { let _ = reply.send(Err(LspError("Runtime classpath request timed out or was cancelled".into()))); }
+                    if let Some(request) = classpaths.remove(&id) { let _ = request.reply.send(Err(LspError("Runtime classpath request timed out or was cancelled".into()))); }
                     notify(input, "$/cancelRequest", json!({"id": id})).await?;
                 }
                 let expired: Vec<_> = pending.iter().filter(|(_, request)| request.sent.elapsed() > Duration::from_secs(30)).map(|(id, _)| *id).collect();
