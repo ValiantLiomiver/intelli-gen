@@ -293,3 +293,44 @@ fn unescape(text: &str) -> String {
     }
     output
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ini_catalog_parses_escaped_equals_and_newlines() {
+        let catalog =
+            parse_catalog("# comment\nEnvironment (NAME\\=value)=A\\=B\\nnext line\n; comment\n")
+                .unwrap();
+
+        assert_eq!(
+            catalog.get("Environment (NAME=value)").map(String::as_str),
+            Some("A=B\nnext line")
+        );
+    }
+
+    #[test]
+    fn ini_catalog_rejects_duplicate_and_invalid_entries() {
+        assert!(parse_catalog("label=one\nlabel=two").is_err());
+        assert!(parse_catalog("=empty key").is_err());
+        assert!(parse_catalog("missing separator").is_err());
+    }
+
+    #[test]
+    fn message_translates_templates_and_preserves_dynamic_paths() {
+        let source = "Cannot save {path}: The file changed on disk.";
+        let translated = "Impossibile salvare {path}: il file è cambiato su disco.";
+        let translator = Translator {
+            catalog: Arc::new(HashMap::from([(source.to_owned(), translated.to_owned())])),
+            english: Arc::new(HashMap::from([(source.to_owned(), source.to_owned())])),
+        };
+
+        assert_eq!(
+            translator.message(
+                "Cannot save /tmp/project with spaces/Main.java: The file changed on disk."
+            ),
+            "Impossibile salvare /tmp/project with spaces/Main.java: il file è cambiato su disco."
+        );
+    }
+}
