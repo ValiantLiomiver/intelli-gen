@@ -568,6 +568,47 @@ mod tests {
     }
 
     #[test]
+    fn external_edits_are_preserved_by_save_and_rename() {
+        let root = std::env::temp_dir().join(format!(
+            "intelli-gen-document-conflict-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir(&root).unwrap();
+
+        let save_path = root.join("Save.java");
+        fs::write(&save_path, "class Save {}\n").unwrap();
+        let mut document = Document::load(&save_path).unwrap();
+        document.text = "class Save { int local; }\n".into();
+        fs::write(&save_path, "class Save { int external; }\n").unwrap();
+        assert!(document.save().is_err());
+        assert_eq!(
+            fs::read_to_string(&save_path).unwrap(),
+            "class Save { int external; }\n"
+        );
+        assert!(document.is_dirty());
+
+        let rename_path = root.join("Rename.java");
+        let destination = root.join("Renamed.java");
+        fs::write(&rename_path, "class Rename {}\n").unwrap();
+        let mut document = Document::load(&rename_path).unwrap();
+        document.text = "class Renamed { int local; }\n".into();
+        fs::write(&rename_path, "class Rename { int external; }\n").unwrap();
+        assert!(document.save_as(&destination).is_err());
+        assert_eq!(
+            fs::read_to_string(&rename_path).unwrap(),
+            "class Rename { int external; }\n"
+        );
+        assert!(!destination.exists());
+        assert!(document.is_dirty());
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn lsp_edits_resolve_utf16_positions_after_non_bmp_characters() {
         let root = std::env::temp_dir().join(format!(
             "intelli-gen-lsp-edit-{}-{}",
