@@ -466,18 +466,44 @@ mod gradle_argument_tests {
         let root = PathBuf::from(std::env::var_os("INTELLI_GEN_GRADLE_PROJECT").unwrap());
         let executable = PathBuf::from(std::env::var_os("INTELLI_GEN_GRADLE").unwrap());
         let home = PathBuf::from(std::env::var_os("INTELLI_GEN_BUILD_JAVA_HOME").unwrap());
+        live_build_fixture(root, executable, home, ProjectKind::Gradle).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires INTELLI_GEN_MAVEN_PROJECT disposable fixture with offline mvnw and INTELLI_GEN_BUILD_JAVA_HOME"]
+    async fn live_maven_worker_prefers_wrapper_and_reports_test_failures() {
+        let root = PathBuf::from(std::env::var_os("INTELLI_GEN_MAVEN_PROJECT").unwrap());
+        let home = PathBuf::from(std::env::var_os("INTELLI_GEN_BUILD_JAVA_HOME").unwrap());
         let project = ProjectModel::discover(&root).unwrap();
-        assert_eq!(project.kind, ProjectKind::Gradle);
+        assert!(project.wrapper.is_some(), "Maven fixture must provide mvnw");
+        live_build_fixture(
+            root,
+            PathBuf::from("/missing-configured-maven"),
+            home,
+            ProjectKind::Maven,
+        )
+        .await;
+    }
+
+    async fn live_build_fixture(
+        root: PathBuf,
+        executable: PathBuf,
+        home: PathBuf,
+        kind: ProjectKind,
+    ) {
+        let project = ProjectModel::discover(&root).unwrap();
+        assert_eq!(project.kind, kind);
         assert!(
             project
                 .modules
                 .iter()
-                .any(|module| module.name == ":app" && module.root.ends_with("custom/app"))
+                .any(|module| module.root.ends_with("custom/app"))
         );
         let jdk = crate::java::jdk::JdkCatalog::add(&home).unwrap();
-        let class = project
-            .root
-            .join("custom/app/build/classes/java/main/Main.class");
+        let class = project.root.join(match kind {
+            ProjectKind::Maven => "custom/app/target/classes/Main.class",
+            _ => "custom/app/build/classes/java/main/Main.class",
+        });
         for task in [BuildTask::Build, BuildTask::Test, BuildTask::Clean] {
             let mut handle = BuildService::start_with_executable(
                 BuildRequest {
@@ -526,7 +552,14 @@ mod gradle_argument_tests {
             .expect("build worker completed before timeout");
             handle.worker.take().unwrap().join().unwrap();
             if task == BuildTask::Test {
-                assert!(output.contains("BUILD FAILED"), "{output}");
+                assert!(
+                    output.contains(if kind == ProjectKind::Maven {
+                        "BUILD FAILURE"
+                    } else {
+                        "BUILD FAILED"
+                    }),
+                    "{output}"
+                );
                 assert_eq!(
                     summary,
                     Some(diagnostics::TestSummary {
@@ -534,7 +567,8 @@ mod gradle_argument_tests {
                         passed: 1,
                         failed: 1,
                         skipped: 0
-                    })
+                    }),
+                    "{output}"
                 );
                 assert_eq!(failures.len(), 1);
                 assert_eq!(failures[0].class_name, "MainTest");
@@ -550,7 +584,14 @@ mod gradle_argument_tests {
                 );
                 assert!(failures[0].source_line.is_some());
             } else {
-                assert!(output.contains("BUILD SUCCESSFUL"), "{output}");
+                assert!(
+                    output.contains(if kind == ProjectKind::Maven {
+                        "BUILD SUCCESS"
+                    } else {
+                        "BUILD SUCCESSFUL"
+                    }),
+                    "{output}"
+                );
             }
             assert_eq!(class.is_file(), task != BuildTask::Clean);
         }

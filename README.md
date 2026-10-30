@@ -230,3 +230,20 @@ public class MainTest {
   @Test public void failing() { assertEquals(41, 42); }
 }
 ```
+
+The optional `live_maven_worker_prefers_wrapper_and_reports_test_failures` test
+passed with Maven 3.9.9, Corretto JDK 8, and a reactor containing `custom/app`.
+It shares the build/test/clean assertions with the Gradle worker test, which also
+passed again after that refactor. The Maven fixture provides an executable
+`mvnw` that invokes the installed Maven with `--offline`; the configured Maven
+path is deliberately nonexistent to verify wrapper precedence.
+
+Set `INTELLI_GEN_MAVEN_PROJECT` to this disposable reactor and
+`INTELLI_GEN_BUILD_JAVA_HOME` to its JDK, then run
+`cargo test live_maven_worker -- --ignored`. Use the same `Main.java` and JUnit
+`MainTest.java` fixture described above. Its parent POM declares `custom/app`,
+Java source/target 8, and cached plugin versions: compiler 3.11.0, resources 3.3.1,
+jar 3.3.0, Surefire 2.22.1, and clean 3.2.0. The module uses local system-scoped
+`junit:junit:4.13` and `org.hamcrest:hamcrest-core:1.3` JARs. These coordinates are
+needed for Surefire to select JUnit 4. All plugin dependencies and the JUnit 4
+provider must already exist in the local Maven cache; the test downloads nothing.
