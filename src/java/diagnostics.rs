@@ -28,6 +28,15 @@ fn number_after(text: &str, marker: &str) -> Option<u32> {
     (!digits.is_empty()).then(|| digits.parse().ok()).flatten()
 }
 
+fn number_before(text: &str, marker: &str) -> Option<u32> {
+    text.split_once(marker)?
+        .0
+        .split_whitespace()
+        .last()?
+        .parse()
+        .ok()
+}
+
 /// Parse aggregate Maven Surefire and Gradle test-task summaries from console output.
 pub fn parse_test_summary(output: &str) -> Option<TestSummary> {
     let plain = plain_text(output);
@@ -55,15 +64,9 @@ pub fn parse_test_summary(output: &str) -> Option<TestSummary> {
     } else {
         return None;
     };
-    let total = text
-        .split_once(marker)?
-        .0
-        .split_whitespace()
-        .last()?
-        .parse::<u32>()
-        .ok()?;
-    let failed = number_after(text, " failed").unwrap_or(0).min(total);
-    let skipped = number_after(text, " skipped")
+    let total = number_before(text, marker)?;
+    let failed = number_before(text, " failed").unwrap_or(0).min(total);
+    let skipped = number_before(text, " skipped")
         .unwrap_or(0)
         .min(total.saturating_sub(failed));
     Some(TestSummary {
@@ -155,6 +158,37 @@ pub fn plain_text(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gradle_summary_reads_failed_and_skipped_counts_before_labels() {
+        assert_eq!(
+            parse_test_summary("3 tests completed, 1 failed, 1 skipped"),
+            Some(TestSummary {
+                total: 3,
+                passed: 1,
+                failed: 1,
+                skipped: 1
+            })
+        );
+        assert_eq!(
+            parse_test_summary("1 test completed, 1 failed"),
+            Some(TestSummary {
+                total: 1,
+                passed: 0,
+                failed: 1,
+                skipped: 0
+            })
+        );
+        assert_eq!(
+            parse_test_summary("[INFO] Tests run: 4, Failures: 1, Errors: 1, Skipped: 1"),
+            Some(TestSummary {
+                total: 4,
+                passed: 1,
+                failed: 2,
+                skipped: 1
+            })
+        );
+    }
 
     #[test]
     fn parses_maven_and_gradle_diagnostics_with_spaces_in_paths() {
