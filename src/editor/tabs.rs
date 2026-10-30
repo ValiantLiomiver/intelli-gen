@@ -1455,7 +1455,10 @@ pub fn close_prompt(context: &egui::Context, state: &mut AppState) {
             crate::i18n::ui_text(ui, "This file contains unsaved changes.")
         });
         if let Some(error) = &state.last_error {
-            ui.colored_label(ui.visuals().error_fg_color, error);
+            ui.colored_label(
+                ui.visuals().error_fg_color,
+                crate::i18n::message(ui.ctx(), error),
+            );
         }
         ui.horizontal(|ui| {
             if ui

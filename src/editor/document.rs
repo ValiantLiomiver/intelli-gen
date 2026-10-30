@@ -111,7 +111,7 @@ impl Document {
     }
 
     pub fn save(&mut self) -> Result<(), EditorError> {
-        atomic_write(&self.path, self.text.as_bytes())?;
+        atomic_write(&self.path, self.text.as_bytes(), self.saved_text.as_bytes())?;
         self.saved_text.clone_from(&self.text);
         Ok(())
     }
@@ -146,7 +146,23 @@ impl Document {
                 ),
             ));
         }
-        atomic_write_new(destination, self.text.as_bytes(), &source)?;
+        atomic_write_new(
+            destination,
+            self.text.as_bytes(),
+            &source,
+            self.saved_text.as_bytes(),
+        )?;
+        let source_unchanged = match disk_matches(&source, self.saved_text.as_bytes()) {
+            Ok(matches) => matches,
+            Err(error) => {
+                let _ = fs::remove_file(destination);
+                return Err(EditorError::new(&source, "rename", error));
+            }
+        };
+        if !source_unchanged {
+            let _ = fs::remove_file(destination);
+            return Err(external_change_error(&source, "rename"));
+        }
         if let Err(error) = fs::remove_file(&source) {
             let _ = fs::remove_file(destination);
             return Err(EditorError::new(
@@ -356,7 +372,7 @@ pub fn create_java_class(
     result
 }
 
-fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), EditorError> {
+fn atomic_write(path: &Path, bytes: &[u8], expected: &[u8]) -> Result<(), EditorError> {
     static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
     let parent = path.parent().ok_or_else(|| {
         EditorError::new(
@@ -419,6 +435,9 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), EditorError> {
         file.write_all(bytes)?;
         file.sync_all()?;
         drop(file);
+        if !disk_matches(path, expected)? {
+            return Err(external_change_error(path, "save").source);
+        }
         fs::rename(&temporary_path, path)
     })();
     if let Err(error) = result {
@@ -428,7 +447,12 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), EditorError> {
     Ok(())
 }
 
-fn atomic_write_new(path: &Path, bytes: &[u8], source: &Path) -> Result<(), EditorError> {
+fn atomic_write_new(
+    path: &Path,
+    bytes: &[u8],
+    source: &Path,
+    expected: &[u8],
+) -> Result<(), EditorError> {
     static NEXT_TEMP: AtomicU64 = AtomicU64::new(1_000_000);
     let original =
         fs::metadata(source).map_err(|e| EditorError::new(source, "inspect before renaming", e))?;
@@ -472,6 +496,9 @@ fn atomic_write_new(path: &Path, bytes: &[u8], source: &Path) -> Result<(), Edit
             file.write_all(bytes)?;
             file.sync_all()?;
             drop(file);
+            if !disk_matches(source, expected)? {
+                return Err(external_change_error(source, "rename").source);
+            }
             fs::hard_link(&temporary, path)?;
             let _ = fs::remove_file(&temporary);
             Ok(())
@@ -490,6 +517,24 @@ fn atomic_write_new(path: &Path, bytes: &[u8], source: &Path) -> Result<(), Edit
             "cannot allocate temporary rename file",
         ),
     ))
+}
+
+fn disk_matches(path: &Path, expected: &[u8]) -> io::Result<bool> {
+    let mut current = Vec::with_capacity(expected.len());
+    fs::File::open(path)?
+        .take(expected.len() as u64 + 1)
+        .read_to_end(&mut current)?;
+    Ok(current == expected)
+}
+
+fn external_change_error(path: &Path, operation: &'static str) -> EditorError {
+    EditorError::new(
+        path,
+        operation,
+        io::Error::other(
+            "The file changed on disk since it was opened; no changes were saved to protect newer content",
+        ),
+    )
 }
 
 #[cfg(test)]
