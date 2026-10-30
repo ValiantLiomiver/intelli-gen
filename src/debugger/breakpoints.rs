@@ -654,6 +654,15 @@ impl Breakpoints {
             .map(|point| point.line)
             .collect()
     }
+    pub fn disabled_lines(&self, source: &Path) -> Vec<u32> {
+        self.sources
+            .get(source)
+            .into_iter()
+            .flatten()
+            .filter(|point| !point.enabled)
+            .map(|point| point.line)
+            .collect()
+    }
     pub fn source_revision(&self, source: &Path) -> u64 {
         self.revisions.get(source).copied().unwrap_or(0)
     }
@@ -732,11 +741,13 @@ mod tests {
                 enabled: false,
             }],
         );
+        assert_eq!(breakpoints.disabled_lines(&source), [12]);
 
         breakpoints.toggle(source.clone(), 12);
 
         let point = &breakpoints.sources[&source][0];
         assert!(point.enabled);
+        assert!(breakpoints.disabled_lines(&source).is_empty());
         assert_eq!(point.condition.as_deref(), Some("ready"));
         assert_eq!(point.log_message.as_deref(), Some("value={value}"));
         assert_eq!(

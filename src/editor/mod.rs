@@ -329,6 +329,7 @@ impl Drop for EditorIo {
 #[derive(Clone, Debug)]
 pub enum GutterBreakpointAction {
     Toggle(u32),
+    SetEnabled { line: u32, enabled: bool },
     SetLogpoint { line: u32, message: String },
 }
 
@@ -339,6 +340,7 @@ pub fn editor_gutter(
     first_line: u32,
     breakpoints: Option<&[u32]>,
     logpoints: Option<&[u32]>,
+    disabled_breakpoints: Option<&[u32]>,
     current_line: Option<u32>,
     diagnostics: &[crate::java::lsp::LanguageDiagnostic],
 ) -> Option<GutterBreakpointAction> {
@@ -362,6 +364,7 @@ pub fn editor_gutter(
         let center = egui::pos2(rect.min.x + 8.0, rect.center().y);
         let has_breakpoint = breakpoints.is_some_and(|lines| lines.contains(&line));
         let is_logpoint = logpoints.is_some_and(|lines| lines.contains(&line));
+        let is_disabled = disabled_breakpoints.is_some_and(|lines| lines.contains(&line));
         if has_breakpoint && !is_logpoint {
             ui.painter()
                 .circle_filled(center, 4.5, egui::Color32::LIGHT_RED);
@@ -370,6 +373,12 @@ pub fn editor_gutter(
                 egui::Rect::from_center_size(center, egui::vec2(8.0, 8.0)),
                 1.0,
                 egui::Color32::from_rgb(230, 165, 55),
+            );
+        } else if is_disabled {
+            ui.painter().circle_stroke(
+                center,
+                4.5,
+                egui::Stroke::new(1.5, ui.visuals().weak_text_color()),
             );
         }
         let line_diagnostics: Vec<_> = diagnostics
@@ -427,12 +436,33 @@ pub fn editor_gutter(
             .unwrap_or_default();
         if breakpoints.is_some() {
             egui::Popup::menu(&response).show(|ui| {
-                if is_logpoint {
+                if is_disabled {
+                    if ui
+                        .button(crate::i18n::ui_text(ui, "Enable breakpoint"))
+                        .clicked()
+                    {
+                        action = Some(GutterBreakpointAction::SetEnabled {
+                            line,
+                            enabled: true,
+                        });
+                        ui.close();
+                    }
+                } else if is_logpoint {
                     if ui
                         .button(crate::i18n::ui_text(ui, "Remove logpoint"))
                         .clicked()
                     {
                         action = Some(GutterBreakpointAction::Toggle(line));
+                        ui.close();
+                    }
+                    if ui
+                        .button(crate::i18n::ui_text(ui, "Disable breakpoint"))
+                        .clicked()
+                    {
+                        action = Some(GutterBreakpointAction::SetEnabled {
+                            line,
+                            enabled: false,
+                        });
                         ui.close();
                     }
                 } else {
@@ -443,6 +473,17 @@ pub fn editor_gutter(
                     };
                     if ui.button(label).clicked() {
                         action = Some(GutterBreakpointAction::Toggle(line));
+                        ui.close();
+                    }
+                    if has_breakpoint
+                        && ui
+                            .button(crate::i18n::ui_text(ui, "Disable breakpoint"))
+                            .clicked()
+                    {
+                        action = Some(GutterBreakpointAction::SetEnabled {
+                            line,
+                            enabled: false,
+                        });
                         ui.close();
                     }
                     ui.separator();

@@ -771,6 +771,7 @@ impl EditorTab {
         allow_edits: bool,
         breakpoints: &[u32],
         logpoints: &[u32],
+        disabled_breakpoints: &[u32],
         current_line: Option<u32>,
         diagnostics: &[crate::java::lsp::LanguageDiagnostic],
         indent_size: usize,
@@ -785,6 +786,7 @@ impl EditorTab {
                 allow_edits && !self.close_after_save,
                 breakpoints,
                 logpoints,
+                disabled_breakpoints,
                 current_line,
                 diagnostics,
                 indent_size,
@@ -912,6 +914,7 @@ impl EditorTab {
                         1,
                         java.then_some(breakpoints),
                         java.then_some(logpoints),
+                        java.then_some(disabled_breakpoints),
                         java.then_some(current_line).flatten(),
                         diagnostics,
                     );
@@ -1056,6 +1059,7 @@ impl EditorTab {
         allow_edits: bool,
         breakpoints: &[u32],
         logpoints: &[u32],
+        disabled_breakpoints: &[u32],
         current_line: Option<u32>,
         diagnostics: &[crate::java::lsp::LanguageDiagnostic],
         indent_size: usize,
@@ -1215,6 +1219,7 @@ impl EditorTab {
                         first_line,
                         Some(breakpoints),
                         Some(logpoints),
+                        Some(disabled_breakpoints),
                         current_line,
                         diagnostics,
                     );
@@ -1355,6 +1360,7 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
         ui.separator();
         let lines = state.debugger.breakpoints.lines(&tab.path);
         let logpoint_lines = state.debugger.breakpoints.logpoint_lines(&tab.path);
+        let disabled_lines = state.debugger.breakpoints.disabled_lines(&tab.path);
         let current_line = state
             .debugger
             .inspector
@@ -1375,6 +1381,7 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
             !state.quit_approved,
             &lines,
             &logpoint_lines,
+            &disabled_lines,
             current_line,
             diagnostics,
             indent_size,
@@ -1413,6 +1420,22 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
                     crate::app::events::DebuggerAction::ToggleBreakpoint {
                         source: path,
                         line,
+                        modified,
+                    }
+                }
+                super::GutterBreakpointAction::SetEnabled { line, enabled } => {
+                    let point = state
+                        .debugger
+                        .breakpoints
+                        .sources
+                        .get(&path)
+                        .and_then(|points| points.iter().find(|point| point.line == line));
+                    crate::app::events::DebuggerAction::UpdateBreakpoint {
+                        source: path,
+                        line,
+                        condition: point.and_then(|point| point.condition.clone()),
+                        log_message: point.and_then(|point| point.log_message.clone()),
+                        enabled,
                         modified,
                     }
                 }
