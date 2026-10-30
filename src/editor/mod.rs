@@ -341,6 +341,12 @@ pub fn editor_gutter(
     breakpoints: Option<&[u32]>,
     logpoints: Option<&[u32]>,
     disabled_breakpoints: Option<&[u32]>,
+    breakpoint_status: Option<
+        &std::collections::BTreeMap<
+            (std::path::PathBuf, u32),
+            crate::debugger::breakpoints::BreakpointStatus,
+        >,
+    >,
     current_line: Option<u32>,
     diagnostics: &[crate::java::lsp::LanguageDiagnostic],
 ) -> Option<GutterBreakpointAction> {
@@ -365,15 +371,32 @@ pub fn editor_gutter(
         let has_breakpoint = breakpoints.is_some_and(|lines| lines.contains(&line));
         let is_logpoint = logpoints.is_some_and(|lines| lines.contains(&line));
         let is_disabled = disabled_breakpoints.is_some_and(|lines| lines.contains(&line));
-        if has_breakpoint && !is_logpoint {
+        let status = (has_breakpoint || is_logpoint)
+            .then(|| breakpoint_status?.get(&(source.to_path_buf(), line)))
+            .flatten();
+        let unverified = status.is_some_and(|status| !status.verified);
+        if has_breakpoint && !is_logpoint && !unverified {
             ui.painter()
                 .circle_filled(center, 4.5, egui::Color32::LIGHT_RED);
-        } else if is_logpoint {
-            ui.painter().rect_filled(
-                egui::Rect::from_center_size(center, egui::vec2(8.0, 8.0)),
-                1.0,
-                egui::Color32::from_rgb(230, 165, 55),
+        } else if has_breakpoint && !is_logpoint {
+            ui.painter().circle_stroke(
+                center,
+                4.5,
+                egui::Stroke::new(1.5, ui.visuals().warn_fg_color),
             );
+        } else if is_logpoint {
+            let rect = egui::Rect::from_center_size(center, egui::vec2(8.0, 8.0));
+            if unverified {
+                ui.painter().rect_stroke(
+                    rect,
+                    1.0,
+                    egui::Stroke::new(1.5, ui.visuals().warn_fg_color),
+                    egui::StrokeKind::Inside,
+                );
+            } else {
+                ui.painter()
+                    .rect_filled(rect, 1.0, egui::Color32::from_rgb(230, 165, 55));
+            }
         } else if is_disabled {
             ui.painter().circle_stroke(
                 center,
@@ -421,6 +444,21 @@ pub fn editor_gutter(
         } else {
             String::new()
         };
+        if has_breakpoint || is_logpoint {
+            let verification = match status {
+                Some(status) if status.verified => crate::i18n::format(
+                    ui.ctx(),
+                    "verified at {line}",
+                    &[("line", &status.line.unwrap_or(line).to_string())],
+                ),
+                Some(status) => status
+                    .message
+                    .clone()
+                    .unwrap_or_else(|| crate::i18n::text(ui.ctx(), "unverified")),
+                None => crate::i18n::text(ui.ctx(), "pending adapter verification"),
+            };
+            tooltip.push_str(&format!("\n{verification}"));
+        }
         for diagnostic in line_diagnostics.iter().take(5) {
             let severity = match diagnostic.severity {
                 Some(1) => "Error",

@@ -772,6 +772,10 @@ impl EditorTab {
         breakpoints: &[u32],
         logpoints: &[u32],
         disabled_breakpoints: &[u32],
+        breakpoint_status: &std::collections::BTreeMap<
+            (PathBuf, u32),
+            crate::debugger::breakpoints::BreakpointStatus,
+        >,
         current_line: Option<u32>,
         diagnostics: &[crate::java::lsp::LanguageDiagnostic],
         indent_size: usize,
@@ -787,6 +791,7 @@ impl EditorTab {
                 breakpoints,
                 logpoints,
                 disabled_breakpoints,
+                breakpoint_status,
                 current_line,
                 diagnostics,
                 indent_size,
@@ -915,6 +920,7 @@ impl EditorTab {
                         java.then_some(breakpoints),
                         java.then_some(logpoints),
                         java.then_some(disabled_breakpoints),
+                        java.then_some(breakpoint_status),
                         java.then_some(current_line).flatten(),
                         diagnostics,
                     );
@@ -1060,6 +1066,10 @@ impl EditorTab {
         breakpoints: &[u32],
         logpoints: &[u32],
         disabled_breakpoints: &[u32],
+        breakpoint_status: &std::collections::BTreeMap<
+            (PathBuf, u32),
+            crate::debugger::breakpoints::BreakpointStatus,
+        >,
         current_line: Option<u32>,
         diagnostics: &[crate::java::lsp::LanguageDiagnostic],
         indent_size: usize,
@@ -1220,6 +1230,7 @@ impl EditorTab {
                         Some(breakpoints),
                         Some(logpoints),
                         Some(disabled_breakpoints),
+                        Some(breakpoint_status),
                         current_line,
                         diagnostics,
                     );
@@ -1361,6 +1372,7 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
         let lines = state.debugger.breakpoints.lines(&tab.path);
         let logpoint_lines = state.debugger.breakpoints.logpoint_lines(&tab.path);
         let disabled_lines = state.debugger.breakpoints.disabled_lines(&tab.path);
+        let breakpoint_status = &state.debugger.breakpoints.status;
         let current_line = state
             .debugger
             .inspector
@@ -1382,6 +1394,7 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
             &lines,
             &logpoint_lines,
             &disabled_lines,
+            breakpoint_status,
             current_line,
             diagnostics,
             indent_size,
