@@ -128,14 +128,19 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
                     .path
                     .as_ref()
                     .map(|path| path.display().to_string())
-                    .unwrap_or_else(|| "Project".into());
+                    .unwrap_or_else(|| crate::i18n::ui_text(ui, "Project"));
+                let source = if problem.source == "Build" {
+                    crate::i18n::ui_text(ui, "Build output")
+                } else {
+                    crate::i18n::ui_text(ui, problem.source)
+                };
                 let label = format!(
                     "{}  {}:{}:{}  [{}]  {}",
-                    problem.severity,
+                    crate::i18n::text(ui.ctx(), problem.severity),
                     path,
                     problem.line,
                     problem.column,
-                    problem.source,
+                    source,
                     problem.message
                 );
                 let color = match problem.rank {

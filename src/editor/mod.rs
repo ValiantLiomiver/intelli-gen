@@ -440,7 +440,7 @@ pub fn editor_gutter(
         };
         let response = ui.interact(rect, ui.id().with(("gutter", source, line)), sense);
         let mut tooltip = if breakpoints.is_some() {
-            String::from("Breakpoint actions")
+            crate::i18n::ui_text(ui, "Breakpoint actions")
         } else {
             String::new()
         };
@@ -465,7 +465,11 @@ pub fn editor_gutter(
                 Some(2) => "Warning",
                 _ => "Info",
             };
-            tooltip.push_str(&format!("\n{severity}: {}", diagnostic.message));
+            tooltip.push_str(&format!(
+                "\n{}: {}",
+                crate::i18n::text(ui.ctx(), severity),
+                diagnostic.message
+            ));
         }
         let response = response.on_hover_text(tooltip);
         let draft_id = ui.id().with(("logpoint-draft", source, line));

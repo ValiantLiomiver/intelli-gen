@@ -3574,40 +3574,43 @@ pub fn render(ui: &mut eframe::egui::Ui, state: &mut crate::app::AppState) {
             }
         }
         if let Some(items) = state.language.diagnostics.get(path) {
-            egui::CollapsingHeader::new(format!("Java diagnostics ({})", items.len())).show(
+            egui::CollapsingHeader::new(crate::i18n::ui_format(
                 ui,
-                |ui| {
-                    egui::ScrollArea::vertical()
-                        .id_salt("java_diagnostics")
-                        .max_height(100.0)
-                        .show(ui, |ui| {
-                            for diagnostic in items {
-                                let severity = match diagnostic.severity {
-                                    Some(1) => "Error",
-                                    Some(2) => "Warning",
-                                    _ => "Info",
-                                };
-                                if ui
-                                    .selectable_label(
-                                        false,
-                                        format!(
-                                            "{severity} {}:{} {}",
-                                            diagnostic.range.start.line + 1,
-                                            diagnostic.range.start.character + 1,
-                                            diagnostic.message
-                                        ),
-                                    )
-                                    .clicked()
-                                {
-                                    events.push(AppEvent::OpenFileAtPosition(
-                                        path.clone(),
-                                        diagnostic.range.start,
-                                    ));
-                                }
+                "Java diagnostics ({count})",
+                &[("count", &items.len().to_string())],
+            ))
+            .show(ui, |ui| {
+                egui::ScrollArea::vertical()
+                    .id_salt("java_diagnostics")
+                    .max_height(100.0)
+                    .show(ui, |ui| {
+                        for diagnostic in items {
+                            let severity = match diagnostic.severity {
+                                Some(1) => "Error",
+                                Some(2) => "Warning",
+                                _ => "Info",
+                            };
+                            if ui
+                                .selectable_label(
+                                    false,
+                                    format!(
+                                        "{} {}:{} {}",
+                                        crate::i18n::ui_text(ui, severity),
+                                        diagnostic.range.start.line + 1,
+                                        diagnostic.range.start.character + 1,
+                                        diagnostic.message
+                                    ),
+                                )
+                                .clicked()
+                            {
+                                events.push(AppEvent::OpenFileAtPosition(
+                                    path.clone(),
+                                    diagnostic.range.start,
+                                ));
                             }
-                        });
-                },
-            );
+                        }
+                    });
+            });
         }
         if let Some((hover_path, text)) = &state.language.hover {
             if hover_path == path {
