@@ -1437,10 +1437,18 @@ pub fn render(ui: &mut eframe::egui::Ui, state: &mut crate::app::AppState) {
     ui.separator();
     ui.label(crate::i18n::message(ui.ctx(), &state.run.summary));
     if let Some(cwd) = &state.run.working_directory {
-        ui.small(format!("Working directory: {}", cwd.display()));
+        ui.small(crate::i18n::ui_format(
+            ui,
+            "Working directory: {path}",
+            &[("path", &cwd.display().to_string())],
+        ));
     }
     if !state.run.jdk.is_empty() {
-        ui.small(format!("Launch JDK: {}", state.run.jdk));
+        ui.small(crate::i18n::ui_format(
+            ui,
+            "Launch JDK: {name}",
+            &[("name", &state.run.jdk)],
+        ));
     }
     ui.horizontal(|ui| {
         let input = ui.add_enabled(

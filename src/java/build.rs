@@ -1486,7 +1486,11 @@ pub fn render(ui: &mut egui::Ui, state: &mut crate::app::AppState) {
     });
     ui.label(crate::i18n::message(ui.ctx(), &state.build.summary));
     if !state.build.selected_jdk.is_empty() {
-        ui.small(format!("JDK: {}", state.build.selected_jdk));
+        ui.small(crate::i18n::ui_format(
+            ui,
+            "JDK: {name}",
+            &[("name", &state.build.selected_jdk)],
+        ));
     }
     if let Some(summary) = state.build.test_summary {
         let color = if summary.failed > 0 {

@@ -3588,14 +3588,19 @@ pub fn jdk_settings_ui(ui: &mut egui::Ui, state: &mut AppState) {
         ui,
         "Changing the selected JDK restarts Java intelligence automatically.",
     ));
-    ui.label(format!(
-        "JDT Language Server runtime (Java {minimum_jdt_java}+)"
+    ui.label(crate::i18n::ui_format(
+        ui,
+        "JDT Language Server runtime (Java {version}+)",
+        &[("version", &minimum_jdt_java.to_string())],
     ))
-    .on_hover_text(if state.settings.jdt_ls_executable.is_some() {
-        "A custom JDT LS launcher requires Java 21 or newer."
-    } else {
-        "The bundled JDT LS requires Java 25 or newer."
-    });
+    .on_hover_text(crate::i18n::ui_text(
+        ui,
+        if state.settings.jdt_ls_executable.is_some() {
+            "A custom JDT LS launcher requires Java 21 or newer."
+        } else {
+            "The bundled JDT LS requires Java 25 or newer."
+        },
+    ));
     let selection_changed = jdk_selector(
         ui,
         "jdt_ls_jdk",
@@ -3603,7 +3608,11 @@ pub fn jdk_settings_ui(ui: &mut egui::Ui, state: &mut AppState) {
         &mut state.settings.jdks,
         "No JDT LS runtime",
         "No JDT LS runtime",
-        &format!("Choose Java {minimum_jdt_java}+…"),
+        &crate::i18n::ui_format(
+            ui,
+            "Choose Java {version}+…",
+            &[("version", &minimum_jdt_java.to_string())],
+        ),
         minimum_jdt_java,
         crate::java::jdk::JdkSelectionTarget::JdtLs,
         &mut state.events,
@@ -3845,7 +3854,11 @@ pub fn project_jdk_ui(ui: &mut egui::Ui, state: &mut AppState) {
     }
     match state.settings.selected_jdk(&root, None) {
         Ok(jdk) => {
-            ui.label(format!("Effective JDK: {}", jdk.label()));
+            ui.label(crate::i18n::ui_format(
+                ui,
+                "Effective JDK: {name}",
+                &[("name", &jdk.label())],
+            ));
             ui.small(jdk.home.display().to_string());
         }
         Err(error) => {

@@ -150,7 +150,10 @@ impl FindReplace {
                     }
                 }
                 if ui
-                    .checkbox(&mut self.case_sensitive, "Case sensitive")
+                    .checkbox(
+                        &mut self.case_sensitive,
+                        crate::i18n::ui_text(ui, "Case sensitive"),
+                    )
                     .changed()
                 {
                     self.invalidate();
@@ -164,7 +167,7 @@ impl FindReplace {
                 }
             });
             if !self.status.is_empty() {
-                ui.weak(&self.status);
+                ui.weak(crate::i18n::message(ctx, &self.status));
             }
             let (enter, shift_enter, escape) = ui.input(|input| {
                 (

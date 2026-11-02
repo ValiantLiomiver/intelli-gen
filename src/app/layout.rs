@@ -801,8 +801,10 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
                 ui,
                 "Save project files before running?",
             ));
-            ui.label(format!(
-                "{file_count} open project file(s) have unsaved changes."
+            ui.label(crate::i18n::ui_format(
+                ui,
+                "{count} open project file(s) have unsaved changes.",
+                &[("count", &file_count.to_string())],
             ));
             ui.horizontal(|ui| {
                 confirm = ui

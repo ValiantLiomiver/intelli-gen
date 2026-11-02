@@ -1116,11 +1116,14 @@ impl EditorTab {
             {
                 start = Some(self.page_end);
             }
-            ui.small(format!(
-                "Bytes {}–{} of {}",
-                self.page_start,
-                self.page_end,
-                self.document.text.len()
+            ui.small(crate::i18n::ui_format(
+                ui,
+                "Bytes {start}–{end} of {total}",
+                &[
+                    ("start", &self.page_start.to_string()),
+                    ("end", &self.page_end.to_string()),
+                    ("total", &self.document.text.len().to_string()),
+                ],
             ));
         });
         if start.is_none() && self.page_end == 0 {
