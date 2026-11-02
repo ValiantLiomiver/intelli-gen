@@ -172,6 +172,14 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
                     ));
                     ui.close();
                 }
+                let test_source_available = state
+                    .active_tab
+                    .and_then(|index| state.editor_tabs.get(index))
+                    .is_some_and(|tab| super::actions::test_source_target(&tab.path).is_some());
+                if ui.add_enabled(test_source_available, egui::Button::new(crate::i18n::ui_text(ui, "Test / production source    ⌘⇧T"))).clicked() {
+                    state.enqueue(AppEvent::ToggleTestSource);
+                    ui.close();
+                }
                 if ui.add_enabled(!state.navigation_back.is_empty(), egui::Button::new(translator.text("Back    ⌘["))).clicked() {
                     state.enqueue(AppEvent::NavigateBack);
                     ui.close();

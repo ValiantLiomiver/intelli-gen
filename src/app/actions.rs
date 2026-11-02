@@ -87,6 +87,46 @@ fn open_file_at_position(
     }
 }
 
+// shortcut: pairs only src/main/java and src/test/java; add other roots when supported projects need them.
+pub fn test_source_target(path: &Path) -> Option<PathBuf> {
+    if path.extension().is_none_or(|extension| extension != "java") {
+        return None;
+    }
+    let mut source_root = path.parent()?;
+    while let Some(parent) = source_root.parent() {
+        if source_root.file_name().is_some_and(|name| name == "java") {
+            let kind = parent.file_name().and_then(|name| name.to_str());
+            let src_root = parent.parent();
+            let alternate = match kind {
+                Some("main")
+                    if src_root
+                        .is_some_and(|root| root.file_name().is_some_and(|name| name == "src")) =>
+                {
+                    "test"
+                }
+                Some("test")
+                    if src_root
+                        .is_some_and(|root| root.file_name().is_some_and(|name| name == "src")) =>
+                {
+                    "main"
+                }
+                _ => {
+                    source_root = parent;
+                    continue;
+                }
+            };
+            return Some(
+                src_root?
+                    .join(alternate)
+                    .join("java")
+                    .join(path.strip_prefix(source_root).ok()?),
+            );
+        }
+        source_root = parent;
+    }
+    None
+}
+
 fn current_navigation_location(state: &AppState) -> Option<super::NavigationLocation> {
     let tab = state
         .active_tab
@@ -214,6 +254,14 @@ pub fn keyboard_shortcuts(ctx: &egui::Context, state: &mut AppState) {
         state.enqueue(AppEvent::SearchEverywhereOpen(
             super::search_everywhere::SearchTab::Actions,
         ));
+    }
+    if ctx.input_mut(|input| {
+        input.consume_key(
+            egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
+            egui::Key::T,
+        )
+    }) {
+        state.enqueue(AppEvent::ToggleTestSource);
     }
     if state.find_replace.visible
         && ctx.input_mut(|input| {
@@ -1156,6 +1204,17 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
             }
             AppEvent::NavigateBack => move_navigation_history(state, true),
             AppEvent::NavigateForward => move_navigation_history(state, false),
+            AppEvent::ToggleTestSource => {
+                if let Some(path) = state
+                    .active_tab
+                    .and_then(|index| state.editor_tabs.get(index))
+                    .and_then(|tab| test_source_target(&tab.path))
+                {
+                    state.enqueue(AppEvent::OpenFile(path));
+                } else {
+                    state.status = "No matching test or production source".into();
+                }
+            }
             AppEvent::NextEditorTab => select_editor_tab(state, true),
             AppEvent::PreviousEditorTab => select_editor_tab(state, false),
             AppEvent::Search(action) => match action {

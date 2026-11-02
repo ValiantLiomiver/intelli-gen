@@ -34,6 +34,7 @@ pub enum AppEvent {
     OpenFileAtPosition(PathBuf, crate::java::lsp::Position),
     NavigateBack,
     NavigateForward,
+    ToggleTestSource,
     NextEditorTab,
     PreviousEditorTab,
     NewJavaClass(PathBuf),
