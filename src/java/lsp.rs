@@ -908,6 +908,61 @@ mod main_project_tests {
         .await
         .expect("step-in/step-out debug session reaped");
         assert!(!stepping.needs_host_restart());
+        if std::env::var_os("INTELLI_GEN_VERIFY_PAUSE").is_some() {
+            let pause_run = crate::java::run_config::RunConfiguration {
+                main_class: "PauseMain".into(),
+                ..run.clone()
+            };
+            let mut pausing = crate::debugger::DebugService::new(
+                DebugAdapterResolver {
+                    commands: session.commands.clone(),
+                    root: project.root.clone(),
+                    bundle: config.debug_bundle.clone(),
+                },
+                config.debug_bundle.clone().unwrap(),
+            )
+            .start(&pause_run, &project, &config.jdks[0])
+            .unwrap();
+            tokio::time::timeout(Duration::from_secs(30), async {
+                loop {
+                    for event in pausing.poll() {
+                        match event {
+                            crate::debugger::session::DebugEvent::Ready => return,
+                            crate::debugger::session::DebugEvent::Failed(error) => {
+                                panic!("pause debug session failed: {error}")
+                            }
+                            _ => {}
+                        }
+                    }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await
+            .expect("pause debug session ready");
+            assert!(matches!(
+                pausing.state(),
+                crate::debugger::DebugState::Running
+            ));
+            pausing.controller().pause().await.unwrap();
+            stopped(&mut pausing).await;
+            assert!(matches!(
+                pausing.state(),
+                crate::debugger::DebugState::Stopped
+            ));
+            pausing.cancel();
+            tokio::time::timeout(Duration::from_secs(15), async {
+                loop {
+                    pausing.poll();
+                    if let Some(result) = pausing.reap() {
+                        result.unwrap();
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await
+            .expect("paused session reaped");
+        }
         session.shutdown();
         session.worker.take().unwrap().join().unwrap();
     }
