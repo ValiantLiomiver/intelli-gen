@@ -35,6 +35,7 @@ pub enum EditorCommand {
     Completion,
     SignatureHelp,
     Hover,
+    Declaration,
     Definition,
     TypeDefinition,
     Implementation,
@@ -51,6 +52,7 @@ impl EditorCommand {
             Self::Completion => "textDocument/completion",
             Self::SignatureHelp => "textDocument/signatureHelp",
             Self::Hover => "textDocument/hover",
+            Self::Declaration => "textDocument/declaration",
             Self::Definition => "textDocument/definition",
             Self::TypeDefinition => "textDocument/typeDefinition",
             Self::Implementation => "textDocument/implementation",
@@ -387,6 +389,13 @@ pub enum LanguageEvent {
         text: String,
     },
     Definition {
+        path: PathBuf,
+        version: i64,
+        position: Position,
+        request_id: Option<u64>,
+        locations: Vec<Location>,
+    },
+    Declaration {
         path: PathBuf,
         version: i64,
         position: Position,
@@ -1844,6 +1853,7 @@ async fn protocol(
                 "signatureHelp": {"signatureInformation": {"documentationFormat": ["plaintext"]}},
                 "hover": {"contentFormat": ["plaintext"]}, "definition": {"linkSupport": true},
                 "implementation": {"linkSupport": true},
+                "declaration": {"linkSupport": true},
                 "typeDefinition": {"linkSupport": true}}},
         "initializationOptions": {"settings": settings.clone(), "workspaceFolders": [root_uri], "bundles": bundles,
             "extendedClientCapabilities": {"classFileContentsSupport": false}}
@@ -2321,6 +2331,13 @@ async fn deliver_response(request: Pending, result: &Value, events: &LanguageEve
                 signatures,
             }
         }
+        EditorCommand::Declaration => LanguageEvent::Declaration {
+            path,
+            version,
+            position,
+            request_id: navigation_request_id,
+            locations: locations(result),
+        },
         EditorCommand::Definition => LanguageEvent::Definition {
             path,
             version,
@@ -2971,6 +2988,7 @@ fn is_location_command(command: EditorCommand) -> bool {
     matches!(
         command,
         EditorCommand::Definition
+            | EditorCommand::Declaration
             | EditorCommand::TypeDefinition
             | EditorCommand::Implementation
             | EditorCommand::References
@@ -3851,6 +3869,27 @@ impl LanguageTool {
                 self.locations_title = "Definitions".into();
                 if self.locations.is_empty() {
                     self.summary = "No file-backed definition found".into();
+                }
+            }
+            LanguageEvent::Declaration {
+                path,
+                version,
+                position,
+                request_id,
+                locations,
+            } if self.current_location_request(
+                request_id,
+                EditorCommand::Declaration,
+                &path,
+                version,
+                position,
+            ) =>
+            {
+                self.pending_location_request = None;
+                self.locations = locations;
+                self.locations_title = "Declarations".into();
+                if self.locations.is_empty() {
+                    self.summary = "No file-backed declaration found".into();
                 }
             }
             LanguageEvent::Implementation {

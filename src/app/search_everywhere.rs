@@ -199,7 +199,11 @@ impl SearchEverywhere {
                 AppEvent::Search(super::events::SearchAction::Open),
             ),
             (
-                "Go to definition    ⌘B",
+                "Go to declaration    ⌘B",
+                AppEvent::EditorCommand(crate::java::lsp::EditorCommand::Declaration),
+            ),
+            (
+                "Go to definition",
                 AppEvent::EditorCommand(crate::java::lsp::EditorCommand::Definition),
             ),
             (
@@ -312,7 +316,7 @@ fn action_search_score(ui: &egui::Ui, label: &str, query: &str) -> Option<i64> {
 
 fn action_search_aliases(label: &str) -> &'static [&'static str] {
     match label {
-        "Go to definition    ⌘B" => &["go_to_declaration", "vai_alla_dichiarazione"],
+        "Go to declaration    ⌘B" => &["go_to_declaration", "vai_alla_dichiarazione"],
         "Find usages    ⌥F7" => &["references", "riferimenti"],
         "Quick fixes    ⌥↩" => &["intentions", "correzioni_rapide"],
         "Organize imports    ⌃⌥O" => &["optimize_imports", "ottimizza_importazioni"],

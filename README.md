@@ -53,7 +53,7 @@ The command-line link accepts the same optional project or file path: `dist/inte
 | Go to Java symbol | `⌘⌥O` |
 | File structure | `⌘F12` |
 | Complete / parameter info / hover | `Ctrl+Space` / `⌘P` / `F1` (`Ctrl+Shift+Space` alias for parameter info) |
-| Go to definition / find usages | `⌘B` / `⌥F7` |
+| Go to declaration / definition / find usages | `⌘B` / Code menu / `⌥F7` |
 | Rename Java symbol | `Shift+F6` |
 | Toggle Java line comment | `⌘/` |
 | Indent Java code / selected lines; navigate snippet fields | `Tab` / `⇧Tab` |

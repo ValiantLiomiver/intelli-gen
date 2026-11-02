@@ -543,7 +543,7 @@ pub fn keyboard_shortcuts(ctx: &egui::Context, state: &mut AppState) {
         (
             egui::Modifiers::COMMAND,
             egui::Key::B,
-            crate::java::lsp::EditorCommand::Definition,
+            crate::java::lsp::EditorCommand::Declaration,
         ),
         (
             egui::Modifiers::ALT,
