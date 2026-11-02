@@ -40,7 +40,7 @@
 - Add `SearchTab::Actions`.
 - Keep the existing render result tuple; the Actions tab returns its selected command as one `AppEvent`.
 - Reuse `SearchEverywhereOpen(SearchTab::Actions)` for both menu and keyboard routing.
-- Catalog exactly: Go to File, Recent Files, Go to Class, Go to Java Symbol, Search Everywhere, Find Action, Go to Line, File Structure, Find/Replace in File, Find in Project, Go to definition/type definition/implementation, Find usages, Rename Symbol, Organize imports, Reformat code, Save, Save All, Close File, Build, Test, Clean, Run Selected Configuration, Debug Selected Configuration, and Terminal.
+- Catalog exactly: Go to File, Recent Files, Go to Class, Go to Java Symbol, Search Everywhere, Find Action, Go to Line, File Structure, Find/Replace in File, Find in Project, Go to definition/type definition/implementation, Find usages, Quick fixes, Rename Symbol, Organize imports, Reformat code, Save, Save All, Close File, Build, Test, Clean, Run Selected Configuration, Debug Selected Configuration, and Terminal.
 
 - [x] Add the Actions tab, localized action-result list, shared-query substring matching, arrow/Enter selection and click dispatch in `search_everywhere.rs`.
 - [x] Add the `⌘⇧A` keyboard route in `actions.rs` and a Navigate → Find Action… entry in `layout.rs`.

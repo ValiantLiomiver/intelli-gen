@@ -214,6 +214,10 @@ impl SearchEverywhere {
                 "Find usages    ⌥F7",
                 AppEvent::EditorCommand(crate::java::lsp::EditorCommand::References),
             ),
+            (
+                "Quick fixes    ⌥↩",
+                AppEvent::EditorCommand(crate::java::lsp::EditorCommand::CodeActions),
+            ),
             ("Rename Symbol…    Shift+F6", AppEvent::RenameSymbolOpen),
             (
                 "Organize imports    Ctrl+Alt+O",
