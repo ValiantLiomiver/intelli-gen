@@ -205,6 +205,30 @@ pub fn keyboard_shortcuts(ctx: &egui::Context, state: &mut AppState) {
             super::search_everywhere::SearchTab::Files,
         ));
     }
+    if state.find_replace.visible
+        && ctx.input_mut(|input| {
+            input.consume_key(
+                egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
+                egui::Key::G,
+            )
+        })
+    {
+        state.enqueue(AppEvent::Find(
+            crate::editor::find_replace::FindAction::Previous,
+        ));
+    } else if state.find_replace.visible
+        && ctx.input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, egui::Key::G))
+    {
+        state.enqueue(AppEvent::Find(
+            crate::editor::find_replace::FindAction::Next,
+        ));
+    }
+    if ctx.input_mut(|input| input.consume_key(egui::Modifiers::CTRL, egui::Key::R)) {
+        state.enqueue(AppEvent::Run(super::events::RunAction::Start));
+    }
+    if ctx.input_mut(|input| input.consume_key(egui::Modifiers::CTRL, egui::Key::D)) {
+        state.enqueue(AppEvent::Debugger(super::events::DebuggerAction::Start));
+    }
     if ctx.input_mut(|input| {
         input.consume_key(
             egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,

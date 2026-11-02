@@ -42,6 +42,7 @@ The command-line link accepts the same optional project or file path: `dist/inte
 | Next / previous editor tab | `⌘⇧]` / `⌘⇧[` (`Ctrl+Tab` aliases) |
 | Recent files | `⌘E` |
 | Find / replace in file | `⌘F` / `⌘R` |
+| Next / previous match in file | `⌘G` / `⌘⇧G` |
 | Find in project | `⇧⌘F` |
 | Go to line | `⌘L` |
 | Navigate back / forward | `⌘[` / `⌘]` (`Ctrl+Alt+←` / `Ctrl+Alt+→` aliases) |
@@ -58,6 +59,7 @@ The command-line link accepts the same optional project or file path: `dist/inte
 | Java quick fixes | `⌥↩` |
 | Go to type definition | `⇧⌘B` |
 | Go to implementation | `⌥⌘B` |
+| Run / debug selected configuration | `⌃R` / `⌃D` |
 | Save / save all | `⌘S` / `⇧⌘S` |
 
 ## Project scope
