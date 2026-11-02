@@ -80,11 +80,19 @@ impl JdkInstallation {
     }
 
     pub fn label(&self) -> String {
+        self.label_with("invalid path")
+    }
+
+    pub fn label_with(&self, invalid_path: &str) -> String {
         format!(
             "{} {}{}",
             self.vendor.as_deref().unwrap_or("JDK"),
             self.version,
-            if self.valid { "" } else { " (invalid path)" }
+            if self.valid {
+                String::new()
+            } else {
+                format!(" ({invalid_path})")
+            }
         )
     }
 

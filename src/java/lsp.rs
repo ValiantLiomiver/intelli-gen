@@ -4128,20 +4128,22 @@ pub fn render(ui: &mut eframe::egui::Ui, state: &mut crate::app::AppState) {
                     "No direct quick fixes at the caret",
                 ));
             } else {
-                egui::CollapsingHeader::new(format!("Quick fixes ({})", actions.len())).show(
+                egui::CollapsingHeader::new(crate::i18n::ui_format(
                     ui,
-                    |ui| {
-                        egui::ScrollArea::vertical()
-                            .max_height(120.0)
-                            .show(ui, |ui| {
-                                for (index, action) in actions.iter().take(30).enumerate() {
-                                    if ui.button(&action.title).clicked() {
-                                        events.push(AppEvent::ApplyCodeAction(index));
-                                    }
+                    "Quick fixes ({count})",
+                    &[("count", &actions.len().to_string())],
+                ))
+                .show(ui, |ui| {
+                    egui::ScrollArea::vertical()
+                        .max_height(120.0)
+                        .show(ui, |ui| {
+                            for (index, action) in actions.iter().take(30).enumerate() {
+                                if ui.button(&action.title).clicked() {
+                                    events.push(AppEvent::ApplyCodeAction(index));
                                 }
-                            });
-                    },
-                );
+                            }
+                        });
+                });
             }
         }
         if let Some(items) = state.language.diagnostics.get(path) {

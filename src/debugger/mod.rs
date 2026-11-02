@@ -626,9 +626,10 @@ pub fn render(ui: &mut eframe::egui::Ui, state: &mut crate::app::AppState) {
             ui.separator();
             ui.strong(crate::i18n::ui_text(ui, "Debug Console"));
             ui.monospace(&state.debugger.output);
-            egui::CollapsingHeader::new(format!(
-                "Debugger events ({})",
-                state.debugger.event_log.len()
+            egui::CollapsingHeader::new(crate::i18n::ui_format(
+                ui,
+                "Debugger events ({count})",
+                &[("count", &state.debugger.event_log.len().to_string())],
             ))
             .id_salt("debug_event_log")
             .show(ui, |ui| {

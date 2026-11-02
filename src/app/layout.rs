@@ -1056,12 +1056,16 @@ fn render_gradle_sidebar(ui: &mut egui::Ui, state: &mut AppState) {
                 .find(|module| &module.root == path)
                 .map(|module| module.name.clone())
         })
-        .unwrap_or_else(|| format!("{} (root)", model.name));
+        .unwrap_or_else(|| crate::i18n::ui_format(ui, "{name} (root)", &[("name", &model.name)]));
     let mut selected = state.gradle_selected_project.clone();
     egui::ComboBox::from_id_salt("gradle_project_selector")
         .selected_text(project_name)
         .show_ui(ui, |ui| {
-            ui.selectable_value(&mut selected, None, format!("{} (root)", model.name));
+            ui.selectable_value(
+                &mut selected,
+                None,
+                crate::i18n::ui_format(ui, "{name} (root)", &[("name", &model.name)]),
+            );
             for module in &model.modules {
                 ui.selectable_value(&mut selected, Some(module.root.clone()), &module.name);
             }

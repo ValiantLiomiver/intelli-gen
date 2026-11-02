@@ -3536,8 +3536,8 @@ pub fn jdk_selector(
         .map(|id| {
             jdks.iter()
                 .find(|jdk| jdk.id == id)
-                .map(|jdk| jdk.label())
-                .unwrap_or_else(|| format!("Missing JDK ({id})"))
+                .map(|jdk| jdk.label_with(&crate::i18n::ui_text(ui, "invalid path")))
+                .unwrap_or_else(|| crate::i18n::ui_format(ui, "Missing JDK ({id})", &[("id", id)]))
         })
         .unwrap_or_else(|| empty_label.to_owned());
     ui.horizontal(|ui| {
@@ -3547,8 +3547,12 @@ pub fn jdk_selector(
                 ui.selectable_value(selected, None, inherited_label);
                 for jdk in jdks.iter() {
                     ui.add_enabled_ui(jdk.valid && jdk.version.major >= minimum_major, |ui| {
-                        ui.selectable_value(selected, Some(jdk.id.clone()), jdk.label())
-                            .on_hover_text(jdk.home.display().to_string());
+                        ui.selectable_value(
+                            selected,
+                            Some(jdk.id.clone()),
+                            jdk.label_with(&crate::i18n::ui_text(ui, "invalid path")),
+                        )
+                        .on_hover_text(jdk.home.display().to_string());
                     });
                 }
             });
@@ -3628,9 +3632,12 @@ pub fn jdk_settings_ui(ui: &mut egui::Ui, state: &mut AppState) {
             for jdk in &state.settings.jdks {
                 ui.horizontal(|ui| {
                     if jdk.valid {
-                        ui.label(jdk.label());
+                        ui.label(jdk.label_with(&crate::i18n::ui_text(ui, "invalid path")));
                     } else {
-                        ui.colored_label(ui.visuals().error_fg_color, jdk.label());
+                        ui.colored_label(
+                            ui.visuals().error_fg_color,
+                            jdk.label_with(&crate::i18n::ui_text(ui, "invalid path")),
+                        );
                     }
                     if ui
                         .small_button(crate::i18n::ui_text(ui, "Remove"))
@@ -3655,8 +3662,8 @@ pub fn jdk_settings_ui(ui: &mut egui::Ui, state: &mut AppState) {
         "global_jdk",
         &mut state.settings.default_jdk_id,
         &mut state.settings.jdks,
-        "No global default",
-        "No global default",
+        &crate::i18n::ui_text(ui, "No global default"),
+        &crate::i18n::ui_text(ui, "No global default"),
         "Choose JDK…",
         0,
         crate::java::jdk::JdkSelectionTarget::Global,
@@ -3691,8 +3698,8 @@ pub fn jdk_settings_ui(ui: &mut egui::Ui, state: &mut AppState) {
         "jdt_ls_jdk",
         &mut state.settings.jdt_ls_jdk_id,
         &mut state.settings.jdks,
-        "No JDT LS runtime",
-        "No JDT LS runtime",
+        &crate::i18n::ui_text(ui, "No JDT LS runtime"),
+        &crate::i18n::ui_text(ui, "No JDT LS runtime"),
         &crate::i18n::ui_format(
             ui,
             "Choose Java {version}+…",
@@ -3712,9 +3719,10 @@ pub fn jdk_settings_ui(ui: &mut egui::Ui, state: &mut AppState) {
     {
         ui.colored_label(
             ui.visuals().warn_fg_color,
-            format!(
-                "Saved JDT LS runtime is incompatible; using {} for Java intelligence.",
-                runtime.label()
+            crate::i18n::ui_format(
+                ui,
+                "Saved JDT LS runtime is incompatible; using {name} for Java intelligence.",
+                &[("name", &runtime.label())],
             ),
         );
     }
@@ -3859,14 +3867,18 @@ pub fn jdk_settings_ui(ui: &mut egui::Ui, state: &mut AppState) {
                 executable
                     .as_ref()
                     .map(|path| path.display().to_string())
-                    .unwrap_or_else(|| "Unconfigured".into()),
+                    .unwrap_or_else(|| crate::i18n::ui_text(ui, "Unconfigured")),
             );
             if ui
                 .small_button(crate::i18n::ui_text(ui, "Choose…"))
                 .clicked()
             {
                 if let Some(path) = rfd::FileDialog::new()
-                    .set_title(format!("Select {label} executable"))
+                    .set_title(crate::i18n::ui_format(
+                        ui,
+                        "Select {name} executable",
+                        &[("name", label)],
+                    ))
                     .pick_file()
                 {
                     *executable = Some(path);
@@ -3914,8 +3926,17 @@ pub fn project_jdk_ui(ui: &mut egui::Ui, state: &mut AppState) {
         .default_jdk_id
         .as_deref()
         .and_then(|id| state.settings.jdks.iter().find(|jdk| jdk.id == id))
-        .map(|jdk| format!("Use global default ({})", jdk.label()))
-        .unwrap_or_else(|| "Use global default (unconfigured)".into());
+        .map(|jdk| {
+            crate::i18n::ui_format(
+                ui,
+                "Use global default ({name})",
+                &[(
+                    "name",
+                    &jdk.label_with(&crate::i18n::ui_text(ui, "invalid path")),
+                )],
+            )
+        })
+        .unwrap_or_else(|| crate::i18n::ui_text(ui, "Use global default (unconfigured)"));
     let selection_changed = jdk_selector(
         ui,
         "project_jdk",

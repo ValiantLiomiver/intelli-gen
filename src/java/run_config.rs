@@ -1370,13 +1370,15 @@ pub fn render(ui: &mut eframe::egui::Ui, state: &mut crate::app::AppState) {
                     ui.label(crate::i18n::ui_text(ui, "Name")); ui.text_edit_singleline(&mut editor.config.name); ui.end_row();
                     ui.label(crate::i18n::ui_text(ui, "Main class")); ui.text_edit_singleline(&mut editor.config.main_class); ui.end_row();
                     ui.label(crate::i18n::ui_text(ui, "Build module"));
+                    let root_project = crate::i18n::ui_text(ui, "Root project");
+                    let automatic_module = crate::i18n::ui_text(ui, "Automatic from main class");
                     let selected_module = editor.config.project_module.as_ref().map(|path| {
-                        if path.as_os_str().is_empty() { "Root project".to_owned() }
-                        else { project_model.and_then(|model| model.modules.iter().find(|module| module.root.strip_prefix(&model.root).ok() == Some(path.as_path()))).map(|module| module.name.clone()).unwrap_or_else(|| format!("Missing module ({})", path.display())) }
-                    }).unwrap_or_else(|| "Automatic from main class".into());
+                        if path.as_os_str().is_empty() { root_project.clone() }
+                        else { project_model.and_then(|model| model.modules.iter().find(|module| module.root.strip_prefix(&model.root).ok() == Some(path.as_path()))).map(|module| module.name.clone()).unwrap_or_else(|| crate::i18n::ui_format(ui, "Missing module ({path})", &[("path", &path.display().to_string())])) }
+                    }).unwrap_or_else(|| automatic_module.clone());
                     egui::ComboBox::from_id_salt("run_project_module").selected_text(selected_module).show_ui(ui, |ui| {
-                        ui.selectable_value(&mut editor.config.project_module, None, "Automatic from main class");
-                        ui.selectable_value(&mut editor.config.project_module, Some(PathBuf::new()), "Root project");
+                        ui.selectable_value(&mut editor.config.project_module, None, automatic_module);
+                        ui.selectable_value(&mut editor.config.project_module, Some(PathBuf::new()), root_project);
                         if let Some(model) = project_model {
                             for module in &model.modules {
                                 if let Ok(relative) = module.root.strip_prefix(&model.root) {
@@ -1408,11 +1410,11 @@ pub fn render(ui: &mut eframe::egui::Ui, state: &mut crate::app::AppState) {
                     ui.end_row();
                     ui.label(crate::i18n::ui_text(ui, "JDK"));
                     let label = editor.config.jdk_id.as_ref().map(|id| state.settings.jdks.iter().find(|jdk| &jdk.id == id)
-                        .map(|jdk| jdk.label()).unwrap_or_else(|| format!("Unavailable: {id}"))).unwrap_or_else(|| "Project default".into());
+                        .map(|jdk| jdk.label_with(&crate::i18n::ui_text(ui, "invalid path"))).unwrap_or_else(|| crate::i18n::ui_format(ui, "Unavailable: {id}", &[("id", id)]))).unwrap_or_else(|| crate::i18n::ui_text(ui, "Project default"));
                     egui::ComboBox::from_id_salt("run_jdk_override").selected_text(label).show_ui(ui, |ui| {
-                        ui.selectable_value(&mut editor.config.jdk_id, None, "Project default");
+                        ui.selectable_value(&mut editor.config.jdk_id, None, crate::i18n::ui_text(ui, "Project default"));
                         for jdk in &state.settings.jdks {
-                            ui.selectable_value(&mut editor.config.jdk_id, Some(jdk.id.clone()), format!("{} — {}", jdk.label(), jdk.home.display()));
+                            ui.selectable_value(&mut editor.config.jdk_id, Some(jdk.id.clone()), format!("{} — {}", jdk.label_with(&crate::i18n::ui_text(ui, "invalid path")), jdk.home.display()));
                         }
                     });
                     ui.end_row();
