@@ -387,21 +387,25 @@ pub enum LanguageEvent {
     Definition {
         path: PathBuf,
         version: i64,
+        position: Position,
         locations: Vec<Location>,
     },
     TypeDefinition {
         path: PathBuf,
         version: i64,
+        position: Position,
         locations: Vec<Location>,
     },
     Implementation {
         path: PathBuf,
         version: i64,
+        position: Position,
         locations: Vec<Location>,
     },
     References {
         path: PathBuf,
         version: i64,
+        position: Position,
         locations: Vec<Location>,
     },
     CodeActions {
@@ -2309,21 +2313,25 @@ async fn deliver_response(request: Pending, result: &Value, events: &LanguageEve
         EditorCommand::Definition => LanguageEvent::Definition {
             path,
             version,
+            position,
             locations: locations(result),
         },
         EditorCommand::TypeDefinition => LanguageEvent::TypeDefinition {
             path,
             version,
+            position,
             locations: locations(result),
         },
         EditorCommand::Implementation => LanguageEvent::Implementation {
             path,
             version,
+            position,
             locations: locations(result),
         },
         EditorCommand::References => LanguageEvent::References {
             path,
             version,
+            position,
             locations: locations(result),
         },
         EditorCommand::CodeActions => {
@@ -2944,6 +2952,16 @@ struct SyncedDocument {
     version: i64,
 }
 
+fn is_location_command(command: EditorCommand) -> bool {
+    matches!(
+        command,
+        EditorCommand::Definition
+            | EditorCommand::TypeDefinition
+            | EditorCommand::Implementation
+            | EditorCommand::References
+    )
+}
+
 #[derive(Default)]
 pub struct LanguageTool {
     session: Option<LanguageSession>,
@@ -2974,6 +2992,7 @@ pub struct LanguageTool {
     pub hover: Option<(PathBuf, String)>,
     pub locations: Vec<Location>,
     pub locations_title: String,
+    pending_location_request: Option<(EditorCommand, PathBuf, i64, Position)>,
     pub root: Option<PathBuf>,
     symbol_query_pending: Option<(String, Instant)>,
     pub workspace_symbol_query: String,
@@ -3140,6 +3159,7 @@ impl LanguageTool {
         self.signature_help = None;
         self.hover = None;
         self.locations.clear();
+        self.pending_location_request = None;
         self.workspace_symbol_query.clear();
         self.workspace_symbols.clear();
         self.workspace_symbols_error = None;
@@ -3554,6 +3574,18 @@ impl LanguageTool {
         tab_size: usize,
         insert_spaces: bool,
     ) {
+        let position = document.lsp_position();
+        let location_request = is_location_command(command)
+            .then(|| {
+                self.documents
+                    .get(&document.path)
+                    .map(|synced| (command, document.path.clone(), synced.version, position))
+            })
+            .flatten();
+        if is_location_command(command) {
+            self.pending_location_request = None;
+            self.locations.clear();
+        }
         if command == EditorCommand::CodeActions {
             self.code_actions = None;
             self.code_actions_error = None;
@@ -3577,7 +3609,7 @@ impl LanguageTool {
                     .root
                     .clone()
                     .ok_or_else(|| LspError("No Java workspace is open".into()))?,
-                position: document.lsp_position(),
+                position,
                 document_end: document_end_position(&document.text),
                 range: document_line_range(&document.text, document.lsp_position().line),
                 diagnostics: if command == EditorCommand::CodeActions {
@@ -3600,8 +3632,12 @@ impl LanguageTool {
                 insert_spaces,
             })
         })();
-        if let Err(error) = result {
-            self.summary = error.to_string();
+        match result {
+            Ok(()) if is_location_command(command) => {
+                self.pending_location_request = location_request
+            }
+            Ok(()) => {}
+            Err(error) => self.summary = error.to_string(),
         }
     }
     pub fn request_rename(
@@ -3679,6 +3715,23 @@ impl LanguageTool {
             .get(path)
             .is_some_and(|document| document.version == version)
     }
+    fn current_location_request(
+        &self,
+        command: EditorCommand,
+        path: &Path,
+        version: i64,
+        position: Position,
+    ) -> bool {
+        self.pending_location_request
+            .as_ref()
+            .is_some_and(|request| {
+                request.0 == command
+                    && request.1 == path
+                    && request.2 == version
+                    && request.3 == position
+            })
+            && self.current(path, version)
+    }
     pub fn receive(&mut self, update: LanguageUpdate) {
         if update.generation != self.generation {
             return;
@@ -3747,8 +3800,16 @@ impl LanguageTool {
             LanguageEvent::Definition {
                 path,
                 version,
+                position,
                 locations,
-            } if self.current(&path, version) => {
+            } if self.current_location_request(
+                EditorCommand::Definition,
+                &path,
+                version,
+                position,
+            ) =>
+            {
+                self.pending_location_request = None;
                 self.locations = locations;
                 self.locations_title = "Definitions".into();
                 if self.locations.is_empty() {
@@ -3758,8 +3819,16 @@ impl LanguageTool {
             LanguageEvent::Implementation {
                 path,
                 version,
+                position,
                 locations,
-            } if self.current(&path, version) => {
+            } if self.current_location_request(
+                EditorCommand::Implementation,
+                &path,
+                version,
+                position,
+            ) =>
+            {
+                self.pending_location_request = None;
                 self.locations = locations;
                 self.locations_title = "Implementations".into();
                 if self.locations.is_empty() {
@@ -3769,8 +3838,16 @@ impl LanguageTool {
             LanguageEvent::TypeDefinition {
                 path,
                 version,
+                position,
                 locations,
-            } if self.current(&path, version) => {
+            } if self.current_location_request(
+                EditorCommand::TypeDefinition,
+                &path,
+                version,
+                position,
+            ) =>
+            {
+                self.pending_location_request = None;
                 self.locations = locations;
                 self.locations_title = "Type Definitions".into();
                 if self.locations.is_empty() {
@@ -3780,8 +3857,16 @@ impl LanguageTool {
             LanguageEvent::References {
                 path,
                 version,
+                position,
                 locations,
-            } if self.current(&path, version) => {
+            } if self.current_location_request(
+                EditorCommand::References,
+                &path,
+                version,
+                position,
+            ) =>
+            {
+                self.pending_location_request = None;
                 self.locations = locations;
                 self.locations_title = "References".into();
                 if self.locations.is_empty() {
