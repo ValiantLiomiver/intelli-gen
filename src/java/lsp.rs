@@ -778,7 +778,7 @@ mod main_project_tests {
             Some("smoke={value}".into()),
             true,
         );
-        points.toggle(source, 5);
+        points.toggle(source.clone(), 5);
         let resolver = DebugAdapterResolver {
             commands: session.commands.clone(),
             root: project.root.clone(),
@@ -848,6 +848,66 @@ mod main_project_tests {
             }
         ));
         assert!(!second.needs_host_restart());
+        let resolver = DebugAdapterResolver {
+            commands: session.commands.clone(),
+            root: project.root.clone(),
+            bundle: config.debug_bundle.clone(),
+        };
+        let mut step_points = crate::debugger::breakpoints::Breakpoints::default();
+        step_points.toggle(source, 4);
+        let step_service =
+            crate::debugger::DebugService::new(resolver, config.debug_bundle.clone().unwrap())
+                .with_initial_requests(step_points.initial_requests());
+        let mut stepping = step_service.start(&run, &project, &config.jdks[0]).unwrap();
+        let thread = stopped(&mut stepping).await;
+        let client = stepping.client();
+        client
+            .request("stepIn", json!({"threadId":thread}))
+            .await
+            .unwrap();
+        let thread = stopped(&mut stepping).await;
+        let stack = client
+            .request("stackTrace", json!({"threadId":thread}))
+            .await
+            .unwrap();
+        assert_eq!(stack["stackFrames"][0]["line"], 8);
+        client
+            .request("stepOut", json!({"threadId":thread}))
+            .await
+            .unwrap();
+        let thread = stopped(&mut stepping).await;
+        let stack = client
+            .request("stackTrace", json!({"threadId":thread}))
+            .await
+            .unwrap();
+        assert_eq!(stack["stackFrames"][0]["line"], 4);
+        client
+            .request("next", json!({"threadId":thread}))
+            .await
+            .unwrap();
+        let thread = stopped(&mut stepping).await;
+        let stack = client
+            .request("stackTrace", json!({"threadId":thread}))
+            .await
+            .unwrap();
+        assert_eq!(stack["stackFrames"][0]["line"], 5);
+        client
+            .request("continue", json!({"threadId":thread}))
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                stepping.poll();
+                if let Some(result) = stepping.reap() {
+                    result.unwrap();
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("step-in/step-out debug session reaped");
+        assert!(!stepping.needs_host_restart());
         session.shutdown();
         session.worker.take().unwrap().join().unwrap();
     }
