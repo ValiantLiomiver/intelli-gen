@@ -382,6 +382,7 @@ pub enum LanguageEvent {
     Hover {
         path: PathBuf,
         version: i64,
+        position: Position,
         text: String,
     },
     Definition {
@@ -2275,6 +2276,7 @@ async fn deliver_response(request: Pending, result: &Value, events: &LanguageEve
         EditorCommand::Hover => LanguageEvent::Hover {
             path,
             version,
+            position,
             text: hover_text(&result["contents"]),
         },
         EditorCommand::SignatureHelp => {
@@ -3000,7 +3002,7 @@ pub struct LanguageTool {
     pub completion: Option<(PathBuf, i64, Position, Vec<CompletionItem>)>,
     pub completion_selection: Option<usize>,
     pub signature_help: Option<(PathBuf, i64, Vec<SignatureInformation>, usize)>,
-    pub hover: Option<(PathBuf, String)>,
+    pub hover: Option<(PathBuf, i64, Position, String)>,
     pub locations: Vec<Location>,
     pub locations_title: String,
     pending_location_request: Option<(u64, EditorCommand, PathBuf, i64, Position)>,
@@ -3813,10 +3815,13 @@ impl LanguageTool {
             LanguageEvent::Hover {
                 path,
                 version,
+                position,
                 text,
             } if self.current(&path, version) => {
                 self.hover = Some((
                     path,
+                    version,
+                    position,
                     if text.is_empty() {
                         "No documentation at this position".into()
                     } else {
@@ -4134,6 +4139,44 @@ pub enum CompletionPopupAction {
     Dismiss,
 }
 
+pub fn render_hover_popup(
+    ctx: &eframe::egui::Context,
+    path: &Path,
+    document: &Document,
+    position: eframe::egui::Pos2,
+    language: &mut LanguageTool,
+) -> bool {
+    let Some((result_path, version, result_position, text)) = language.hover.as_ref() else {
+        return false;
+    };
+    if result_path != path
+        || *result_position != document.lsp_position()
+        || !language.is_document_current(result_path, *version, &document.text)
+    {
+        return false;
+    }
+    let text = text.clone();
+    let mut dismiss = false;
+    eframe::egui::Area::new(eframe::egui::Id::unique(("java_hover_popup", path)))
+        .order(eframe::egui::Order::Foreground)
+        .fixed_pos(position)
+        .constrain(true)
+        .show(ctx, |ui| {
+            eframe::egui::Frame::popup(ui.style()).show(ui, |ui| {
+                ui.set_max_width(480.0);
+                eframe::egui::ScrollArea::vertical()
+                    .max_height(280.0)
+                    .show(ui, |ui| {
+                        ui.label(text);
+                    });
+                dismiss = ui
+                    .small_button(crate::i18n::ui_text(ui, "Dismiss documentation"))
+                    .clicked();
+            });
+        });
+    dismiss
+}
+
 pub fn render_completion_popup(
     ctx: &eframe::egui::Context,
     path: &Path,
@@ -4288,6 +4331,10 @@ pub fn render(ui: &mut eframe::egui::Ui, state: &mut crate::app::AppState) {
         .active_tab
         .and_then(|index| state.editor_tabs.get(index))
         .map(|tab| tab.path.clone());
+    let paged_editor = state
+        .active_tab
+        .and_then(|index| state.editor_tabs.get(index))
+        .is_some_and(|tab| tab.document.text.len() > crate::editor::document::PAGED_EDITOR_BYTES);
     if let Some(path) = &active_path {
         if let Some((error_path, error_version, error)) = &state.language.code_actions_error
             && error_path == path
@@ -4377,8 +4424,20 @@ pub fn render(ui: &mut eframe::egui::Ui, state: &mut crate::app::AppState) {
                     });
             });
         }
-        if let Some((hover_path, text)) = &state.language.hover {
-            if hover_path == path {
+        if let Some((hover_path, hover_version, hover_position, text)) = &state.language.hover {
+            let hover_is_current = state
+                .active_tab
+                .and_then(|index| state.editor_tabs.get(index))
+                .is_some_and(|tab| {
+                    &tab.path == hover_path
+                        && tab.document.lsp_position() == *hover_position
+                        && state.language.is_document_current(
+                            hover_path,
+                            *hover_version,
+                            &tab.document.text,
+                        )
+                });
+            if paged_editor && hover_is_current {
                 egui::ScrollArea::vertical()
                     .id_salt("java_hover")
                     .max_height(120.0)
@@ -4423,12 +4482,6 @@ pub fn render(ui: &mut eframe::egui::Ui, state: &mut crate::app::AppState) {
         }
     }
     if let Some((path, _, _, items)) = &state.language.completion {
-        let paged_editor = state
-            .active_tab
-            .and_then(|index| state.editor_tabs.get(index))
-            .is_some_and(|tab| {
-                tab.document.text.len() > crate::editor::document::PAGED_EDITOR_BYTES
-            });
         if paged_editor && active_path.as_ref() == Some(path) {
             ui.label(if items.is_empty() {
                 crate::i18n::ui_text(ui, "No completions")

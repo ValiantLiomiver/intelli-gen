@@ -15,6 +15,7 @@ Make Java editing feel more immediate by opening the existing JDT LS completion 
 - Trigger completion after two consecutive Java identifier characters and after a typed dot.
 - Reuse the current JDT LS request path, completion list, selection, and apply action.
 - Render valid completion results in a popup anchored at the editor caret; retain the Java tool-window list for paged large files that cannot provide a stable popup position.
+- Show F1 hover documentation in a matching caret-anchored popup, with the existing Java tool-window fallback for paged large files.
 - Show results only while the same Java file, document version, and caret position remain current; discard stale responses.
 - Keep explicit **Complete** and Ctrl+Space available.
 
@@ -38,4 +39,5 @@ Make Java editing feel more immediate by opening the existing JDT LS completion 
 - Pasted identifiers of two or more characters trigger completion.
 - Results from an old document version or caret position cannot appear or be applied to the new position.
 - Valid completion results appear beside the caret; selecting a row applies it, and Escape or Dismiss closes the list.
+- F1 documentation appears beside the caret that initiated the request and is hidden if the document version or caret position changes.
 - Manual completion and signature help retain current behavior.

@@ -1397,6 +1397,7 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
     let mut editor_command = None;
     let mut breakpoint_action = None;
     let mut completion_popup_action = None;
+    let mut hover_popup_dismissed = false;
     let (indent_size, insert_spaces) = state
         .active_tab
         .and_then(|index| state.editor_tabs.get(index))
@@ -1444,6 +1445,15 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
         );
         let path = tab.path.clone();
         if let Some(position) = completion_position {
+            if state.language.completion.is_none() {
+                hover_popup_dismissed = crate::java::lsp::render_hover_popup(
+                    ui.ctx(),
+                    &path,
+                    &tab.document,
+                    position,
+                    &mut state.language,
+                );
+            }
             completion_popup_action = crate::java::lsp::render_completion_popup(
                 ui.ctx(),
                 &path,
@@ -1513,6 +1523,9 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
                 }
             });
         }
+    }
+    if hover_popup_dismissed {
+        state.language.hover = None;
     }
     match completion_popup_action {
         Some(crate::java::lsp::CompletionPopupAction::Apply(index)) => {

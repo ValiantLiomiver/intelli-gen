@@ -56,3 +56,8 @@
 - [x] Anchor valid completion results to the visible editor caret and preserve stale-result checks.
 - [x] Keep the Java tool-window completion list for paged large files.
 - [x] Verify with formatting, diff, compile, and release-build checks.
+
+### Task 3: Anchor hover documentation to the caret
+
+- [x] Retain the request version and position with hover results, and show matching results beside the caret.
+- [x] Keep the Java tool-window fallback for paged large files.
