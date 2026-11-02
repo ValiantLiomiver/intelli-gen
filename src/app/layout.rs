@@ -166,6 +166,12 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
                     ));
                     ui.close();
                 }
+                if ui.button(translator.text("Find Action…    ⌘⇧A")).clicked() {
+                    state.enqueue(AppEvent::SearchEverywhereOpen(
+                        super::search_everywhere::SearchTab::Actions,
+                    ));
+                    ui.close();
+                }
                 if ui.add_enabled(!state.navigation_back.is_empty(), egui::Button::new(translator.text("Back    ⌘["))).clicked() {
                     state.enqueue(AppEvent::NavigateBack);
                     ui.close();

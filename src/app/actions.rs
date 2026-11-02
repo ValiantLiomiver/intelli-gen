@@ -205,6 +205,16 @@ pub fn keyboard_shortcuts(ctx: &egui::Context, state: &mut AppState) {
             super::search_everywhere::SearchTab::Files,
         ));
     }
+    if ctx.input_mut(|input| {
+        input.consume_key(
+            egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
+            egui::Key::A,
+        )
+    }) {
+        state.enqueue(AppEvent::SearchEverywhereOpen(
+            super::search_everywhere::SearchTab::Actions,
+        ));
+    }
     if state.find_replace.visible
         && ctx.input_mut(|input| {
             input.consume_key(

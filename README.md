@@ -39,6 +39,7 @@ The command-line link accepts the same optional project or file path: `dist/inte
 | Go to class | `⌘O` |
 | Go to file | `⇧⌘O` |
 | Search Everywhere | `Double Shift`; also Navigate → Search Everywhere… |
+| Find IDE action | `⌘⇧A`; also Navigate → Find Action… |
 | Next / previous editor tab | `⌘⇧]` / `⌘⇧[` (`Ctrl+Tab` aliases) |
 | Recent files | `⌘E` |
 | Find / replace in file | `⌘F` / `⌘R` |

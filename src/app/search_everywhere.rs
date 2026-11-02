@@ -13,6 +13,7 @@ pub enum SearchTab {
     Files,
     JavaSymbols,
     JavaClasses,
+    Actions,
 }
 
 #[derive(Default)]
@@ -22,11 +23,15 @@ pub struct SearchEverywhere {
     class_only: bool,
     query: String,
     focus_query: bool,
+    action_query: String,
+    selected_action: usize,
 }
 
 impl SearchEverywhere {
     pub fn open(&mut self, tab: SearchTab) {
         self.visible = true;
+        self.selected_action = 0;
+        self.action_query.clear();
         self.class_only = tab == SearchTab::JavaClasses;
         self.active_tab = if self.class_only {
             SearchTab::JavaSymbols
@@ -68,7 +73,9 @@ impl SearchEverywhere {
                     self.render_contents(ui, files, symbols, language, recent_files);
             });
         let close = context.input(|input| input.key_pressed(egui::Key::Escape));
-        self.visible = open && !close && opened_file.is_none() && location.is_none();
+        let selected_action = self.active_tab == SearchTab::Actions && !actions.is_empty();
+        self.visible =
+            open && !close && opened_file.is_none() && location.is_none() && !selected_action;
         (opened_file, actions, location)
     }
 
@@ -101,11 +108,22 @@ impl SearchEverywhere {
                 self.active_tab = SearchTab::JavaSymbols;
                 self.class_only = false;
             }
+            if ui
+                .selectable_label(
+                    self.active_tab == SearchTab::Actions,
+                    crate::i18n::ui_text(ui, "Actions"),
+                )
+                .clicked()
+            {
+                self.active_tab = SearchTab::Actions;
+                self.class_only = false;
+            }
         });
         let hint = match self.active_tab {
             SearchTab::Files => "Type a file name or path…",
             SearchTab::JavaSymbols | SearchTab::JavaClasses if self.class_only => "Class name…",
             SearchTab::JavaSymbols | SearchTab::JavaClasses => "Class, method, or field name…",
+            SearchTab::Actions => "Action name…",
         };
         let response = ui.add(
             egui::TextEdit::singleline(&mut self.query)
@@ -127,7 +145,148 @@ impl SearchEverywhere {
                     symbols.render_results(ui, &self.query, language, self.class_only);
                 (None, actions, location)
             }
+            SearchTab::Actions => (
+                None,
+                self.render_action_results(ui).into_iter().collect(),
+                None,
+            ),
         }
+    }
+
+    fn render_action_results(&mut self, ui: &mut egui::Ui) -> Option<AppEvent> {
+        if self.action_query != self.query {
+            self.action_query.clone_from(&self.query);
+            self.selected_action = 0;
+        }
+        let query = self.query.trim().to_lowercase();
+        let items = [
+            (
+                "Go to File…    ⇧⌘O",
+                AppEvent::SearchEverywhereOpen(SearchTab::Files),
+            ),
+            (
+                "Recent Files…    ⌘E",
+                AppEvent::SearchEverywhereOpen(SearchTab::Files),
+            ),
+            (
+                "Go to Class…    ⌘O",
+                AppEvent::SearchEverywhereOpen(SearchTab::JavaClasses),
+            ),
+            (
+                "Go to Java Symbol…    ⌘⌥O",
+                AppEvent::SearchEverywhereOpen(SearchTab::JavaSymbols),
+            ),
+            (
+                "Search Everywhere…    ⇧⇧",
+                AppEvent::SearchEverywhereOpen(SearchTab::Files),
+            ),
+            (
+                "Find Action…    ⌘⇧A",
+                AppEvent::SearchEverywhereOpen(SearchTab::Actions),
+            ),
+            ("Go to Line…    ⌘L", AppEvent::GoToLineOpen),
+            ("File Structure…    ⌘F12", AppEvent::FileStructureOpen),
+            (
+                "Find in File…    ⌘F",
+                AppEvent::Find(crate::editor::find_replace::FindAction::Open { replace: false }),
+            ),
+            (
+                "Replace in File…    ⌘R",
+                AppEvent::Find(crate::editor::find_replace::FindAction::Open { replace: true }),
+            ),
+            (
+                "Find in Project…    ⇧⌘F",
+                AppEvent::Search(super::events::SearchAction::Open),
+            ),
+            (
+                "Go to definition    ⌘B",
+                AppEvent::EditorCommand(crate::java::lsp::EditorCommand::Definition),
+            ),
+            (
+                "Go to type definition    ⇧⌘B",
+                AppEvent::EditorCommand(crate::java::lsp::EditorCommand::TypeDefinition),
+            ),
+            (
+                "Go to implementation    ⌥⌘B",
+                AppEvent::EditorCommand(crate::java::lsp::EditorCommand::Implementation),
+            ),
+            (
+                "Find usages    ⌥F7",
+                AppEvent::EditorCommand(crate::java::lsp::EditorCommand::References),
+            ),
+            ("Rename Symbol…    Shift+F6", AppEvent::RenameSymbolOpen),
+            (
+                "Organize imports    Ctrl+Alt+O",
+                AppEvent::EditorCommand(crate::java::lsp::EditorCommand::OrganizeImports),
+            ),
+            (
+                "Reformat code    ⌥⌘L",
+                AppEvent::EditorCommand(crate::java::lsp::EditorCommand::Format),
+            ),
+            ("Save                        ⌘S", AppEvent::SaveActiveFile),
+            ("Save All                 ⇧⌘S", AppEvent::SaveAllFiles),
+            ("Close File                ⌘W", AppEvent::CloseActiveFile),
+            ("Build", AppEvent::Build(super::events::BuildAction::Build)),
+            ("Test", AppEvent::Build(super::events::BuildAction::Test)),
+            ("Clean", AppEvent::Build(super::events::BuildAction::Clean)),
+            (
+                "Run Selected Configuration    ⌃R",
+                AppEvent::Run(super::events::RunAction::Start),
+            ),
+            (
+                "Debug Selected Configuration    ⌃D",
+                AppEvent::Debugger(super::events::DebuggerAction::Start),
+            ),
+            (
+                "Terminal",
+                AppEvent::Terminal(super::events::TerminalAction::Open),
+            ),
+        ];
+        let results: Vec<_> = items
+            .iter()
+            .filter(|(label, _)| {
+                let translated = crate::i18n::ui_text(ui, label).to_lowercase();
+                query.is_empty()
+                    || translated.contains(&query)
+                    || label.to_lowercase().contains(&query)
+            })
+            .collect();
+        let (up, down, enter) = ui.input(|input| {
+            (
+                input.key_pressed(egui::Key::ArrowUp),
+                input.key_pressed(egui::Key::ArrowDown),
+                input.key_pressed(egui::Key::Enter),
+            )
+        });
+        if up && !results.is_empty() {
+            self.selected_action = self.selected_action.saturating_sub(1);
+        }
+        if down && !results.is_empty() {
+            self.selected_action = (self.selected_action + 1).min(results.len() - 1);
+        }
+        let mut chosen = enter
+            .then(|| results.get(self.selected_action).map(|item| item.1.clone()))
+            .flatten();
+        if results.is_empty() {
+            ui.weak(crate::i18n::ui_text(ui, "No matching actions"));
+        }
+        egui::ScrollArea::vertical()
+            .max_height(310.0)
+            .show(ui, |ui| {
+                for (index, (label, event)) in results.iter().enumerate() {
+                    let response = ui.selectable_label(
+                        index == self.selected_action,
+                        crate::i18n::ui_text(ui, label),
+                    );
+                    if response.clicked() {
+                        chosen = Some(event.clone());
+                    }
+                    if response.hovered() {
+                        self.selected_action = index;
+                    }
+                }
+            });
+        chosen
     }
 }
 
