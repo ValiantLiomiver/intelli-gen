@@ -383,6 +383,20 @@ mod tests {
     }
 
     #[test]
+    fn build_summaries_translate_without_changing_project_paths() {
+        let (translator, error) = Translator::load(LanguagePreference::Italian, None);
+        assert!(error.is_none());
+        assert_eq!(
+            translator.message("Maven test in /tmp/project"),
+            "Maven test in /tmp/project"
+        );
+        assert_eq!(
+            translator.message("/tmp/project — Finished — exit 0 — 1.2s"),
+            "/tmp/project — Finished — codice 0 — 1.2s"
+        );
+    }
+
+    #[test]
     fn builtin_catalogs_parse_and_preserve_translation_parameters() {
         let english = parse_catalog(ENGLISH).expect("valid English catalog");
         let italian = parse_catalog(ITALIAN).expect("valid Italian catalog");

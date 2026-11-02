@@ -1484,7 +1484,7 @@ pub fn render(ui: &mut egui::Ui, state: &mut crate::app::AppState) {
             ));
         }
     });
-    ui.label(&state.build.summary);
+    ui.label(crate::i18n::message(ui.ctx(), &state.build.summary));
     if !state.build.selected_jdk.is_empty() {
         ui.small(format!("JDK: {}", state.build.selected_jdk));
     }
