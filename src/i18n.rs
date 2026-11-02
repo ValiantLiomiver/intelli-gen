@@ -311,6 +311,29 @@ mod tests {
     use super::*;
 
     #[test]
+    fn italian_project_open_status_preserves_paths_and_build_details() {
+        let (translator, error) = Translator::load(LanguagePreference::Italian, None);
+        assert!(error.is_none());
+        for (source, expected) in [
+            (
+                "Opened /tmp/progetto — Maven build at /tmp/root (2 modules)",
+                "Aperto /tmp/progetto — build Maven in /tmp/root (2 moduli)",
+            ),
+            (
+                "Opened /tmp/progetto — no Maven or Gradle project found",
+                "Aperto /tmp/progetto — nessun progetto Maven o Gradle trovato",
+            ),
+            (
+                "Opened /tmp/progetto — build discovery failed",
+                "Aperto /tmp/progetto — riconoscimento della build non riuscito",
+            ),
+            ("Opened /tmp/Main.java", "Aperto /tmp/Main.java"),
+        ] {
+            assert_eq!(translator.message(source), expected);
+        }
+    }
+
+    #[test]
     fn dynamic_messages_prefer_specific_templates_over_generic_matches() {
         let catalog = HashMap::from([
             (

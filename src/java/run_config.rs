@@ -117,6 +117,55 @@ mod tests {
     use super::*;
 
     #[test]
+    fn configuration_selector_translates_placeholder_and_preserves_user_names() {
+        use eframe::egui;
+        fn has_text(shape: &egui::epaint::Shape, expected: &str) -> bool {
+            match shape {
+                egui::epaint::Shape::Text(text) => text.galley.text() == expected,
+                egui::epaint::Shape::Vec(shapes) => {
+                    shapes.iter().any(|shape| has_text(shape, expected))
+                }
+                _ => false,
+            }
+        }
+        for (language, placeholder) in [
+            (
+                crate::i18n::LanguagePreference::Italian,
+                "Configurazione di esecuzione…",
+            ),
+            (
+                crate::i18n::LanguagePreference::English,
+                "Run configuration…",
+            ),
+        ] {
+            let ctx = egui::Context::default();
+            let (translator, _) = crate::i18n::Translator::load(language, None);
+            crate::i18n::install(&ctx, &translator);
+            let mut tool = RunTool::default();
+            for selected in [false, true] {
+                if selected {
+                    let mut config = RunConfiguration::new(Path::new("/tmp/project"));
+                    config.name = "My run".into();
+                    tool.selected = Some(config.id.clone());
+                    tool.configurations.push(config);
+                }
+                let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+                    configuration_selector(ui, &mut tool)
+                });
+                output.textures_delta.clear();
+                let expected = if selected { "My run" } else { placeholder };
+                assert!(
+                    output
+                        .shapes
+                        .iter()
+                        .any(|shape| has_text(&shape.shape, expected)),
+                    "missing selector text: {expected}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn configuration_rejects_malformed_main_class_and_module_names() {
         let mut config = RunConfiguration::new(Path::new("/tmp/project"));
         config.main_class = "com..example.Main".into();
@@ -1175,11 +1224,12 @@ impl RunTool {
 }
 
 pub fn configuration_selector(ui: &mut eframe::egui::Ui, tool: &mut RunTool) {
+    let placeholder = crate::i18n::ui_text(ui, "Run configuration…");
     eframe::egui::ComboBox::from_id_salt("run_configuration_selector")
         .selected_text(
             tool.selected()
                 .map(|config| config.name.as_str())
-                .unwrap_or("Run configuration…"),
+                .unwrap_or(&placeholder),
         )
         .show_ui(ui, |ui| {
             for config in &tool.configurations {

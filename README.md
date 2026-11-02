@@ -105,6 +105,16 @@ repositories or download dependencies. No JetBrains implementation code is inclu
 
 ## Java tooling runtime verification
 
+On 2026-11-02, REA observed the packaged native window through macOS
+Accessibility after opening the app with Launch Services (Evidence
+`ev_1133777feb23fd52749d57ab74c83c22e0362a933d1e7e3c59a0c53a7db829ac`,
+executable SHA-256 `d8bbac0cc84205d33a16526b77d625d23c3059b78c95f7c7b22c8ca574c188c3`).
+The untruncated tree showed the opened Maven project and Italian menus/panels.
+This exposed untranslated run-selector and project-opening text, now covered by
+regression tests and the two language catalogs. Screen capture was disabled
+because the host lacked macOS Screen Recording permission; this observation
+does not establish visual layout or the full edit/build/debug widget workflow.
+
 A local protocol smoke test on 2026-10-30 started the packaged JDT LS 1.62.0
 with the existing IntelliJ JBR 25.0.4.1 runtime, a temporary workspace, and a
 writable copy of the packaged macOS configuration. It loaded the packaged Java
