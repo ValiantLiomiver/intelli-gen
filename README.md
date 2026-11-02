@@ -189,11 +189,13 @@ differs from the source directory name, which is important for expression
 evaluation in remapped Gradle modules. Existing name inference remains available
 when the server returns no matching main class.
 
-The optional `live_worker_resolves_server_project_name` test passed using the
-production `JavaLanguageService` worker and `ClasspathResolver`. It started the
-packaged server, received runtime classpaths, resolved the server project name
-`smoke` rather than the deliberately incorrect model name `directory-fallback`,
-and joined the language worker after shutdown.
+The optional `live_worker_resolves_server_project_name` test passed on
+2026-11-02 using the packaged app built from commit `4f6256c`. It exercised the
+production `JavaLanguageService`, `ClasspathResolver`, and `DebugService`: Maven
+import, project-name resolution, breakpoint and expression evaluation, step over,
+step into/out, conditional logpoint output, cancellation, and worker cleanup.
+The server resolved `smoke` rather than the deliberately incorrect model name
+`directory-fallback`.
 
 For this test, use the same `smoke` fixture with an Eclipse `.project` declaring
 `org.eclipse.jdt.core.javanature` and a `.classpath` with the source root, JRE
@@ -287,12 +289,27 @@ sessions (breakpoint/evaluation/stepping plus conditional logpoint/cancellation)
 
 To reproduce this variant, use the same environment and ignored test command,
 but provide a POM with group/artifact `smoke:smoke`, version `1`, and Java
-source/target/release `25`, without dependencies. Put the seven-line `Main.java`
-fixture in `src/main/java/` and compile it with debug information into
-`target/classes` before the test. The fixture intentionally uses a different
-physical directory name from its Maven artifact name. This verifies the import
-and debug workers together; native project opening and widget routing remain
-outside this test.
+source/target/release `25`, without dependencies. Put this `Main.java` in
+`src/main/java/` and compile it with debug information into `target/classes`
+before the test. The helper method at line 8 is used by the step-into assertion;
+line 4 is the initial breakpoint and line 5 is the following statement.
+
+```java
+public class Main {
+  public static void main(String[] args) {
+    int value = 40;
+    value = add(value, 2);
+    System.out.println(value);
+  }
+  static int add(int left, int right) {
+    return left + right;
+  }
+}
+```
+
+The fixture intentionally uses a different physical directory name from its
+Maven artifact name. This verifies project import and the Java debug worker
+together; native project opening and widget routing remain outside this test.
 
 The same live worker test passed for a Gradle 8.12.1 project with no Eclipse
 metadata or wrapper, using its local distribution and an isolated Gradle cache
