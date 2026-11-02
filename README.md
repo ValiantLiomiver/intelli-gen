@@ -287,13 +287,28 @@ debug launch used JBR Java 25. It checked the server project name `smoke-project
 the imported `bin/main` classpath and compiled `Main.class`, then completed both
 debug sessions. Evaluating `System.getProperty("java.specification.version")`
 inside the debuggee confirmed Java 25. These are worker-level checks, not native
-UI verification.
+UI verification. The same run now also covers step into the `add` method on
+line 8, step out to its call on line 4, and step over to line 5.
 
 To reproduce the Gradle variant, use a disposable directory named `project`,
 `settings.gradle` containing `rootProject.name = 'smoke'`, and `build.gradle`
-containing `plugins { id 'java' }`. Put the same seven-line `Main.java` under
-`src/main/java/` and run the installed Gradle's `--offline --no-daemon classes`
-with Java 23 first. Set `INTELLI_GEN_DAP_PROJECT`, `INTELLI_GEN_JAVA_HOME` and
+containing `plugins { id 'java' }`. Put this `Main.java` under `src/main/java/`:
+
+```java
+public class Main {
+  public static void main(String[] args) {
+    int value = 40;
+    value = add(value, 2);
+    System.out.println(value);
+  }
+  static int add(int left, int right) {
+    return left + right;
+  }
+}
+```
+
+Run the installed Gradle's `--offline --no-daemon classes` with Java 23 first.
+Set `INTELLI_GEN_DAP_PROJECT`, `INTELLI_GEN_JAVA_HOME` and
 `INTELLI_GEN_JAVA_RESOURCES` as above, plus `INTELLI_GEN_PROJECT_JAVA_HOME` to
 Java 23 and `INTELLI_GEN_GRADLE_HOME` to the Gradle distribution root. Keep
 `GRADLE_USER_HOME` on the same disposable cache for the build and test. Run
