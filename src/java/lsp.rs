@@ -388,24 +388,28 @@ pub enum LanguageEvent {
         path: PathBuf,
         version: i64,
         position: Position,
+        request_id: Option<u64>,
         locations: Vec<Location>,
     },
     TypeDefinition {
         path: PathBuf,
         version: i64,
         position: Position,
+        request_id: Option<u64>,
         locations: Vec<Location>,
     },
     Implementation {
         path: PathBuf,
         version: i64,
         position: Position,
+        request_id: Option<u64>,
         locations: Vec<Location>,
     },
     References {
         path: PathBuf,
         version: i64,
         position: Position,
+        request_id: Option<u64>,
         locations: Vec<Location>,
     },
     CodeActions {
@@ -1223,6 +1227,7 @@ enum LanguageCommand {
         range: Range,
         diagnostics: Vec<LanguageDiagnostic>,
         version: i64,
+        navigation_request_id: Option<u64>,
         rename_to: Option<String>,
         tab_size: usize,
         insert_spaces: bool,
@@ -1806,6 +1811,7 @@ struct Pending {
     project_root: PathBuf,
     version: i64,
     position: Position,
+    navigation_request_id: Option<u64>,
     rename_to: Option<String>,
     sent: Instant,
 }
@@ -1939,7 +1945,7 @@ async fn protocol(
                     LanguageCommand::Change { path, text, version } => notify(input, "textDocument/didChange", json!({"textDocument": {"uri": uri(&path)?, "version": version}, "contentChanges": [{"text": text}]})).await?,
                     LanguageCommand::Save(path) => notify(input, "textDocument/didSave", json!({"textDocument": {"uri": uri(&path)?}})).await?,
                     LanguageCommand::Close(path) => notify(input, "textDocument/didClose", json!({"textDocument": {"uri": uri(&path)?}})).await?,
-                    LanguageCommand::Request { command, path, project_root, position, document_end, range, diagnostics, version, rename_to, tab_size, insert_spaces } => {
+                    LanguageCommand::Request { command, path, project_root, position, document_end, range, diagnostics, version, navigation_request_id, rename_to, tab_size, insert_spaces } => {
                         let id = next_id; next_id += 1;
                         let mut params = json!({"textDocument": {"uri": uri(&path)?}, "position": position});
                         if let Some(new_name) = &rename_to {
@@ -1961,7 +1967,7 @@ async fn protocol(
                             }
                             continue;
                         }
-                        pending.insert(id, Pending { command, path, project_root, version, position, rename_to, sent: Instant::now() });
+                        pending.insert(id, Pending { command, path, project_root, version, position, navigation_request_id, rename_to, sent: Instant::now() });
                         send(input, json!({"jsonrpc": "2.0", "id": id, "method": command.method(), "params": params})).await?;
                     }
                     LanguageCommand::SearchSymbols { query } => {
@@ -2190,6 +2196,7 @@ async fn deliver_response(request: Pending, result: &Value, events: &LanguageEve
         path,
         version,
         position,
+        navigation_request_id,
         ..
     } = request;
     let event = match command {
@@ -2314,24 +2321,28 @@ async fn deliver_response(request: Pending, result: &Value, events: &LanguageEve
             path,
             version,
             position,
+            request_id: navigation_request_id,
             locations: locations(result),
         },
         EditorCommand::TypeDefinition => LanguageEvent::TypeDefinition {
             path,
             version,
             position,
+            request_id: navigation_request_id,
             locations: locations(result),
         },
         EditorCommand::Implementation => LanguageEvent::Implementation {
             path,
             version,
             position,
+            request_id: navigation_request_id,
             locations: locations(result),
         },
         EditorCommand::References => LanguageEvent::References {
             path,
             version,
             position,
+            request_id: navigation_request_id,
             locations: locations(result),
         },
         EditorCommand::CodeActions => {
@@ -2992,7 +3003,8 @@ pub struct LanguageTool {
     pub hover: Option<(PathBuf, String)>,
     pub locations: Vec<Location>,
     pub locations_title: String,
-    pending_location_request: Option<(EditorCommand, PathBuf, i64, Position)>,
+    pending_location_request: Option<(u64, EditorCommand, PathBuf, i64, Position)>,
+    next_location_request_id: u64,
     pub root: Option<PathBuf>,
     symbol_query_pending: Option<(String, Instant)>,
     pub workspace_symbol_query: String,
@@ -3450,6 +3462,7 @@ impl LanguageTool {
                 range: document_line_range(&document.text, document.lsp_position().line),
                 diagnostics: Vec::new(),
                 version: synced.version,
+                navigation_request_id: None,
                 rename_to: None,
                 tab_size: 4,
                 insert_spaces: true,
@@ -3575,15 +3588,23 @@ impl LanguageTool {
         insert_spaces: bool,
     ) {
         let position = document.lsp_position();
-        let location_request = is_location_command(command)
-            .then(|| {
-                self.documents
-                    .get(&document.path)
-                    .map(|synced| (command, document.path.clone(), synced.version, position))
+        let navigation_request_id = is_location_command(command).then(|| {
+            self.next_location_request_id = self.next_location_request_id.wrapping_add(1).max(1);
+            self.next_location_request_id
+        });
+        let location_request = navigation_request_id.and_then(|request_id| {
+            self.documents.get(&document.path).map(|synced| {
+                (
+                    request_id,
+                    command,
+                    document.path.clone(),
+                    synced.version,
+                    position,
+                )
             })
-            .flatten();
+        });
         if is_location_command(command) {
-            self.pending_location_request = None;
+            self.pending_location_request = location_request;
             self.locations.clear();
         }
         if command == EditorCommand::CodeActions {
@@ -3627,17 +3648,20 @@ impl LanguageTool {
                     Vec::new()
                 },
                 version: synced.version,
+                navigation_request_id,
                 rename_to: None,
                 tab_size: tab_size.clamp(1, 8),
                 insert_spaces,
             })
         })();
         match result {
-            Ok(()) if is_location_command(command) => {
-                self.pending_location_request = location_request
-            }
             Ok(()) => {}
-            Err(error) => self.summary = error.to_string(),
+            Err(error) => {
+                if is_location_command(command) {
+                    self.pending_location_request = None;
+                }
+                self.summary = error.to_string();
+            }
         }
     }
     pub fn request_rename(
@@ -3681,6 +3705,7 @@ impl LanguageTool {
                 range: document_line_range(&document.text, position.line),
                 diagnostics: Vec::new(),
                 version: synced.version,
+                navigation_request_id: None,
                 rename_to: Some(new_name.trim().to_owned()),
                 tab_size: 4,
                 insert_spaces: true,
@@ -3717,6 +3742,7 @@ impl LanguageTool {
     }
     fn current_location_request(
         &self,
+        request_id: Option<u64>,
         command: EditorCommand,
         path: &Path,
         version: i64,
@@ -3725,10 +3751,11 @@ impl LanguageTool {
         self.pending_location_request
             .as_ref()
             .is_some_and(|request| {
-                request.0 == command
-                    && request.1 == path
-                    && request.2 == version
-                    && request.3 == position
+                Some(request.0) == request_id
+                    && request.1 == command
+                    && request.2 == path
+                    && request.3 == version
+                    && request.4 == position
             })
             && self.current(path, version)
     }
@@ -3801,8 +3828,10 @@ impl LanguageTool {
                 path,
                 version,
                 position,
+                request_id,
                 locations,
             } if self.current_location_request(
+                request_id,
                 EditorCommand::Definition,
                 &path,
                 version,
@@ -3820,8 +3849,10 @@ impl LanguageTool {
                 path,
                 version,
                 position,
+                request_id,
                 locations,
             } if self.current_location_request(
+                request_id,
                 EditorCommand::Implementation,
                 &path,
                 version,
@@ -3839,8 +3870,10 @@ impl LanguageTool {
                 path,
                 version,
                 position,
+                request_id,
                 locations,
             } if self.current_location_request(
+                request_id,
                 EditorCommand::TypeDefinition,
                 &path,
                 version,
@@ -3858,8 +3891,10 @@ impl LanguageTool {
                 path,
                 version,
                 position,
+                request_id,
                 locations,
             } if self.current_location_request(
+                request_id,
                 EditorCommand::References,
                 &path,
                 version,
