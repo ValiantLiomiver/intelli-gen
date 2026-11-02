@@ -311,7 +311,9 @@ pub fn keyboard_shortcuts(ctx: &egui::Context, state: &mut AppState) {
         state.enqueue(AppEvent::CloseActiveFile);
     }
     if ctx.input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, egui::Key::P)) {
-        state.enqueue(AppEvent::QuickOpenOpen);
+        state.enqueue(AppEvent::SearchEverywhereOpen(
+            super::search_everywhere::SearchTab::Files,
+        ));
     }
     if ctx.input_mut(|input| {
         input.consume_key(egui::Modifiers::CTRL | egui::Modifiers::ALT, egui::Key::O)
@@ -326,7 +328,9 @@ pub fn keyboard_shortcuts(ctx: &egui::Context, state: &mut AppState) {
             egui::Key::O,
         )
     }) {
-        state.enqueue(AppEvent::SymbolSearchOpen);
+        state.enqueue(AppEvent::SearchEverywhereOpen(
+            super::search_everywhere::SearchTab::JavaSymbols,
+        ));
     }
     if ctx.input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, egui::Key::F12)) {
         state.enqueue(AppEvent::FileStructureOpen);
@@ -453,7 +457,7 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
             AppEvent::OpenProject(path) => {
                 state.pending_run = None;
                 state.quick_open.cancel();
-                state.symbol_search.close();
+                state.search_everywhere.close();
                 state.new_java_class = None;
                 state.new_java_project = None;
                 state.rename_symbol = None;
@@ -900,14 +904,11 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                     Err(error) => state.last_error = Some(error),
                 }
             }
-            AppEvent::QuickOpenOpen => {
+            AppEvent::SearchEverywhereOpen(tab) => {
                 if !state.quit_requested {
-                    state.quick_open.open();
-                }
-            }
-            AppEvent::SymbolSearchOpen => {
-                if !state.quit_requested {
-                    state.symbol_search.open();
+                    state.quick_open.reset_selection();
+                    state.symbol_search.reset_selection();
+                    state.search_everywhere.open(tab);
                 }
             }
             AppEvent::FileStructureOpen => {
@@ -1092,7 +1093,10 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                 state.pending_close = None;
                 state.quit_requested = false;
             }
-            AppEvent::RequestQuit => state.quit_requested = true,
+            AppEvent::RequestQuit => {
+                state.quit_requested = true;
+                state.search_everywhere.close();
+            }
             AppEvent::EditorCompleted(completion) => editor_completed(state, completion),
             AppEvent::EditorCommand(command) => {
                 let (tab_size, insert_spaces) = state

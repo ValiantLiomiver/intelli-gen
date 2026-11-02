@@ -19,10 +19,7 @@ pub struct QuickOpen {
     files: Arc<Vec<Entry>>,
     matches: Vec<(usize, i64)>,
     last_query: String,
-    query: String,
     selected: usize,
-    visible: bool,
-    focus_query: bool,
     loading: bool,
     warning: Option<String>,
     error: Option<String>,
@@ -56,10 +53,7 @@ impl Default for QuickOpen {
             files: Arc::new(Vec::new()),
             matches: Vec::new(),
             last_query: String::new(),
-            query: String::new(),
             selected: 0,
-            visible: false,
-            focus_query: false,
             loading: false,
             warning: None,
             error: None,
@@ -78,7 +72,6 @@ impl QuickOpen {
             return;
         }
         self.cancel_index();
-        self.close();
         self.root = root;
         self.indexed_root = None;
         self.files = Arc::new(Vec::new());
@@ -87,30 +80,16 @@ impl QuickOpen {
         self.warning = None;
     }
 
-    pub fn open(&mut self) {
+    pub fn ensure_indexed(&mut self) {
         let Some(root) = self.root.clone() else {
             return;
         };
-        self.visible = true;
-        self.query.clear();
-        self.last_query = "\0".into();
-        self.selected = 0;
-        self.focus_query = true;
-        self.error = None;
-        if self.indexed_root.as_ref() == Some(&root) {
-            self.update_matches();
-        } else {
+        if self.indexed_root.as_ref() != Some(&root) && self.pending_root.as_ref() != Some(&root) {
             self.start_index(root);
         }
     }
 
-    pub fn close(&mut self) {
-        self.visible = false;
-        self.focus_query = false;
-    }
-
     pub fn cancel(&mut self) {
-        self.close();
         self.cancel_index();
         self.indexed_root = None;
         self.files = Arc::new(Vec::new());
@@ -173,7 +152,6 @@ impl QuickOpen {
                             self.indexed_root = Some(root);
                             self.warning = warning;
                             self.last_query = "\0".into();
-                            self.update_matches();
                         }
                         Err(error) => self.error = Some(error),
                     }
@@ -206,100 +184,79 @@ impl QuickOpen {
         !self.workers.is_empty()
     }
 
-    pub fn render(&mut self, ctx: &egui::Context) -> Option<PathBuf> {
-        if !self.visible {
+    pub fn reset_selection(&mut self) {
+        self.selected = 0;
+    }
+
+    pub fn render_results(&mut self, ui: &mut egui::Ui, query: &mut String) -> Option<PathBuf> {
+        if self.root.is_none() {
+            ui.weak(crate::i18n::ui_text(ui, "Open a project to search files"));
             return None;
         }
-        let mut chosen = None;
-        let mut close = false;
-        egui::Window::new(crate::i18n::text(ctx, "Go to File"))
-            .collapsible(false)
-            .resizable(false)
-            .fixed_size([560.0, 420.0])
-            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-            .show(ctx, |ui| {
-                let response = ui.add(
-                    egui::TextEdit::singleline(&mut self.query)
-                        .hint_text(crate::i18n::ui_text(ui, "Type a file name or path…"))
-                        .desired_width(f32::INFINITY),
-                );
-                if self.focus_query {
-                    response.request_focus();
-                    self.focus_query = false;
-                }
-                if response.changed() {
-                    self.update_matches();
-                }
-                let (up, down, enter, escape) = ui.input(|input| {
-                    (
-                        input.key_pressed(egui::Key::ArrowUp),
-                        input.key_pressed(egui::Key::ArrowDown),
-                        input.key_pressed(egui::Key::Enter),
-                        input.key_pressed(egui::Key::Escape),
-                    )
-                });
-                if up && !self.matches.is_empty() {
-                    self.selected = self.selected.saturating_sub(1);
-                }
-                if down && !self.matches.is_empty() {
-                    self.selected = (self.selected + 1).min(self.matches.len() - 1);
-                }
-                if escape {
-                    close = true;
-                }
-                if let Some((index, _)) = self.matches.get(self.selected)
-                    && enter
-                {
-                    chosen = Some(self.files[*index].path.clone());
-                    close = true;
-                }
-                if self.loading {
-                    ui.horizontal(|ui| {
-                        ui.spinner();
-                        ui.label(crate::i18n::ui_text(ui, "Indexing project files…"));
-                    });
-                } else if let Some(error) = &self.error {
-                    ui.colored_label(
-                        ui.visuals().error_fg_color,
-                        crate::i18n::message(ui.ctx(), error),
-                    );
-                } else if self.matches.is_empty() {
-                    ui.weak(crate::i18n::ui_text(ui, "No matching files"));
-                }
-                if let Some(warning) = &self.warning {
-                    ui.weak(warning);
-                }
-                egui::ScrollArea::vertical()
-                    .max_height(330.0)
-                    .show(ui, |ui| {
-                        for (row, (index, _)) in self.matches.iter().enumerate() {
-                            let selected = row == self.selected;
-                            let response =
-                                ui.selectable_label(selected, &self.files[*index].display);
-                            if response.clicked() {
-                                chosen = Some(self.files[*index].path.clone());
-                                close = true;
-                            }
-                            if response.hovered() {
-                                self.selected = row;
-                            }
-                        }
-                    });
-            });
-        if close || chosen.is_some() {
-            self.close();
+        self.ensure_indexed();
+        if self.last_query != *query {
+            self.update_matches(query);
         }
+        let mut chosen = None;
+        let (up, down, enter) = ui.input(|input| {
+            (
+                input.key_pressed(egui::Key::ArrowUp),
+                input.key_pressed(egui::Key::ArrowDown),
+                input.key_pressed(egui::Key::Enter),
+            )
+        });
+        if up && !self.matches.is_empty() {
+            self.selected = self.selected.saturating_sub(1);
+        }
+        if down && !self.matches.is_empty() {
+            self.selected = (self.selected + 1).min(self.matches.len() - 1);
+        }
+        if let Some((index, _)) = self.matches.get(self.selected)
+            && enter
+        {
+            chosen = Some(self.files[*index].path.clone());
+        }
+        if self.loading {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label(crate::i18n::ui_text(ui, "Indexing project files…"));
+            });
+        } else if let Some(error) = &self.error {
+            ui.colored_label(
+                ui.visuals().error_fg_color,
+                crate::i18n::message(ui.ctx(), error),
+            );
+        } else if self.matches.is_empty() {
+            ui.weak(crate::i18n::ui_text(ui, "No matching files"));
+        }
+        if let Some(warning) = &self.warning {
+            ui.weak(warning);
+        }
+        egui::ScrollArea::vertical()
+            .max_height(310.0)
+            .show(ui, |ui| {
+                for (row, (index, _)) in self.matches.iter().enumerate() {
+                    let selected = row == self.selected;
+                    let response = ui.selectable_label(selected, &self.files[*index].display);
+                    if response.clicked() {
+                        chosen = Some(self.files[*index].path.clone());
+                    }
+                    if response.hovered() {
+                        self.selected = row;
+                    }
+                }
+            });
         chosen
     }
 
-    fn update_matches(&mut self) {
-        if self.last_query == self.query {
+    fn update_matches(&mut self, query: &str) {
+        if self.last_query == query {
             return;
         }
-        self.last_query.clone_from(&self.query);
+        self.last_query = query.to_owned();
         self.matches.clear();
         self.selected = 0;
-        let query = self.query.to_lowercase();
+        let query = query.to_lowercase();
         let files = Arc::clone(&self.files);
         let current_generation = Arc::clone(&self.generation);
         let search_generation = Arc::clone(&self.search_generation);
@@ -456,4 +413,37 @@ fn fuzzy_score(path: &str, filename: &str, query: &str) -> Option<i64> {
         score += 100;
     }
     Some(score)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ignores_file_index_completion_from_previous_project() {
+        let old_root = PathBuf::from("/tmp/old-search-project");
+        let new_root = PathBuf::from("/tmp/new-search-project");
+        let mut quick_open = QuickOpen::default();
+        quick_open.root = Some(old_root.clone());
+        quick_open.pending_root = Some(old_root.clone());
+        quick_open.loading = true;
+        let old_generation = quick_open.generation.load(Ordering::Acquire);
+
+        quick_open.set_project(Some(new_root.clone()));
+        assert!(
+            quick_open
+                .sender
+                .send(QuickOpenEvent::Indexed {
+                    generation: old_generation,
+                    root: old_root,
+                    result: Ok((Vec::new(), None)),
+                })
+                .is_ok()
+        );
+        quick_open.poll();
+
+        assert_eq!(quick_open.root.as_ref(), Some(&new_root));
+        assert!(quick_open.indexed_root.is_none());
+        assert!(quick_open.files.is_empty());
+    }
 }

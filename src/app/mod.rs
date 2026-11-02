@@ -6,6 +6,7 @@ mod go_to_line;
 pub mod layout;
 mod problems;
 mod quick_open;
+mod search_everywhere;
 mod symbol_search;
 
 use std::collections::{HashMap, HashSet};
@@ -137,6 +138,7 @@ pub struct AppState {
     pub settings_save_pending: bool,
     pub finder_reveal: finder::FinderReveal,
     pub quick_open: quick_open::QuickOpen,
+    pub search_everywhere: search_everywhere::SearchEverywhere,
     pub symbol_search: symbol_search::SymbolSearch,
     pub file_structure: file_structure::FileStructure,
     pub go_to_line: go_to_line::GoToLine,
@@ -378,6 +380,7 @@ impl IdeaLikeApp {
             settings_save_pending: false,
             finder_reveal: finder::FinderReveal::default(),
             quick_open: quick_open::QuickOpen::default(),
+            search_everywhere: search_everywhere::SearchEverywhere::default(),
             symbol_search: symbol_search::SymbolSearch::default(),
             file_structure: file_structure::FileStructure::default(),
             go_to_line: go_to_line::GoToLine::default(),

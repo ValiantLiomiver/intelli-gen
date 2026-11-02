@@ -61,7 +61,9 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
                     actions::open_file_dialog(state);
                 }
                 if ui.add_enabled(state.project.is_some(), egui::Button::new(crate::i18n::ui_text(ui, "Go to File…             ⌘P"))).clicked() {
-                    state.enqueue(AppEvent::QuickOpenOpen);
+                    state.enqueue(AppEvent::SearchEverywhereOpen(
+                        super::search_everywhere::SearchTab::Files,
+                    ));
                     ui.close();
                 }
                 ui.menu_button(translator.text("Recent Projects"), |ui| {
@@ -252,7 +254,9 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
                     }
                 }
                 if ui.button(translator.text("Go to Java Symbol…    ⌘⌥O")).clicked() {
-                    state.enqueue(AppEvent::SymbolSearchOpen);
+                    state.enqueue(AppEvent::SearchEverywhereOpen(
+                        super::search_everywhere::SearchTab::JavaSymbols,
+                    ));
                     ui.close();
                 }
                 if ui.add_enabled(state.active_tab.is_some(), egui::Button::new(translator.text("File Structure…    ⌘F12"))).clicked() {
@@ -689,14 +693,19 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
             crate::editor::tabs::render(ui, state);
         }
     });
-    if let Some(path) = state.quick_open.render(ui.ctx()) {
+    let (file, search_actions, location) = state.search_everywhere.render(
+        ui.ctx(),
+        &mut state.quick_open,
+        &mut state.symbol_search,
+        &state.language,
+    );
+    if let Some(path) = file {
         state.enqueue(AppEvent::OpenFile(path));
     }
-    let (symbol_actions, symbol_location) = state.symbol_search.render(ui.ctx(), &state.language);
-    for action in symbol_actions {
+    for action in search_actions {
         state.enqueue(action);
     }
-    if let Some(location) = symbol_location {
+    if let Some(location) = location {
         state.enqueue(AppEvent::OpenFileAtPosition(
             location.path,
             location.range.start,
