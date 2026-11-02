@@ -38,7 +38,6 @@ The command-line link accepts the same optional project or file path: `dist/inte
 | Open project / file | File → Open Project… / Open File… |
 | Go to class | `⌘O` |
 | Go to file | `⇧⌘O` |
-| Go to Java symbol | `⌘⌥O` |
 | Search Everywhere | `Double Shift`; also Navigate → Search Everywhere… |
 | Next / previous editor tab | `⌘⇧]` / `⌘⇧[` (`Ctrl+Tab` aliases) |
 | Recent files | `⌘E` |
@@ -46,12 +45,13 @@ The command-line link accepts the same optional project or file path: `dist/inte
 | Find in project | `⇧⌘F` |
 | Go to line | `⌘L` |
 | Navigate back / forward | `⌘[` / `⌘]` (`Ctrl+Alt+←` / `Ctrl+Alt+→` aliases) |
+| Jump to last tool window / hide all tool windows | `F12` / `⌘⇧F12` |
 | Reformat Java file | `⌥⌘L` |
 | Organize Java imports | `Ctrl+Alt+O` |
 | Go to Java symbol | `⌘⌥O` |
 | File structure | `⌘F12` |
 | Complete / parameter info / hover | `Ctrl+Space` / `⌘P` / `F1` (`Ctrl+Shift+Space` alias for parameter info) |
-| Go to definition / find usages | `⌘B` / `⌥F7` (`F12` / `Shift+F12` aliases) |
+| Go to definition / find usages | `⌘B` / `⌥F7` |
 | Rename Java symbol | `Shift+F6` |
 | Toggle Java line comment | `⌘/` |
 | Indent Java code / selected lines; navigate snippet fields | `Tab` / `⇧Tab` |

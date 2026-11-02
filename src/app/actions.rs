@@ -427,8 +427,27 @@ pub fn keyboard_shortcuts(ctx: &egui::Context, state: &mut AppState) {
             super::search_everywhere::SearchTab::JavaSymbols,
         ));
     }
-    if ctx.input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, egui::Key::F12)) {
+    if ctx.input_mut(|input| {
+        input.consume_key(
+            egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
+            egui::Key::F12,
+        )
+    }) {
+        if state.settings.show_tool_window {
+            state.settings.show_tool_window = false;
+            state.enqueue(AppEvent::SettingsChanged);
+        }
+    } else if ctx.input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, egui::Key::F12)) {
         state.enqueue(AppEvent::FileStructureOpen);
+    } else if ctx.input_mut(|input| input.consume_key(egui::Modifiers::SHIFT, egui::Key::F12)) {
+        // Shift+F12 has no binding in IntelliJ's predefined macOS keymap.
+    } else if ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::F12)) {
+        let panel = state.last_tool_window.unwrap_or(state.active_panel);
+        state.set_active_panel(panel);
+        if !state.settings.show_tool_window {
+            state.settings.show_tool_window = true;
+            save_settings(state);
+        }
     }
     if ctx.input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, egui::Key::L)) {
         state.enqueue(AppEvent::GoToLineOpen);
@@ -511,16 +530,6 @@ pub fn keyboard_shortcuts(ctx: &egui::Context, state: &mut AppState) {
             egui::Modifiers::NONE,
             egui::Key::F1,
             crate::java::lsp::EditorCommand::Hover,
-        ),
-        (
-            egui::Modifiers::SHIFT,
-            egui::Key::F12,
-            crate::java::lsp::EditorCommand::References,
-        ),
-        (
-            egui::Modifiers::NONE,
-            egui::Key::F12,
-            crate::java::lsp::EditorCommand::Definition,
         ),
     ] {
         if ctx.input_mut(|input| input.consume_key(modifiers, key)) {
@@ -1117,7 +1126,7 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
             AppEvent::PreviousEditorTab => select_editor_tab(state, false),
             AppEvent::Search(action) => match action {
                 super::events::SearchAction::Open => {
-                    state.active_panel = super::ActivePanel::Search;
+                    state.set_active_panel(super::ActivePanel::Search);
                     let show_window_changed = !state.settings.show_tool_window;
                     state.settings.show_tool_window = true;
                     state.search.focus_requested = true;
@@ -1476,7 +1485,7 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
             }
             AppEvent::RestartLanguage => restart_language(state),
             AppEvent::ShowPanel(panel) => {
-                state.active_panel = panel;
+                state.set_active_panel(panel);
                 if !state.settings.show_tool_window {
                     state.settings.show_tool_window = true;
                     save_settings(state);
@@ -2135,7 +2144,7 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                         }
                     }
                     RunAction::Start => {
-                        state.active_panel = super::ActivePanel::Run;
+                        state.set_active_panel(super::ActivePanel::Run);
                         state.settings.show_tool_window = true;
                         begin_run_flow(state);
                     }
@@ -2160,7 +2169,7 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                 match action {
                     DebuggerAction::Stop => state.debugger.cancel(),
                     DebuggerAction::Start => {
-                        state.active_panel = super::ActivePanel::Debugger;
+                        state.set_active_panel(super::ActivePanel::Debugger);
                         state.settings.show_tool_window = true;
                         let result = (|| {
                             if state.pending_language_restart {

@@ -201,6 +201,7 @@ pub struct AppState {
     pub quit_requested: bool,
     pub quit_approved: bool,
     pub active_panel: ActivePanel,
+    pub last_tool_window: Option<ActivePanel>,
     pub events: Vec<AppEvent>,
     pub settings: UserSettings,
     pub translator: Translator,
@@ -315,6 +316,13 @@ pub struct PendingRenameRequest {
 }
 
 impl AppState {
+    pub fn set_active_panel(&mut self, panel: ActivePanel) {
+        if self.active_panel != panel {
+            self.last_tool_window = Some(self.active_panel);
+            self.active_panel = panel;
+        }
+    }
+
     pub fn remember_recent_file(&mut self, path: PathBuf) {
         remember_recent_file(&mut self.recent_files, path);
     }
@@ -460,6 +468,7 @@ impl IdeaLikeApp {
             quit_requested: false,
             quit_approved: false,
             active_panel: ActivePanel::default(),
+            last_tool_window: None,
             events: Vec::new(),
             settings,
             translator,
