@@ -64,8 +64,22 @@ The first release targets macOS and Java projects using Maven or Gradle. Use **F
 
 ## IntelliJ reverse-engineering evidence
 
-The local reference inspected with REA 6.7.0 is IntelliJ IDEA Ultimate 2026.3,
-build `IU-263.7307.44`. Run REA with Node 26 when reproducing these observations.
+The local reference is IntelliJ IDEA Ultimate 2026.3, currently installed as
+build `IU-263.7307.112` (2026.3 RC). Run REA with Node 26 when reproducing these
+observations. In this session, REA's artifact inventory
+Evidence `ev_197a48a21bd285a492c45770de0061946531c998fabe998cb972ae20483b9711`
+identified the current `.app` bundle with SHA-256
+`8f081ef0a900148af899b8cd1e5a3a9960b1b6e6a5a829894ff4381027d0baf5`; the
+completed inventory substep is Evidence
+`ev_c50e47dfca8462105506064cad1c8225b59d23e7a38e664582da97305281ddc6`.
+Its `product-info.json` declares 86 modules and 164 bundled plugins. This is
+package-structure evidence only; no runtime behavior is inferred from it.
+
+The focused Java logpoint and Gradle module observations below were first
+recorded on build `IU-263.7307.44`. The current installed logpoint JAR has the
+same SHA-256, so that artifact evidence remains applicable; the Gradle evidence
+remains tied to build `.44`. Run REA with Node 26 when reproducing these
+observations.
 In this session, the default Node 20 invocation reported an integrity mismatch;
 Node 26 successfully inspected the same logpoint JAR with its previously recorded
 digest. Those failed invocations do not establish that the installed JAR changed.
