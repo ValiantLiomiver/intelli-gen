@@ -188,12 +188,68 @@ impl QuickOpen {
         self.selected = 0;
     }
 
-    pub fn render_results(&mut self, ui: &mut egui::Ui, query: &mut String) -> Option<PathBuf> {
-        if self.root.is_none() {
+    pub fn render_results(
+        &mut self,
+        ui: &mut egui::Ui,
+        query: &mut String,
+        recent_files: &[PathBuf],
+    ) -> Option<PathBuf> {
+        let Some(root) = self.root.clone() else {
             ui.weak(crate::i18n::ui_text(ui, "Open a project to search files"));
             return None;
-        }
+        };
         self.ensure_indexed();
+        if query.is_empty() {
+            if !self.last_query.is_empty() {
+                self.last_query.clear();
+                self.matches.clear();
+                self.selected = 0;
+                self.search_generation.fetch_add(1, Ordering::AcqRel);
+            }
+            let recent: Vec<_> = recent_files
+                .iter()
+                .filter(|path| path.starts_with(&root))
+                .take(20)
+                .collect();
+            let (up, down, enter) = ui.input(|input| {
+                (
+                    input.key_pressed(egui::Key::ArrowUp),
+                    input.key_pressed(egui::Key::ArrowDown),
+                    input.key_pressed(egui::Key::Enter),
+                )
+            });
+            if up && !recent.is_empty() {
+                self.selected = self.selected.saturating_sub(1);
+            }
+            if down && !recent.is_empty() {
+                self.selected = (self.selected + 1).min(recent.len() - 1);
+            }
+            let mut chosen = if enter {
+                recent.get(self.selected).map(|path| (*path).clone())
+            } else {
+                None
+            };
+            ui.label(crate::i18n::ui_text(ui, "Recent files"));
+            if recent.is_empty() {
+                ui.weak(crate::i18n::ui_text(ui, "No recent files in this project"));
+            }
+            egui::ScrollArea::vertical()
+                .max_height(310.0)
+                .show(ui, |ui| {
+                    for (row, path) in recent.iter().enumerate() {
+                        let display = path.strip_prefix(&root).unwrap_or(path).display();
+                        let response =
+                            ui.selectable_label(row == self.selected, display.to_string());
+                        if response.clicked() {
+                            chosen = Some((*path).clone());
+                        }
+                        if response.hovered() {
+                            self.selected = row;
+                        }
+                    }
+                });
+            return chosen;
+        }
         if self.last_query != *query {
             self.update_matches(query);
         }
@@ -418,6 +474,86 @@ fn fuzzy_score(path: &str, filename: &str, query: &str) -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use eframe::egui;
+
+    fn render_results(
+        root: PathBuf,
+        query: &mut String,
+        recent_files: &[PathBuf],
+        events: Vec<egui::Event>,
+    ) -> Option<PathBuf> {
+        let context = egui::Context::default();
+        let mut quick_open = QuickOpen::default();
+        quick_open.root = Some(root);
+        let mut selected = None;
+        let mut output = context.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(800.0, 600.0),
+                )),
+                events,
+                ..Default::default()
+            },
+            |ui| {
+                selected = quick_open.render_results(ui, query, recent_files);
+            },
+        );
+        output.textures_delta.clear();
+        selected
+    }
+
+    fn press_enter() -> Vec<egui::Event> {
+        vec![egui::Event::Key {
+            key: egui::Key::Enter,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }]
+    }
+
+    #[test]
+    fn empty_file_query_opens_the_most_recent_workspace_file() {
+        let mut query = String::new();
+        let opened = render_results(
+            PathBuf::from("/workspace"),
+            &mut query,
+            &[
+                PathBuf::from("/workspace/src/Main.java"),
+                PathBuf::from("/workspace/src/Old.java"),
+            ],
+            press_enter(),
+        );
+
+        assert_eq!(opened, Some(PathBuf::from("/workspace/src/Main.java")));
+    }
+
+    #[test]
+    fn empty_file_query_ignores_recents_outside_workspace() {
+        let mut query = String::new();
+        let opened = render_results(
+            PathBuf::from("/workspace"),
+            &mut query,
+            &[PathBuf::from("/other/Project.java")],
+            press_enter(),
+        );
+
+        assert_eq!(opened, None);
+    }
+
+    #[test]
+    fn typed_file_query_does_not_select_a_recent_entry() {
+        let mut query = "Main".to_owned();
+        let opened = render_results(
+            PathBuf::from("/workspace"),
+            &mut query,
+            &[PathBuf::from("/workspace/src/Main.java")],
+            press_enter(),
+        );
+
+        assert_eq!(opened, None);
+    }
 
     #[test]
     fn ignores_file_index_completion_from_previous_project() {

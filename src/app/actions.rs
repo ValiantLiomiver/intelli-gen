@@ -10,6 +10,60 @@ use crate::project::{
     maven_view::{MavenModuleView, MavenViewRequest},
 };
 
+#[cfg(test)]
+mod recent_files_shortcut_tests {
+    use super::*;
+
+    #[test]
+    fn command_e_opens_the_files_tab_and_consumes_only_that_shortcut() {
+        let context = egui::Context::default();
+        let mut result = None;
+        let mut output = context.run_ui(
+            egui::RawInput {
+                events: vec![egui::Event::Key {
+                    key: egui::Key::E,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::COMMAND,
+                }],
+                ..Default::default()
+            },
+            |ui| result = recent_files_shortcut_event(ui.ctx()),
+        );
+        output.textures_delta.clear();
+
+        assert!(matches!(
+            result,
+            Some(AppEvent::SearchEverywhereOpen(
+                super::super::search_everywhere::SearchTab::Files
+            ))
+        ));
+    }
+
+    #[test]
+    fn plain_e_does_not_open_the_recent_files_view() {
+        let context = egui::Context::default();
+        let mut result = None;
+        let mut output = context.run_ui(
+            egui::RawInput {
+                events: vec![egui::Event::Key {
+                    key: egui::Key::E,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                }],
+                ..Default::default()
+            },
+            |ui| result = recent_files_shortcut_event(ui.ctx()),
+        );
+        output.textures_delta.clear();
+
+        assert!(result.is_none());
+    }
+}
+
 fn navigate_tab_to_position(tab: &mut EditorTab, position: crate::java::lsp::Position) {
     if position.character == 0 {
         tab.navigate_to_line(position.line as usize + 1);
@@ -26,6 +80,7 @@ fn open_file_at_position(
 ) {
     if let Some(index) = state.editor_tabs.iter().position(|tab| tab.path == path) {
         state.active_tab = Some(index);
+        state.remember_recent_file(path.clone());
         navigate_tab_to_position(&mut state.editor_tabs[index], position);
     } else {
         state.pending_navigation.insert(path.clone(), position);
@@ -104,6 +159,20 @@ fn select_editor_tab(state: &mut AppState, forward: bool) {
     } else {
         (current + count - 1) % count
     });
+    if let Some(path) = state
+        .active_tab
+        .and_then(|index| state.editor_tabs.get(index))
+        .map(|tab| tab.path.clone())
+    {
+        state.remember_recent_file(path);
+    }
+}
+
+fn recent_files_shortcut_event(ctx: &egui::Context) -> Option<AppEvent> {
+    ctx.input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, egui::Key::E))
+        .then_some(AppEvent::SearchEverywhereOpen(
+            super::search_everywhere::SearchTab::Files,
+        ))
 }
 
 pub fn open_project_dialog(state: &mut AppState) {
@@ -314,6 +383,9 @@ pub fn keyboard_shortcuts(ctx: &egui::Context, state: &mut AppState) {
         state.enqueue(AppEvent::SearchEverywhereOpen(
             super::search_everywhere::SearchTab::Files,
         ));
+    }
+    if let Some(event) = recent_files_shortcut_event(ctx) {
+        state.enqueue(event);
     }
     if ctx.input_mut(|input| {
         input.consume_key(egui::Modifiers::CTRL | egui::Modifiers::ALT, egui::Key::O)
@@ -824,6 +896,7 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
             AppEvent::OpenFile(path) => {
                 if let Some(index) = state.editor_tabs.iter().position(|tab| tab.path == path) {
                     state.active_tab = Some(index);
+                    state.remember_recent_file(path);
                 } else if !state.quit_requested && state.loading_files.insert(path.clone()) {
                     match state.editor_io.load(path.clone()) {
                         Ok(()) => state.status = format!("Opening {}…", path.display()),
@@ -3262,6 +3335,7 @@ fn editor_completed(state: &mut AppState, completion: EditorCompletion) {
                         state.editor_tabs.len() - 1
                     };
                     state.active_tab = Some(index);
+                    state.remember_recent_file(state.editor_tabs[index].path.clone());
                     if let Some(position) = state.pending_navigation.remove(&requested_path) {
                         navigate_tab_to_position(&mut state.editor_tabs[index], position);
                     }

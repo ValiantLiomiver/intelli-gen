@@ -1291,6 +1291,7 @@ impl EditorTab {
 
 pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
     let mut close = None;
+    let mut activated_recent = None;
     egui::ScrollArea::horizontal()
         .id_salt("editor_tabs")
         .show(ui, |ui| {
@@ -1350,6 +1351,7 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
                                 .on_hover_text(path.display().to_string());
                             if response.clicked() {
                                 state.active_tab = Some(index);
+                                activated_recent = Some(path.clone());
                             }
                             if response.middle_clicked() {
                                 close = Some(path.clone());
@@ -1366,6 +1368,9 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
                 }
             });
         });
+    if let Some(path) = activated_recent {
+        state.remember_recent_file(path);
+    }
     if let Some(path) = close {
         state.enqueue(AppEvent::CloseFile(path));
     }

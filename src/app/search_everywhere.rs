@@ -41,6 +41,7 @@ impl SearchEverywhere {
         files: &mut QuickOpen,
         symbols: &mut SymbolSearch,
         language: &LanguageTool,
+        recent_files: &[PathBuf],
     ) -> (Option<PathBuf>, Vec<AppEvent>, Option<Location>) {
         let mut opened_file = None;
         let mut actions = Vec::new();
@@ -57,7 +58,7 @@ impl SearchEverywhere {
             .open(&mut open)
             .show(context, |ui| {
                 (opened_file, actions, location) =
-                    self.render_contents(ui, files, symbols, language);
+                    self.render_contents(ui, files, symbols, language, recent_files);
             });
         let close = context.input(|input| input.key_pressed(egui::Key::Escape));
         self.visible = open && !close && opened_file.is_none() && location.is_none();
@@ -70,6 +71,7 @@ impl SearchEverywhere {
         files: &mut QuickOpen,
         symbols: &mut SymbolSearch,
         language: &LanguageTool,
+        recent_files: &[PathBuf],
     ) -> (Option<PathBuf>, Vec<AppEvent>, Option<Location>) {
         ui.horizontal(|ui| {
             if ui
@@ -105,7 +107,11 @@ impl SearchEverywhere {
             self.focus_query = false;
         }
         match self.active_tab {
-            SearchTab::Files => (files.render_results(ui, &mut self.query), Vec::new(), None),
+            SearchTab::Files => (
+                files.render_results(ui, &mut self.query, recent_files),
+                Vec::new(),
+                None,
+            ),
             SearchTab::JavaSymbols => {
                 let (actions, location) = symbols.render_results(ui, &self.query, language);
                 (None, actions, location)
@@ -150,7 +156,7 @@ mod tests {
             |root| {
                 egui::CentralPanel::default().show(root, |ui| {
                     ui.heading(crate::i18n::ui_text(ui, "Search Everywhere"));
-                    result = search.render_contents(ui, files, symbols, language);
+                    result = search.render_contents(ui, files, symbols, language, &[]);
                 });
             },
         );

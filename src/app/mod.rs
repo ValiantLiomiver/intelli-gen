@@ -34,6 +34,49 @@ pub enum ActivePanel {
     Problems,
 }
 
+const MAX_RECENT_FILES: usize = 20;
+
+#[cfg(test)]
+mod recent_files_tests {
+    use super::remember_recent_file;
+    use std::path::PathBuf;
+
+    #[test]
+    fn recent_file_open_moves_path_to_front_without_duplicates() {
+        let mut recent = vec![
+            PathBuf::from("/project/A.java"),
+            PathBuf::from("/project/B.java"),
+        ];
+        remember_recent_file(&mut recent, PathBuf::from("/project/B.java"));
+
+        assert_eq!(
+            recent,
+            [
+                PathBuf::from("/project/B.java"),
+                PathBuf::from("/project/A.java")
+            ]
+        );
+    }
+
+    #[test]
+    fn recent_file_history_keeps_only_twenty_paths() {
+        let mut recent = Vec::new();
+        for index in 0..21 {
+            remember_recent_file(&mut recent, PathBuf::from(format!("/project/{index}.java")));
+        }
+
+        assert_eq!(recent.len(), 20);
+        assert_eq!(recent[0], PathBuf::from("/project/20.java"));
+        assert_eq!(recent[19], PathBuf::from("/project/1.java"));
+    }
+}
+
+fn remember_recent_file(recent_files: &mut Vec<PathBuf>, path: PathBuf) {
+    recent_files.retain(|recent| recent != &path);
+    recent_files.insert(0, path);
+    recent_files.truncate(MAX_RECENT_FILES);
+}
+
 impl ActivePanel {
     pub const ALL: [Self; 7] = [
         Self::Build,
@@ -119,6 +162,7 @@ pub struct AppState {
     pub pending_workspace_replacements: HashMap<u64, PendingWorkspaceReplace>,
     pub next_workspace_edit_id: u64,
     pub editor_tabs: Vec<EditorTab>,
+    pub recent_files: Vec<PathBuf>,
     pub active_tab: Option<usize>,
     pub navigation_back: Vec<NavigationLocation>,
     pub navigation_forward: Vec<NavigationLocation>,
@@ -242,6 +286,10 @@ pub struct PendingRenameRequest {
 }
 
 impl AppState {
+    pub fn remember_recent_file(&mut self, path: PathBuf) {
+        remember_recent_file(&mut self.recent_files, path);
+    }
+
     pub fn enqueue(&mut self, event: AppEvent) {
         self.events.push(event);
     }
@@ -361,6 +409,7 @@ impl IdeaLikeApp {
             pending_workspace_replacements: HashMap::new(),
             next_workspace_edit_id: 0,
             editor_tabs: Vec::new(),
+            recent_files: Vec::new(),
             active_tab: None,
             navigation_back: Vec::new(),
             navigation_forward: Vec::new(),

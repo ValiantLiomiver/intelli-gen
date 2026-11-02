@@ -66,6 +66,12 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
                     ));
                     ui.close();
                 }
+                if ui.add_enabled(state.project.is_some(), egui::Button::new(translator.text("Recent Files…    ⌘E"))).clicked() {
+                    state.enqueue(AppEvent::SearchEverywhereOpen(
+                        super::search_everywhere::SearchTab::Files,
+                    ));
+                    ui.close();
+                }
                 ui.menu_button(translator.text("Recent Projects"), |ui| {
                     if state.settings.recent_projects.is_empty() {
                         ui.label(translator.text("No recent projects"));
@@ -698,6 +704,7 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
         &mut state.quick_open,
         &mut state.symbol_search,
         &state.language,
+        &state.recent_files,
     );
     if let Some(path) = file {
         state.enqueue(AppEvent::OpenFile(path));
