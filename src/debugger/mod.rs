@@ -519,7 +519,10 @@ pub fn render(ui: &mut eframe::egui::Ui, state: &mut crate::app::AppState) {
                 }
             });
             ui.separator();
-            egui::CollapsingHeader::new(crate::i18n::ui_text(ui, "Source breakpoints")).show(ui, |ui| {
+            let open_requested = std::mem::take(&mut state.debugger.breakpoints_open_requested);
+            egui::CollapsingHeader::new(crate::i18n::ui_text(ui, "Source breakpoints"))
+                .open(open_requested.then_some(true))
+                .show(ui, |ui| {
                 for points in state.debugger.breakpoints.sources.values() {
                     for point in points {
                         let source = point.source.clone();
@@ -626,9 +629,10 @@ pub fn render(ui: &mut eframe::egui::Ui, state: &mut crate::app::AppState) {
             ui.separator();
             ui.strong(crate::i18n::ui_text(ui, "Debug Console"));
             ui.monospace(&state.debugger.output);
-            egui::CollapsingHeader::new(format!(
-                "Debugger events ({})",
-                state.debugger.event_log.len()
+            egui::CollapsingHeader::new(crate::i18n::ui_format(
+                ui,
+                "Debugger events ({count})",
+                &[("count", &state.debugger.event_log.len().to_string())],
             ))
             .id_salt("debug_event_log")
             .show(ui, |ui| {

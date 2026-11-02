@@ -753,6 +753,7 @@ pub struct DebugTool {
     pub stop_reason: Option<String>,
     pub host_restart_required: bool,
     pub breakpoints: Breakpoints,
+    pub breakpoints_open_requested: bool,
     breakpoint_store: BreakpointStore,
     breakpoint_root: Option<PathBuf>,
     breakpoint_generation: u64,

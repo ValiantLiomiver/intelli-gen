@@ -19,10 +19,7 @@ pub struct QuickOpen {
     files: Arc<Vec<Entry>>,
     matches: Vec<(usize, i64)>,
     last_query: String,
-    query: String,
     selected: usize,
-    visible: bool,
-    focus_query: bool,
     loading: bool,
     warning: Option<String>,
     error: Option<String>,
@@ -56,10 +53,7 @@ impl Default for QuickOpen {
             files: Arc::new(Vec::new()),
             matches: Vec::new(),
             last_query: String::new(),
-            query: String::new(),
             selected: 0,
-            visible: false,
-            focus_query: false,
             loading: false,
             warning: None,
             error: None,
@@ -78,7 +72,6 @@ impl QuickOpen {
             return;
         }
         self.cancel_index();
-        self.close();
         self.root = root;
         self.indexed_root = None;
         self.files = Arc::new(Vec::new());
@@ -87,30 +80,16 @@ impl QuickOpen {
         self.warning = None;
     }
 
-    pub fn open(&mut self) {
+    pub fn ensure_indexed(&mut self) {
         let Some(root) = self.root.clone() else {
             return;
         };
-        self.visible = true;
-        self.query.clear();
-        self.last_query = "\0".into();
-        self.selected = 0;
-        self.focus_query = true;
-        self.error = None;
-        if self.indexed_root.as_ref() == Some(&root) {
-            self.update_matches();
-        } else {
+        if self.indexed_root.as_ref() != Some(&root) && self.pending_root.as_ref() != Some(&root) {
             self.start_index(root);
         }
     }
 
-    pub fn close(&mut self) {
-        self.visible = false;
-        self.focus_query = false;
-    }
-
     pub fn cancel(&mut self) {
-        self.close();
         self.cancel_index();
         self.indexed_root = None;
         self.files = Arc::new(Vec::new());
@@ -172,8 +151,9 @@ impl QuickOpen {
                             self.files = Arc::new(entries);
                             self.indexed_root = Some(root);
                             self.warning = warning;
-                            self.last_query = "\0".into();
-                            self.update_matches();
+                            if !self.last_query.is_empty() {
+                                self.last_query = "\0".into();
+                            }
                         }
                         Err(error) => self.error = Some(error),
                     }
@@ -206,100 +186,135 @@ impl QuickOpen {
         !self.workers.is_empty()
     }
 
-    pub fn render(&mut self, ctx: &egui::Context) -> Option<PathBuf> {
-        if !self.visible {
+    pub fn reset_selection(&mut self) {
+        self.selected = 0;
+    }
+
+    pub fn render_results(
+        &mut self,
+        ui: &mut egui::Ui,
+        query: &mut String,
+        recent_files: &[PathBuf],
+    ) -> Option<PathBuf> {
+        let Some(root) = self.root.clone() else {
+            ui.weak(crate::i18n::ui_text(ui, "Open a project to search files"));
             return None;
+        };
+        self.ensure_indexed();
+        if query.is_empty() {
+            if !self.last_query.is_empty() {
+                self.last_query.clear();
+                self.matches.clear();
+                self.selected = 0;
+                self.search_generation.fetch_add(1, Ordering::AcqRel);
+            }
+            let recent: Vec<_> = recent_files
+                .iter()
+                .filter(|path| path.starts_with(&root))
+                .take(20)
+                .collect();
+            let (up, down, enter) = ui.input(|input| {
+                (
+                    input.key_pressed(egui::Key::ArrowUp),
+                    input.key_pressed(egui::Key::ArrowDown),
+                    input.key_pressed(egui::Key::Enter),
+                )
+            });
+            if up && !recent.is_empty() {
+                self.selected = self.selected.saturating_sub(1);
+            }
+            if down && !recent.is_empty() {
+                self.selected = (self.selected + 1).min(recent.len() - 1);
+            }
+            let mut chosen = if enter {
+                recent.get(self.selected).map(|path| (*path).clone())
+            } else {
+                None
+            };
+            ui.label(crate::i18n::ui_text(ui, "Recent files"));
+            if recent.is_empty() {
+                ui.weak(crate::i18n::ui_text(ui, "No recent files in this project"));
+            }
+            egui::ScrollArea::vertical()
+                .max_height(310.0)
+                .show(ui, |ui| {
+                    for (row, path) in recent.iter().enumerate() {
+                        let display = path.strip_prefix(&root).unwrap_or(path).display();
+                        let response =
+                            ui.selectable_label(row == self.selected, display.to_string());
+                        if response.clicked() {
+                            chosen = Some((*path).clone());
+                        }
+                        if response.hovered() {
+                            self.selected = row;
+                        }
+                    }
+                });
+            return chosen;
+        }
+        if self.last_query != *query {
+            self.update_matches(query);
         }
         let mut chosen = None;
-        let mut close = false;
-        egui::Window::new(crate::i18n::text(ctx, "Go to File"))
-            .collapsible(false)
-            .resizable(false)
-            .fixed_size([560.0, 420.0])
-            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-            .show(ctx, |ui| {
-                let response = ui.add(
-                    egui::TextEdit::singleline(&mut self.query)
-                        .hint_text(crate::i18n::ui_text(ui, "Type a file name or path…"))
-                        .desired_width(f32::INFINITY),
-                );
-                if self.focus_query {
-                    response.request_focus();
-                    self.focus_query = false;
-                }
-                if response.changed() {
-                    self.update_matches();
-                }
-                let (up, down, enter, escape) = ui.input(|input| {
-                    (
-                        input.key_pressed(egui::Key::ArrowUp),
-                        input.key_pressed(egui::Key::ArrowDown),
-                        input.key_pressed(egui::Key::Enter),
-                        input.key_pressed(egui::Key::Escape),
-                    )
-                });
-                if up && !self.matches.is_empty() {
-                    self.selected = self.selected.saturating_sub(1);
-                }
-                if down && !self.matches.is_empty() {
-                    self.selected = (self.selected + 1).min(self.matches.len() - 1);
-                }
-                if escape {
-                    close = true;
-                }
-                if let Some((index, _)) = self.matches.get(self.selected)
-                    && enter
-                {
-                    chosen = Some(self.files[*index].path.clone());
-                    close = true;
-                }
-                if self.loading {
-                    ui.horizontal(|ui| {
-                        ui.spinner();
-                        ui.label(crate::i18n::ui_text(ui, "Indexing project files…"));
-                    });
-                } else if let Some(error) = &self.error {
-                    ui.colored_label(
-                        ui.visuals().error_fg_color,
-                        crate::i18n::message(ui.ctx(), error),
-                    );
-                } else if self.matches.is_empty() {
-                    ui.weak(crate::i18n::ui_text(ui, "No matching files"));
-                }
-                if let Some(warning) = &self.warning {
-                    ui.weak(warning);
-                }
-                egui::ScrollArea::vertical()
-                    .max_height(330.0)
-                    .show(ui, |ui| {
-                        for (row, (index, _)) in self.matches.iter().enumerate() {
-                            let selected = row == self.selected;
-                            let response =
-                                ui.selectable_label(selected, &self.files[*index].display);
-                            if response.clicked() {
-                                chosen = Some(self.files[*index].path.clone());
-                                close = true;
-                            }
-                            if response.hovered() {
-                                self.selected = row;
-                            }
-                        }
-                    });
-            });
-        if close || chosen.is_some() {
-            self.close();
+        let (up, down, enter) = ui.input(|input| {
+            (
+                input.key_pressed(egui::Key::ArrowUp),
+                input.key_pressed(egui::Key::ArrowDown),
+                input.key_pressed(egui::Key::Enter),
+            )
+        });
+        if up && !self.matches.is_empty() {
+            self.selected = self.selected.saturating_sub(1);
         }
+        if down && !self.matches.is_empty() {
+            self.selected = (self.selected + 1).min(self.matches.len() - 1);
+        }
+        if let Some((index, _)) = self.matches.get(self.selected)
+            && enter
+        {
+            chosen = Some(self.files[*index].path.clone());
+        }
+        if self.loading {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label(crate::i18n::ui_text(ui, "Indexing project files…"));
+            });
+        } else if let Some(error) = &self.error {
+            ui.colored_label(
+                ui.visuals().error_fg_color,
+                crate::i18n::message(ui.ctx(), error),
+            );
+        } else if self.matches.is_empty() {
+            ui.weak(crate::i18n::ui_text(ui, "No matching files"));
+        }
+        if let Some(warning) = &self.warning {
+            ui.weak(warning);
+        }
+        egui::ScrollArea::vertical()
+            .max_height(310.0)
+            .show(ui, |ui| {
+                for (row, (index, _)) in self.matches.iter().enumerate() {
+                    let selected = row == self.selected;
+                    let response = ui.selectable_label(selected, &self.files[*index].display);
+                    if response.clicked() {
+                        chosen = Some(self.files[*index].path.clone());
+                    }
+                    if response.hovered() {
+                        self.selected = row;
+                    }
+                }
+            });
         chosen
     }
 
-    fn update_matches(&mut self) {
-        if self.last_query == self.query {
+    fn update_matches(&mut self, query: &str) {
+        if self.last_query == query {
             return;
         }
-        self.last_query.clone_from(&self.query);
+        self.last_query = query.to_owned();
         self.matches.clear();
         self.selected = 0;
-        let query = self.query.to_lowercase();
+        let query = query.to_lowercase();
         let files = Arc::clone(&self.files);
         let current_generation = Arc::clone(&self.generation);
         let search_generation = Arc::clone(&self.search_generation);
@@ -422,7 +437,7 @@ fn index_files(
     Ok((files, warning))
 }
 
-fn fuzzy_score(path: &str, filename: &str, query: &str) -> Option<i64> {
+pub(super) fn fuzzy_score(path: &str, filename: &str, query: &str) -> Option<i64> {
     if query.is_empty() {
         return Some(0);
     }
@@ -456,4 +471,214 @@ fn fuzzy_score(path: &str, filename: &str, query: &str) -> Option<i64> {
         score += 100;
     }
     Some(score)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use eframe::egui;
+
+    fn render_results(
+        root: PathBuf,
+        query: &mut String,
+        recent_files: &[PathBuf],
+        events: Vec<egui::Event>,
+    ) -> Option<PathBuf> {
+        let context = egui::Context::default();
+        let mut quick_open = QuickOpen::default();
+        quick_open.root = Some(root);
+        let mut selected = None;
+        let mut output = context.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(800.0, 600.0),
+                )),
+                events,
+                ..Default::default()
+            },
+            |ui| {
+                selected = quick_open.render_results(ui, query, recent_files);
+            },
+        );
+        output.textures_delta.clear();
+        selected
+    }
+
+    fn press_enter() -> Vec<egui::Event> {
+        vec![egui::Event::Key {
+            key: egui::Key::Enter,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }]
+    }
+
+    #[test]
+    fn empty_file_query_opens_the_most_recent_workspace_file() {
+        let mut query = String::new();
+        let opened = render_results(
+            PathBuf::from("/workspace"),
+            &mut query,
+            &[
+                PathBuf::from("/workspace/src/Main.java"),
+                PathBuf::from("/workspace/src/Old.java"),
+            ],
+            press_enter(),
+        );
+
+        assert_eq!(opened, Some(PathBuf::from("/workspace/src/Main.java")));
+    }
+
+    #[test]
+    fn indexing_completion_preserves_recent_file_selection() {
+        let root = PathBuf::from("/workspace");
+        let recent_files = [
+            PathBuf::from("/workspace/src/Main.java"),
+            PathBuf::from("/workspace/src/Old.java"),
+        ];
+        let mut quick_open = QuickOpen::default();
+        quick_open.root = Some(root.clone());
+        quick_open.pending_root = Some(root.clone());
+        quick_open.loading = true;
+        let mut query = String::new();
+        let context = egui::Context::default();
+        let mut output = context.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(800.0, 600.0),
+                )),
+                events: vec![egui::Event::Key {
+                    key: egui::Key::ArrowDown,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                }],
+                ..Default::default()
+            },
+            |ui| {
+                quick_open.render_results(ui, &mut query, &recent_files);
+            },
+        );
+        output.textures_delta.clear();
+        let generation = quick_open.generation.load(Ordering::Acquire);
+        quick_open
+            .sender
+            .send(QuickOpenEvent::Indexed {
+                generation,
+                root: root.clone(),
+                result: Ok((Vec::new(), None)),
+            })
+            .unwrap();
+        quick_open.poll();
+        let mut selected = None;
+        let mut output = context.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(800.0, 600.0),
+                )),
+                events: press_enter(),
+                ..Default::default()
+            },
+            |ui| selected = quick_open.render_results(ui, &mut query, &recent_files),
+        );
+        output.textures_delta.clear();
+
+        assert_eq!(selected, Some(recent_files[1].clone()));
+    }
+
+    #[test]
+    fn empty_file_query_ignores_recents_outside_workspace() {
+        let mut query = String::new();
+        let opened = render_results(
+            PathBuf::from("/workspace"),
+            &mut query,
+            &[PathBuf::from("/other/Project.java")],
+            press_enter(),
+        );
+
+        assert_eq!(opened, None);
+    }
+
+    #[test]
+    fn typed_file_query_selects_from_index_not_recent_files() {
+        let root = PathBuf::from("/workspace");
+        let indexed_file = PathBuf::from("/workspace/src/Main.java");
+        let mut quick_open = QuickOpen::default();
+        quick_open.root = Some(root.clone());
+        quick_open.indexed_root = Some(root.clone());
+        quick_open.files = Arc::new(vec![
+            Entry {
+                path: PathBuf::from("/workspace/src/Other.java"),
+                display: "src/Other.java".into(),
+                folded: "src/other.java".into(),
+                filename: "other.java".into(),
+            },
+            Entry {
+                path: indexed_file.clone(),
+                display: "src/Main.java".into(),
+                folded: "src/main.java".into(),
+                filename: "main.java".into(),
+            },
+        ]);
+        let mut query = "Main".to_owned();
+        quick_open.update_matches(&query);
+        for _ in 0..100 {
+            quick_open.poll();
+            if !quick_open.matches.is_empty() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert_eq!(quick_open.matches.len(), 1);
+
+        let context = egui::Context::default();
+        let mut opened = None;
+        let mut output = context.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(800.0, 600.0),
+                )),
+                events: press_enter(),
+                ..Default::default()
+            },
+            |ui| opened = quick_open.render_results(ui, &mut query, &[indexed_file.clone()]),
+        );
+        output.textures_delta.clear();
+
+        assert_eq!(opened, Some(indexed_file));
+    }
+
+    #[test]
+    fn ignores_file_index_completion_from_previous_project() {
+        let old_root = PathBuf::from("/tmp/old-search-project");
+        let new_root = PathBuf::from("/tmp/new-search-project");
+        let mut quick_open = QuickOpen::default();
+        quick_open.root = Some(old_root.clone());
+        quick_open.pending_root = Some(old_root.clone());
+        quick_open.loading = true;
+        let old_generation = quick_open.generation.load(Ordering::Acquire);
+
+        quick_open.set_project(Some(new_root.clone()));
+        assert!(
+            quick_open
+                .sender
+                .send(QuickOpenEvent::Indexed {
+                    generation: old_generation,
+                    root: old_root,
+                    result: Ok((Vec::new(), None)),
+                })
+                .is_ok()
+        );
+        quick_open.poll();
+
+        assert_eq!(quick_open.root.as_ref(), Some(&new_root));
+        assert!(quick_open.indexed_root.is_none());
+        assert!(quick_open.files.is_empty());
+    }
 }

@@ -6,6 +6,7 @@ mod go_to_line;
 pub mod layout;
 mod problems;
 mod quick_open;
+mod search_everywhere;
 mod symbol_search;
 
 use std::collections::{HashMap, HashSet};
@@ -31,6 +32,77 @@ pub enum ActivePanel {
     Git,
     Debugger,
     Problems,
+}
+
+const MAX_RECENT_FILES: usize = 20;
+
+#[cfg(test)]
+mod recent_files_tests {
+    use super::{remember_recent_file, rename_recent_file};
+    use std::path::PathBuf;
+
+    #[test]
+    fn recent_file_open_moves_path_to_front_without_duplicates() {
+        let mut recent = vec![
+            PathBuf::from("/project/A.java"),
+            PathBuf::from("/project/B.java"),
+        ];
+        remember_recent_file(&mut recent, PathBuf::from("/project/B.java"));
+
+        assert_eq!(
+            recent,
+            [
+                PathBuf::from("/project/B.java"),
+                PathBuf::from("/project/A.java")
+            ]
+        );
+    }
+
+    #[test]
+    fn recent_file_history_keeps_only_twenty_paths() {
+        let mut recent = Vec::new();
+        for index in 0..21 {
+            remember_recent_file(&mut recent, PathBuf::from(format!("/project/{index}.java")));
+        }
+
+        assert_eq!(recent.len(), 20);
+        assert_eq!(recent[0], PathBuf::from("/project/20.java"));
+        assert_eq!(recent[19], PathBuf::from("/project/1.java"));
+    }
+
+    #[test]
+    fn renamed_recent_file_replaces_its_old_path() {
+        let mut recent = vec![
+            PathBuf::from("/project/Renamed.java"),
+            PathBuf::from("/project/Other.java"),
+            PathBuf::from("/project/Old.java"),
+        ];
+
+        rename_recent_file(
+            &mut recent,
+            PathBuf::from("/project/Old.java"),
+            PathBuf::from("/project/Renamed.java"),
+        );
+
+        assert_eq!(
+            recent,
+            [
+                PathBuf::from("/project/Renamed.java"),
+                PathBuf::from("/project/Other.java")
+            ]
+        );
+    }
+}
+
+fn remember_recent_file(recent_files: &mut Vec<PathBuf>, path: PathBuf) {
+    recent_files.retain(|recent| recent != &path);
+    recent_files.insert(0, path);
+    recent_files.truncate(MAX_RECENT_FILES);
+}
+
+fn rename_recent_file(recent_files: &mut Vec<PathBuf>, old_path: PathBuf, new_path: PathBuf) {
+    recent_files.retain(|recent| recent != &old_path);
+    remember_recent_file(recent_files, new_path);
 }
 
 impl ActivePanel {
@@ -118,6 +190,8 @@ pub struct AppState {
     pub pending_workspace_replacements: HashMap<u64, PendingWorkspaceReplace>,
     pub next_workspace_edit_id: u64,
     pub editor_tabs: Vec<EditorTab>,
+    pub recent_files: Vec<PathBuf>,
+    pub last_shift_release: Option<f64>,
     pub active_tab: Option<usize>,
     pub navigation_back: Vec<NavigationLocation>,
     pub navigation_forward: Vec<NavigationLocation>,
@@ -127,6 +201,7 @@ pub struct AppState {
     pub quit_requested: bool,
     pub quit_approved: bool,
     pub active_panel: ActivePanel,
+    pub last_tool_window: Option<ActivePanel>,
     pub events: Vec<AppEvent>,
     pub settings: UserSettings,
     pub translator: Translator,
@@ -137,6 +212,7 @@ pub struct AppState {
     pub settings_save_pending: bool,
     pub finder_reveal: finder::FinderReveal,
     pub quick_open: quick_open::QuickOpen,
+    pub search_everywhere: search_everywhere::SearchEverywhere,
     pub symbol_search: symbol_search::SymbolSearch,
     pub file_structure: file_structure::FileStructure,
     pub go_to_line: go_to_line::GoToLine,
@@ -240,6 +316,28 @@ pub struct PendingRenameRequest {
 }
 
 impl AppState {
+    pub fn set_active_panel(&mut self, panel: ActivePanel) {
+        if self.active_panel != panel {
+            self.last_tool_window = Some(self.active_panel);
+            self.active_panel = panel;
+        }
+    }
+
+    pub fn remember_recent_file(&mut self, path: PathBuf) {
+        remember_recent_file(&mut self.recent_files, path);
+    }
+
+    pub fn rename_recent_file(&mut self, old_path: PathBuf, new_path: PathBuf) {
+        rename_recent_file(&mut self.recent_files, old_path, new_path);
+    }
+
+    pub fn activate_tab(&mut self, index: usize) {
+        if let Some(path) = self.editor_tabs.get(index).map(|tab| tab.path.clone()) {
+            self.active_tab = Some(index);
+            self.remember_recent_file(path);
+        }
+    }
+
     pub fn enqueue(&mut self, event: AppEvent) {
         self.events.push(event);
     }
@@ -359,6 +457,8 @@ impl IdeaLikeApp {
             pending_workspace_replacements: HashMap::new(),
             next_workspace_edit_id: 0,
             editor_tabs: Vec::new(),
+            recent_files: Vec::new(),
+            last_shift_release: None,
             active_tab: None,
             navigation_back: Vec::new(),
             navigation_forward: Vec::new(),
@@ -368,6 +468,7 @@ impl IdeaLikeApp {
             quit_requested: false,
             quit_approved: false,
             active_panel: ActivePanel::default(),
+            last_tool_window: None,
             events: Vec::new(),
             settings,
             translator,
@@ -378,6 +479,7 @@ impl IdeaLikeApp {
             settings_save_pending: false,
             finder_reveal: finder::FinderReveal::default(),
             quick_open: quick_open::QuickOpen::default(),
+            search_everywhere: search_everywhere::SearchEverywhere::default(),
             symbol_search: symbol_search::SymbolSearch::default(),
             file_structure: file_structure::FileStructure::default(),
             go_to_line: go_to_line::GoToLine::default(),

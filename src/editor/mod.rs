@@ -116,7 +116,7 @@ impl EditorIo {
                                     .ok_or("Workspace edit size overflow")?;
                                 if bytes > MAX_WORKSPACE_EDIT_BYTES {
                                     return Err(format!(
-                                        "Rename targets exceed the {} MiB workspace edit limit",
+                                        "Workspace edit targets exceed the {} MiB workspace edit limit",
                                         MAX_WORKSPACE_EDIT_BYTES / (1024 * 1024)
                                     ));
                                 }
