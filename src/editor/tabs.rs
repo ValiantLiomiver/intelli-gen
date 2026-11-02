@@ -205,7 +205,7 @@ fn java_completion_trigger(
     let mut typed_identifier = false;
     let mut typed_dot = false;
     for text in text_events {
-        typed_dot |= text == ".";
+        typed_dot |= text.ends_with('.');
         typed_identifier |= text
             .chars()
             .any(|character| character.is_alphanumeric() || matches!(character, '_' | '$'));
@@ -226,6 +226,29 @@ fn java_completion_trigger(
         .take_while(|character| character.is_alphanumeric() || matches!(character, '_' | '$'))
         .count();
     (identifier_prefix >= 2).then_some(crate::java::lsp::EditorCommand::Completion)
+}
+
+#[cfg(test)]
+mod completion_trigger_tests {
+    use super::*;
+
+    #[test]
+    fn pasted_dot_triggers_completion() {
+        let mut document = Document {
+            path: PathBuf::from("/project/src/Main.java"),
+            text: "object.".into(),
+            saved_text: String::new(),
+            cursor_line: 1,
+            cursor_column: 1,
+            revision: 0,
+        };
+        document.set_cursor(document.text.chars().count());
+
+        assert_eq!(
+            java_completion_trigger(&document, &[egui::Event::Paste("object.".into())]),
+            Some(crate::java::lsp::EditorCommand::Completion)
+        );
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
