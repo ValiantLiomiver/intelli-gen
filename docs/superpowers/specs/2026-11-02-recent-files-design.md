@@ -22,7 +22,7 @@ the full indexed project.
 ## Design
 
 - `⌘E` opens the existing Search Everywhere dialog on Files, with the same
-  empty query used by `⌘P`.
+  empty query used by `⇧⌘O`.
 - With an empty query, Files shows up to 20 most recently opened files that
   belong to the current workspace. Typing switches to the existing async file
   index and fuzzy matching.

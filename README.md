@@ -35,20 +35,22 @@ The command-line link accepts the same optional project or file path: `dist/inte
 
 | Action | Shortcut |
 | --- | --- |
-| Open project / file | `⇧⌘O` / `⌘O` |
-| Next / previous editor tab | `Ctrl+Tab` / `Ctrl+Shift+Tab` |
-| Go to file | `⌘P` |
+| Open project | `⌘O` |
+| Open file | File → Open File… |
+| Go to file | `⇧⌘O` |
+| Search Everywhere | Navigate → Search Everywhere… |
+| Next / previous editor tab | `⌘⇧]` / `⌘⇧[` (`Ctrl+Tab` aliases) |
 | Recent files | `⌘E` |
 | Find / replace in file | `⌘F` / `⌘R` |
 | Find in project | `⇧⌘F` |
 | Go to line | `⌘L` |
-| Navigate to previous / next code location | `Ctrl+Alt+←` / `Ctrl+Alt+→` |
+| Navigate back / forward | `⌘[` / `⌘]` (`Ctrl+Alt+←` / `Ctrl+Alt+→` aliases) |
 | Reformat Java file | `⌥⌘L` |
 | Organize Java imports | `Ctrl+Alt+O` |
 | Go to Java symbol | `⌘⌥O` |
 | File structure | `⌘F12` |
-| Complete / parameter info / hover | `Ctrl+Space` / `Ctrl+Shift+Space` / `F1` |
-| Go to definition / find references | `F12` / `Shift+F12` |
+| Complete / parameter info / hover | `Ctrl+Space` / `⌘P` / `F1` (`Ctrl+Shift+Space` alias for parameter info) |
+| Go to definition / find usages | `⌘B` / `⌥F7` (`F12` / `Shift+F12` aliases) |
 | Rename Java symbol | `Shift+F6` |
 | Toggle Java line comment | `⌘/` |
 | Indent Java code / selected lines; navigate snippet fields | `Tab` / `⇧Tab` |

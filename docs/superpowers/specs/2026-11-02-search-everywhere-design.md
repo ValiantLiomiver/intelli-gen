@@ -31,7 +31,8 @@ search.
 ## Scope and constraints
 
 - Use one search dialog with a shared query and two tabs: **Files** and **Java Symbols**.
-- `⌘P` opens Files; **Code → Go to Java Symbol…** opens Java Symbols.
+- `⇧⌘O` opens Files; **Code → Go to Java Symbol…** opens Java Symbols.
+- **Navigate → Search Everywhere…** opens the same dialog on Files.
 - Selecting a file opens it; selecting a symbol navigates to its source range.
 - Keep file indexing and LSP requests off the UI frame; do not add dependencies.
 - Do not add an All or Actions tab, blended ranking, or new search backends.

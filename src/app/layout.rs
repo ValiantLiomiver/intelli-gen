@@ -52,15 +52,15 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
                     state.enqueue(AppEvent::NewJavaProjectOpen);
                     ui.close();
                 }
-                if ui.button(translator.text("Open Project…     ⇧⌘O")).clicked() {
+                if ui.button(translator.text("Open Project…     ⌘O")).clicked() {
                     ui.close();
                     actions::open_project_dialog(state);
                 }
-                if ui.button(translator.text("Open File…             ⌘O")).clicked() {
+                if ui.button(translator.text("Open File…")).clicked() {
                     ui.close();
                     actions::open_file_dialog(state);
                 }
-                if ui.add_enabled(state.project.is_some(), egui::Button::new(crate::i18n::ui_text(ui, "Go to File…             ⌘P"))).clicked() {
+                if ui.add_enabled(state.project.is_some(), egui::Button::new(crate::i18n::ui_text(ui, "Go to File…    ⇧⌘O"))).clicked() {
                     state.enqueue(AppEvent::SearchEverywhereOpen(
                         super::search_everywhere::SearchTab::Files,
                     ));
@@ -116,11 +116,11 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
                     ui.close();
                 }
                 ui.separator();
-                if ui.add_enabled(state.editor_tabs.len() > 1, egui::Button::new(crate::i18n::ui_text(ui, "Next Tab    Ctrl+Tab"))).clicked() {
+                if ui.add_enabled(state.editor_tabs.len() > 1, egui::Button::new(crate::i18n::ui_text(ui, "Next Tab    ⌘⇧]"))).clicked() {
                     state.enqueue(AppEvent::NextEditorTab);
                     ui.close();
                 }
-                if ui.add_enabled(state.editor_tabs.len() > 1, egui::Button::new(crate::i18n::ui_text(ui, "Previous Tab    Ctrl+Shift+Tab"))).clicked() {
+                if ui.add_enabled(state.editor_tabs.len() > 1, egui::Button::new(crate::i18n::ui_text(ui, "Previous Tab    ⌘⇧["))).clicked() {
                     state.enqueue(AppEvent::PreviousEditorTab);
                     ui.close();
                 }
@@ -154,11 +154,17 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
                 }
             });
             ui.menu_button(translator.text("Navigate"), |ui| {
-                if ui.add_enabled(!state.navigation_back.is_empty(), egui::Button::new(translator.text("Back    Ctrl+Alt+←"))).clicked() {
+                if ui.button(translator.text("Search Everywhere…")).clicked() {
+                    state.enqueue(AppEvent::SearchEverywhereOpen(
+                        super::search_everywhere::SearchTab::Files,
+                    ));
+                    ui.close();
+                }
+                if ui.add_enabled(!state.navigation_back.is_empty(), egui::Button::new(translator.text("Back    ⌘["))).clicked() {
                     state.enqueue(AppEvent::NavigateBack);
                     ui.close();
                 }
-                if ui.add_enabled(!state.navigation_forward.is_empty(), egui::Button::new(translator.text("Forward    Ctrl+Alt+→"))).clicked() {
+                if ui.add_enabled(!state.navigation_forward.is_empty(), egui::Button::new(translator.text("Forward    ⌘]"))).clicked() {
                     state.enqueue(AppEvent::NavigateForward);
                     ui.close();
                 }
@@ -247,12 +253,12 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
             });
             ui.menu_button(translator.text("Code"), |ui| {
                 for (label, command) in [("Complete    Ctrl+Space", crate::java::lsp::EditorCommand::Completion),
-                    ("Parameter info    Ctrl+Shift+Space", crate::java::lsp::EditorCommand::SignatureHelp),
+                    ("Parameter info    ⌘P", crate::java::lsp::EditorCommand::SignatureHelp),
                     ("Hover    F1", crate::java::lsp::EditorCommand::Hover),
-                    ("Go to definition    F12", crate::java::lsp::EditorCommand::Definition),
+                    ("Go to definition    ⌘B", crate::java::lsp::EditorCommand::Definition),
                     ("Go to type definition    ⇧⌘B", crate::java::lsp::EditorCommand::TypeDefinition),
                     ("Go to implementation    ⌥⌘B", crate::java::lsp::EditorCommand::Implementation),
-                    ("Find references    Shift+F12", crate::java::lsp::EditorCommand::References),
+                    ("Find usages    ⌥F7", crate::java::lsp::EditorCommand::References),
                     ("Organize imports    Ctrl+Alt+O", crate::java::lsp::EditorCommand::OrganizeImports),
                     ("Reformat code    ⌥⌘L", crate::java::lsp::EditorCommand::Format)] {
                     if ui.add_enabled(state.active_tab.is_some(), egui::Button::new(translator.text(label))).clicked() {

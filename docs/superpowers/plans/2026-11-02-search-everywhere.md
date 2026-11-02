@@ -13,7 +13,8 @@
 ## Global Constraints
 
 - Use one search dialog with two tabs: **Files** and **Java Symbols**.
-- `⌘P` opens Files; **Code → Go to Java Symbol…** opens Java Symbols.
+- `⇧⌘O` opens Files; **Code → Go to Java Symbol…** opens Java Symbols.
+- **Navigate → Search Everywhere…** opens the shared dialog on Files.
 - Keep file indexing and LSP requests off the UI frame.
 - Do not add dependencies, an Actions tab, blended ranking, or new search backends.
 - Preserve English and Italian labels and keyboard operation.
@@ -55,7 +56,7 @@
 - [x] **Step 2: Run the focused test and confirm it fails because the unified dialog does not exist.**
 - [x] **Step 3: Add `SearchEverywhere` in `src/app/search_everywhere.rs`.** Own the shared query, requested tab, visibility, and query focus. Render one `egui::Window` with Files and Java Symbols tab buttons, a shared text input, Escape handling, and the selected engine's results.
 - [x] **Step 4: Refactor `QuickOpen` and `SymbolSearch` to render their result lists inside the shared dialog.** Remove their separate windows and per-window query/focus state; keep file-index worker generation checks, symbol-query matching, result selection, and all existing error handling.
-- [x] **Step 5: Route existing File and Code menu entries and shortcuts through `SearchEverywhereOpen(SearchTab)`.** Keep `⌘P` on Files and **Go to Java Symbol…** on Java Symbols. Preserve `OpenFile` and `OpenFileAtPosition` dispatch.
+- [x] **Step 5: Route existing File and Code menu entries and shortcuts through `SearchEverywhereOpen(SearchTab)`.** Route **Go to File…** to Files and **Go to Java Symbol…** to Java Symbols. Preserve `OpenFile` and `OpenFileAtPosition` dispatch.
 - [x] **Step 6: Add the dialog title and tab labels to both language catalogs.** `QuickOpen::render_results` shows a clear Files empty state when no project is open and does not start indexing.
 - [x] **Step 7: Run `cargo fmt --check`, `cargo test`, `cargo check`, and `git diff --check`.** Confirm stale-result and empty-result behavior, all tests pass, and no new dependency was added.
 - [x] **Step 8: Commit and push the finished change directly on `main`.**

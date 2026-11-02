@@ -202,6 +202,20 @@ pub fn keyboard_shortcuts(ctx: &egui::Context, state: &mut AppState) {
     }
     if ctx.input_mut(|input| {
         input.consume_key(
+            egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
+            egui::Key::CloseBracket,
+        )
+    }) {
+        state.enqueue(AppEvent::NextEditorTab);
+    } else if ctx.input_mut(|input| {
+        input.consume_key(
+            egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
+            egui::Key::OpenBracket,
+        )
+    }) {
+        state.enqueue(AppEvent::PreviousEditorTab);
+    } else if ctx.input_mut(|input| {
+        input.consume_key(
             egui::Modifiers::CTRL | egui::Modifiers::SHIFT,
             egui::Key::Tab,
         )
@@ -210,13 +224,29 @@ pub fn keyboard_shortcuts(ctx: &egui::Context, state: &mut AppState) {
     } else if ctx.input_mut(|input| input.consume_key(egui::Modifiers::CTRL, egui::Key::Tab)) {
         state.enqueue(AppEvent::NextEditorTab);
     }
-    for (key, event) in [
-        (egui::Key::ArrowLeft, AppEvent::NavigateBack),
-        (egui::Key::ArrowRight, AppEvent::NavigateForward),
+    for (modifiers, key, event) in [
+        (
+            egui::Modifiers::CTRL | egui::Modifiers::ALT,
+            egui::Key::ArrowLeft,
+            AppEvent::NavigateBack,
+        ),
+        (
+            egui::Modifiers::CTRL | egui::Modifiers::ALT,
+            egui::Key::ArrowRight,
+            AppEvent::NavigateForward,
+        ),
+        (
+            egui::Modifiers::COMMAND,
+            egui::Key::OpenBracket,
+            AppEvent::NavigateBack,
+        ),
+        (
+            egui::Modifiers::COMMAND,
+            egui::Key::CloseBracket,
+            AppEvent::NavigateForward,
+        ),
     ] {
-        if ctx
-            .input_mut(|input| input.consume_key(egui::Modifiers::CTRL | egui::Modifiers::ALT, key))
-        {
+        if ctx.input_mut(|input| input.consume_key(modifiers, key)) {
             state.enqueue(event);
         }
     }
@@ -372,11 +402,6 @@ pub fn keyboard_shortcuts(ctx: &egui::Context, state: &mut AppState) {
     if ctx.input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, egui::Key::W)) {
         state.enqueue(AppEvent::CloseActiveFile);
     }
-    if ctx.input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, egui::Key::P)) {
-        state.enqueue(AppEvent::SearchEverywhereOpen(
-            super::search_everywhere::SearchTab::Files,
-        ));
-    }
     if let Some(event) = recent_files_shortcut_event(ctx) {
         state.enqueue(event);
     }
@@ -453,6 +478,21 @@ pub fn keyboard_shortcuts(ctx: &egui::Context, state: &mut AppState) {
     }
     for (modifiers, key, command) in [
         (
+            egui::Modifiers::COMMAND,
+            egui::Key::P,
+            crate::java::lsp::EditorCommand::SignatureHelp,
+        ),
+        (
+            egui::Modifiers::COMMAND,
+            egui::Key::B,
+            crate::java::lsp::EditorCommand::Definition,
+        ),
+        (
+            egui::Modifiers::ALT,
+            egui::Key::F7,
+            crate::java::lsp::EditorCommand::References,
+        ),
+        (
             egui::Modifiers::CTRL,
             egui::Key::Space,
             crate::java::lsp::EditorCommand::Completion,
@@ -482,18 +522,20 @@ pub fn keyboard_shortcuts(ctx: &egui::Context, state: &mut AppState) {
             state.enqueue(AppEvent::EditorCommand(command));
         }
     }
-    let open_project = ctx.input_mut(|input| {
+    let go_to_file = ctx.input_mut(|input| {
         input.consume_key(
             egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
             egui::Key::O,
         )
     });
-    let open_file =
+    let open_project =
         ctx.input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, egui::Key::O));
-    if open_project {
+    if go_to_file {
+        state.enqueue(AppEvent::SearchEverywhereOpen(
+            super::search_everywhere::SearchTab::Files,
+        ));
+    } else if open_project {
         open_project_dialog(state);
-    } else if open_file {
-        open_file_dialog(state);
     }
 }
 
