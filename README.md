@@ -262,11 +262,13 @@ public class MainTest {
 ```
 
 The optional `live_maven_worker_prefers_wrapper_and_reports_test_failures` test
-passed with Maven 3.9.9, Corretto JDK 8, and a reactor containing `custom/app`.
-It shares the build/test/clean assertions with the Gradle worker test, which also
-passed again after that refactor. The Maven fixture provides an executable
-`mvnw` that invokes the installed Maven with `--offline`; the configured Maven
-path is deliberately nonexistent to verify wrapper precedence.
+passed again on 2026-11-02 with Maven 3.9.9, JDK 21, and a reactor containing
+`custom/app` (it was previously verified with Corretto JDK 8). It exercises the
+production build worker for Build, Test, and Clean, confirms JDK reporting,
+checks one passing and one failing JUnit test plus its source location, and
+verifies that Clean removes the compiled class. The Maven fixture provides an
+executable `mvnw` that invokes the installed Maven with `--offline`; the
+configured Maven path is deliberately nonexistent to verify wrapper precedence.
 
 Set `INTELLI_GEN_MAVEN_PROJECT` to this disposable reactor and
 `INTELLI_GEN_BUILD_JAVA_HOME` to its JDK, then run
