@@ -311,6 +311,29 @@ mod tests {
     use super::*;
 
     #[test]
+    fn italian_project_open_status_preserves_paths_and_build_details() {
+        let (translator, error) = Translator::load(LanguagePreference::Italian, None);
+        assert!(error.is_none());
+        for (source, expected) in [
+            (
+                "Opened /tmp/progetto — Maven build at /tmp/root (2 modules)",
+                "Aperto /tmp/progetto — build Maven in /tmp/root (2 moduli)",
+            ),
+            (
+                "Opened /tmp/progetto — no Maven or Gradle project found",
+                "Aperto /tmp/progetto — nessun progetto Maven o Gradle trovato",
+            ),
+            (
+                "Opened /tmp/progetto — build discovery failed",
+                "Aperto /tmp/progetto — riconoscimento della build non riuscito",
+            ),
+            ("Opened /tmp/Main.java", "Aperto /tmp/Main.java"),
+        ] {
+            assert_eq!(translator.message(source), expected);
+        }
+    }
+
+    #[test]
     fn dynamic_messages_prefer_specific_templates_over_generic_matches() {
         let catalog = HashMap::from([
             (
@@ -338,6 +361,53 @@ mod tests {
         let (italian, error) = Translator::load(LanguagePreference::Italian, None);
         assert!(error.is_none());
         assert_eq!(italian.message("Ln 12, Col 8"), "Riga 12, colonna 8");
+    }
+
+    #[test]
+    fn common_project_and_file_statuses_are_translated_with_paths_intact() {
+        let (translator, error) = Translator::load(LanguagePreference::Italian, None);
+        assert!(error.is_none());
+        for (source, expected) in [
+            ("Opening /tmp/progetto…", "Apertura di /tmp/progetto…"),
+            ("Saving /tmp/Main.java…", "Salvataggio di /tmp/Main.java…"),
+            ("Opened /tmp/Main.java", "Aperto /tmp/Main.java"),
+            ("Saved /tmp/Main.java", "Salvato /tmp/Main.java"),
+            ("Created /tmp/New.java", "Creato /tmp/New.java"),
+            (
+                "JDK catalog updated: 2 installation(s)",
+                "Catalogo JDK aggiornato: 2 installazioni",
+            ),
+        ] {
+            assert_eq!(translator.message(source), expected);
+        }
+    }
+
+    #[test]
+    fn build_summaries_translate_without_changing_project_paths() {
+        let (translator, error) = Translator::load(LanguagePreference::Italian, None);
+        assert!(error.is_none());
+        assert_eq!(
+            translator.message("Maven test in /tmp/project"),
+            "Maven test in /tmp/project"
+        );
+        assert_eq!(
+            translator.message("/tmp/project — Finished — exit 0 — 1.2s"),
+            "/tmp/project — Finished — codice 0 — 1.2s"
+        );
+    }
+
+    #[test]
+    fn run_and_debug_statuses_translate_dynamic_values() {
+        let (translator, error) = Translator::load(LanguagePreference::Italian, None);
+        assert!(error.is_none());
+        for (source, expected) in [
+            ("Preparing Java run…", "Preparazione dell’esecuzione Java…"),
+            ("Running Demo", "In esecuzione: Demo"),
+            ("Finished — exit 0", "Terminato — codice 0"),
+            ("Debug finished — exit 17", "Debug terminato — codice 17"),
+        ] {
+            assert_eq!(translator.message(source), expected);
+        }
     }
 
     #[test]

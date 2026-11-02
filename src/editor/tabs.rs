@@ -205,7 +205,7 @@ fn java_completion_trigger(
     let mut typed_identifier = false;
     let mut typed_dot = false;
     for text in text_events {
-        typed_dot |= text == ".";
+        typed_dot |= text.ends_with('.');
         typed_identifier |= text
             .chars()
             .any(|character| character.is_alphanumeric() || matches!(character, '_' | '$'));
@@ -226,6 +226,29 @@ fn java_completion_trigger(
         .take_while(|character| character.is_alphanumeric() || matches!(character, '_' | '$'))
         .count();
     (identifier_prefix >= 2).then_some(crate::java::lsp::EditorCommand::Completion)
+}
+
+#[cfg(test)]
+mod completion_trigger_tests {
+    use super::*;
+
+    #[test]
+    fn pasted_dot_triggers_completion() {
+        let mut document = Document {
+            path: PathBuf::from("/project/src/Main.java"),
+            text: "object.".into(),
+            saved_text: String::new(),
+            cursor_line: 1,
+            cursor_column: 1,
+            revision: 0,
+        };
+        document.set_cursor(document.text.chars().count());
+
+        assert_eq!(
+            java_completion_trigger(&document, &[egui::Event::Paste("object.".into())]),
+            Some(crate::java::lsp::EditorCommand::Completion)
+        );
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -780,26 +803,30 @@ impl EditorTab {
         diagnostics: &[crate::java::lsp::LanguageDiagnostic],
         indent_size: usize,
         insert_spaces: bool,
-    ) -> Option<super::GutterBreakpointAction> {
+    ) -> (Option<super::GutterBreakpointAction>, Option<egui::Pos2>) {
         if self.document.text.len() > PAGED_EDITOR_BYTES {
             self.active_snippet_tab_stop = None;
             self.snippet_tab_stops.clear();
             self.pending_selection = None;
-            return self.render_paged_editor(
-                ui,
-                allow_edits && !self.close_after_save,
-                breakpoints,
-                logpoints,
-                disabled_breakpoints,
-                breakpoint_status,
-                current_line,
-                diagnostics,
-                indent_size,
-                insert_spaces,
+            return (
+                self.render_paged_editor(
+                    ui,
+                    allow_edits && !self.close_after_save,
+                    breakpoints,
+                    logpoints,
+                    disabled_breakpoints,
+                    breakpoint_status,
+                    current_line,
+                    diagnostics,
+                    indent_size,
+                    insert_spaces,
+                ),
+                None,
             );
         }
         self.page_end = 0;
         let mut toggled = None;
+        let mut cursor_screen_pos = None;
         let editor_id = egui::Id::new(("source_editor", &self.path));
         if let Some((start, end)) = self.pending_selection.take() {
             let mut state =
@@ -935,6 +962,13 @@ impl EditorTab {
                     }
                     if let Some(cursor) = output.cursor_range {
                         self.document.set_cursor(cursor.primary.index.into());
+                        let cursor_rect = output
+                            .galley
+                            .pos_from_cursor(cursor.primary)
+                            .translate(output.galley_pos.to_vec2());
+                        if output.text_clip_rect.contains(cursor_rect.center()) {
+                            cursor_screen_pos = Some(cursor_rect.left_bottom());
+                        }
                     }
                 });
             });
@@ -952,7 +986,7 @@ impl EditorTab {
             self.active_snippet_tab_stop = None;
             self.snippet_tab_stops.clear();
         }
-        toggled
+        (toggled, cursor_screen_pos)
     }
 
     fn adjust_snippet_tab_stops(&mut self, previous_length: usize) {
@@ -1116,11 +1150,14 @@ impl EditorTab {
             {
                 start = Some(self.page_end);
             }
-            ui.small(format!(
-                "Bytes {}–{} of {}",
-                self.page_start,
-                self.page_end,
-                self.document.text.len()
+            ui.small(crate::i18n::ui_format(
+                ui,
+                "Bytes {start}–{end} of {total}",
+                &[
+                    ("start", &self.page_start.to_string()),
+                    ("end", &self.page_end.to_string()),
+                    ("total", &self.document.text.len().to_string()),
+                ],
             ));
         });
         if start.is_none() && self.page_end == 0 {
@@ -1265,6 +1302,7 @@ impl EditorTab {
 
 pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
     let mut close = None;
+    let mut activated_tab = None;
     egui::ScrollArea::horizontal()
         .id_salt("editor_tabs")
         .show(ui, |ui| {
@@ -1323,7 +1361,7 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
                                 .selectable_label(active, label)
                                 .on_hover_text(path.display().to_string());
                             if response.clicked() {
-                                state.active_tab = Some(index);
+                                activated_tab = Some(index);
                             }
                             if response.middle_clicked() {
                                 close = Some(path.clone());
@@ -1340,6 +1378,9 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
                 }
             });
         });
+    if let Some(index) = activated_tab {
+        state.activate_tab(index);
+    }
     if let Some(path) = close {
         state.enqueue(AppEvent::CloseFile(path));
     }
@@ -1355,6 +1396,8 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
         .map_or(&[][..], Vec::as_slice);
     let mut editor_command = None;
     let mut breakpoint_action = None;
+    let mut completion_popup_action = None;
+    let mut hover_popup_dismissed = false;
     let (indent_size, insert_spaces) = state
         .active_tab
         .and_then(|index| state.editor_tabs.get(index))
@@ -1388,7 +1431,7 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
             .filter(|frame| frame.source.as_ref() == Some(&tab.path))
             .map(|frame| frame.line);
         let revision = tab.document.revision;
-        let toggled = tab.render_editor(
+        let (toggled, completion_position) = tab.render_editor(
             ui,
             !state.quit_approved,
             &lines,
@@ -1401,6 +1444,60 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
             insert_spaces,
         );
         let path = tab.path.clone();
+        if let Some(position) = completion_position {
+            let caret = tab.document.lsp_position();
+            let completion_is_current = state.language.completion.as_ref().is_some_and(
+                |(result_path, version, result_position, _)| {
+                    result_path == &path
+                        && *result_position == caret
+                        && state.language.is_document_current(
+                            result_path,
+                            *version,
+                            &tab.document.text,
+                        )
+                },
+            );
+            let hover_is_current = state.language.hover.as_ref().is_some_and(
+                |(result_path, version, result_position, _)| {
+                    result_path == &path
+                        && *result_position == caret
+                        && state.language.is_document_current(
+                            result_path,
+                            *version,
+                            &tab.document.text,
+                        )
+                },
+            );
+            let mut signature_popup_dismissed = false;
+            if !completion_is_current {
+                hover_popup_dismissed = crate::java::lsp::render_hover_popup(
+                    ui.ctx(),
+                    &path,
+                    &tab.document,
+                    position,
+                    &mut state.language,
+                );
+                if !hover_is_current {
+                    signature_popup_dismissed = crate::java::lsp::render_signature_popup(
+                        ui.ctx(),
+                        &path,
+                        &tab.document,
+                        position,
+                        &mut state.language,
+                    );
+                }
+            }
+            completion_popup_action = crate::java::lsp::render_completion_popup(
+                ui.ctx(),
+                &path,
+                &tab.document,
+                position,
+                &mut state.language,
+            );
+            if signature_popup_dismissed {
+                state.language.signature_help = None;
+            }
+        }
         if tab.document.revision != revision
             && path
                 .extension()
@@ -1462,6 +1559,18 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
                 }
             });
         }
+    }
+    if hover_popup_dismissed {
+        state.language.hover = None;
+    }
+    match completion_popup_action {
+        Some(crate::java::lsp::CompletionPopupAction::Apply(index)) => {
+            state.enqueue(AppEvent::ApplyCompletion(index));
+        }
+        Some(crate::java::lsp::CompletionPopupAction::Dismiss) => {
+            state.language.dismiss_completion();
+        }
+        None => {}
     }
     if let Some(command) = editor_command {
         state.enqueue(AppEvent::EditorCommand(command));

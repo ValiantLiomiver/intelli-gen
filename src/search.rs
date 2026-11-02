@@ -297,11 +297,6 @@ fn search(
         builder.add(Glob::new(glob).map_err(|error| format!("Invalid file glob: {error}"))?);
     }
     let globs = builder.build().map_err(|error| error.to_string())?;
-    let needle = if query.case_sensitive {
-        query.text.clone()
-    } else {
-        query.text.to_lowercase()
-    };
     let mut results = SearchResults::default();
     let mut walker = ignore::WalkBuilder::new(root);
     walker
@@ -353,11 +348,8 @@ fn search(
             if cancelled() {
                 return Ok(results);
             }
-            let matched = if query.case_sensitive {
-                line.contains(&needle)
-            } else {
-                line.to_lowercase().contains(&needle)
-            };
+            let matched =
+                crate::editor::find_replace::contains_text(line, &query.text, query.case_sensitive);
             if matched {
                 results.matches.push(SearchMatch {
                     path: entry.path().to_owned(),
@@ -529,10 +521,16 @@ pub fn render(ui: &mut egui::Ui, state: &mut crate::app::AppState) {
         let submitted =
             response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
         invalidate_preview |= ui
-            .checkbox(&mut state.search.query.case_sensitive, "Case sensitive")
+            .checkbox(
+                &mut state.search.query.case_sensitive,
+                crate::i18n::ui_text(ui, "Case sensitive"),
+            )
             .changed();
         let replace_changed = ui
-            .checkbox(&mut state.search.replace_mode, "Replace in project")
+            .checkbox(
+                &mut state.search.replace_mode,
+                crate::i18n::ui_text(ui, "Replace in project"),
+            )
             .changed();
         invalidate_preview |= replace_changed;
         if state.search.replace_mode {
@@ -550,7 +548,7 @@ pub fn render(ui: &mut egui::Ui, state: &mut crate::app::AppState) {
         if ui
             .add_enabled(
                 state.project.is_some() && !state.search.running,
-                egui::Button::new(button),
+                egui::Button::new(crate::i18n::ui_text(ui, button)),
             )
             .clicked()
             || submitted
@@ -613,11 +611,17 @@ pub fn render(ui: &mut egui::Ui, state: &mut crate::app::AppState) {
                 .filter(|file| file.selected)
                 .count();
             let pending = !state.pending_workspace_replacements.is_empty();
-            if ui
-                .add_enabled(
-                    selected > 0 && !pending,
-                    egui::Button::new(format!("Apply to {selected} files")),
+            let apply_label = if selected == 1 {
+                crate::i18n::ui_text(ui, "Apply to 1 file")
+            } else {
+                crate::i18n::ui_format(
+                    ui,
+                    "Apply to {count} files",
+                    &[("count", &selected.to_string())],
                 )
+            };
+            if ui
+                .add_enabled(selected > 0 && !pending, egui::Button::new(apply_label))
                 .clicked()
             {
                 action = Some(AppEvent::Search(SearchAction::ApplyReplace));

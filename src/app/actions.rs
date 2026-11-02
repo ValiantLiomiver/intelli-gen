@@ -10,6 +10,60 @@ use crate::project::{
     maven_view::{MavenModuleView, MavenViewRequest},
 };
 
+#[cfg(test)]
+mod recent_files_shortcut_tests {
+    use super::*;
+
+    #[test]
+    fn command_e_opens_the_files_tab_and_consumes_only_that_shortcut() {
+        let context = egui::Context::default();
+        let mut result = None;
+        let mut output = context.run_ui(
+            egui::RawInput {
+                events: vec![egui::Event::Key {
+                    key: egui::Key::E,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::COMMAND,
+                }],
+                ..Default::default()
+            },
+            |ui| result = recent_files_shortcut_event(ui.ctx()),
+        );
+        output.textures_delta.clear();
+
+        assert!(matches!(
+            result,
+            Some(AppEvent::SearchEverywhereOpen(
+                super::super::search_everywhere::SearchTab::Files
+            ))
+        ));
+    }
+
+    #[test]
+    fn plain_e_does_not_open_the_recent_files_view() {
+        let context = egui::Context::default();
+        let mut result = None;
+        let mut output = context.run_ui(
+            egui::RawInput {
+                events: vec![egui::Event::Key {
+                    key: egui::Key::E,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                }],
+                ..Default::default()
+            },
+            |ui| result = recent_files_shortcut_event(ui.ctx()),
+        );
+        output.textures_delta.clear();
+
+        assert!(result.is_none());
+    }
+}
+
 fn navigate_tab_to_position(tab: &mut EditorTab, position: crate::java::lsp::Position) {
     if position.character == 0 {
         tab.navigate_to_line(position.line as usize + 1);
@@ -25,12 +79,52 @@ fn open_file_at_position(
     position: crate::java::lsp::Position,
 ) {
     if let Some(index) = state.editor_tabs.iter().position(|tab| tab.path == path) {
-        state.active_tab = Some(index);
+        state.activate_tab(index);
         navigate_tab_to_position(&mut state.editor_tabs[index], position);
     } else {
         state.pending_navigation.insert(path.clone(), position);
         state.enqueue(AppEvent::OpenFile(path));
     }
+}
+
+// shortcut: pairs only src/main/java and src/test/java; add other roots when supported projects need them.
+pub fn test_source_target(path: &Path) -> Option<PathBuf> {
+    if path.extension().is_none_or(|extension| extension != "java") {
+        return None;
+    }
+    let mut source_root = path.parent()?;
+    while let Some(parent) = source_root.parent() {
+        if source_root.file_name().is_some_and(|name| name == "java") {
+            let kind = parent.file_name().and_then(|name| name.to_str());
+            let src_root = parent.parent();
+            let alternate = match kind {
+                Some("main")
+                    if src_root
+                        .is_some_and(|root| root.file_name().is_some_and(|name| name == "src")) =>
+                {
+                    "test"
+                }
+                Some("test")
+                    if src_root
+                        .is_some_and(|root| root.file_name().is_some_and(|name| name == "src")) =>
+                {
+                    "main"
+                }
+                _ => {
+                    source_root = parent;
+                    continue;
+                }
+            };
+            return Some(
+                src_root?
+                    .join(alternate)
+                    .join("java")
+                    .join(path.strip_prefix(source_root).ok()?),
+            );
+        }
+        source_root = parent;
+    }
+    None
 }
 
 fn current_navigation_location(state: &AppState) -> Option<super::NavigationLocation> {
@@ -99,11 +193,19 @@ fn select_editor_tab(state: &mut AppState, forward: bool) {
         .active_tab
         .unwrap_or(if forward { count - 1 } else { 0 })
         .min(count - 1);
-    state.active_tab = Some(if forward {
+    let index = if forward {
         (current + 1) % count
     } else {
         (current + count - 1) % count
-    });
+    };
+    state.activate_tab(index);
+}
+
+fn recent_files_shortcut_event(ctx: &egui::Context) -> Option<AppEvent> {
+    ctx.input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, egui::Key::E))
+        .then_some(AppEvent::SearchEverywhereOpen(
+            super::search_everywhere::SearchTab::Files,
+        ))
 }
 
 pub fn open_project_dialog(state: &mut AppState) {
@@ -138,7 +240,76 @@ pub fn keyboard_shortcuts(ctx: &egui::Context, state: &mut AppState) {
     if state.quit_approved {
         return;
     }
+    if ctx.input(|input| double_shift_pressed(input, &mut state.last_shift_release)) {
+        state.enqueue(AppEvent::SearchEverywhereOpen(
+            super::search_everywhere::SearchTab::Files,
+        ));
+    }
     if ctx.input_mut(|input| {
+        input.consume_key(
+            egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
+            egui::Key::A,
+        )
+    }) {
+        state.enqueue(AppEvent::SearchEverywhereOpen(
+            super::search_everywhere::SearchTab::Actions,
+        ));
+    }
+    if ctx.input_mut(|input| {
+        input.consume_key(
+            egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
+            egui::Key::T,
+        )
+    }) {
+        state.enqueue(AppEvent::ToggleTestSource);
+    }
+    if ctx.input_mut(|input| {
+        input.consume_key(
+            egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
+            egui::Key::F8,
+        )
+    }) {
+        state.enqueue(AppEvent::ShowBreakpoints);
+    }
+    if state.find_replace.visible
+        && ctx.input_mut(|input| {
+            input.consume_key(
+                egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
+                egui::Key::G,
+            )
+        })
+    {
+        state.enqueue(AppEvent::Find(
+            crate::editor::find_replace::FindAction::Previous,
+        ));
+    } else if state.find_replace.visible
+        && ctx.input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, egui::Key::G))
+    {
+        state.enqueue(AppEvent::Find(
+            crate::editor::find_replace::FindAction::Next,
+        ));
+    }
+    if ctx.input_mut(|input| input.consume_key(egui::Modifiers::CTRL, egui::Key::R)) {
+        state.enqueue(AppEvent::Run(super::events::RunAction::Start));
+    }
+    if ctx.input_mut(|input| input.consume_key(egui::Modifiers::CTRL, egui::Key::D)) {
+        state.enqueue(AppEvent::Debugger(super::events::DebuggerAction::Start));
+    }
+    if ctx.input_mut(|input| {
+        input.consume_key(
+            egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
+            egui::Key::CloseBracket,
+        )
+    }) {
+        state.enqueue(AppEvent::NextEditorTab);
+    } else if ctx.input_mut(|input| {
+        input.consume_key(
+            egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
+            egui::Key::OpenBracket,
+        )
+    }) {
+        state.enqueue(AppEvent::PreviousEditorTab);
+    } else if ctx.input_mut(|input| {
         input.consume_key(
             egui::Modifiers::CTRL | egui::Modifiers::SHIFT,
             egui::Key::Tab,
@@ -148,13 +319,29 @@ pub fn keyboard_shortcuts(ctx: &egui::Context, state: &mut AppState) {
     } else if ctx.input_mut(|input| input.consume_key(egui::Modifiers::CTRL, egui::Key::Tab)) {
         state.enqueue(AppEvent::NextEditorTab);
     }
-    for (key, event) in [
-        (egui::Key::ArrowLeft, AppEvent::NavigateBack),
-        (egui::Key::ArrowRight, AppEvent::NavigateForward),
+    for (modifiers, key, event) in [
+        (
+            egui::Modifiers::CTRL | egui::Modifiers::ALT,
+            egui::Key::ArrowLeft,
+            AppEvent::NavigateBack,
+        ),
+        (
+            egui::Modifiers::CTRL | egui::Modifiers::ALT,
+            egui::Key::ArrowRight,
+            AppEvent::NavigateForward,
+        ),
+        (
+            egui::Modifiers::COMMAND,
+            egui::Key::OpenBracket,
+            AppEvent::NavigateBack,
+        ),
+        (
+            egui::Modifiers::COMMAND,
+            egui::Key::CloseBracket,
+            AppEvent::NavigateForward,
+        ),
     ] {
-        if ctx
-            .input_mut(|input| input.consume_key(egui::Modifiers::CTRL | egui::Modifiers::ALT, key))
-        {
+        if ctx.input_mut(|input| input.consume_key(modifiers, key)) {
             state.enqueue(event);
         }
     }
@@ -181,6 +368,11 @@ pub fn keyboard_shortcuts(ctx: &egui::Context, state: &mut AppState) {
                 egui::Id::new(("source_editor", &tab.path))
             }
         });
+    if comment_editor.is_some_and(|id| ctx.memory(|memory| memory.focused() == Some(id)))
+        && ctx.input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, egui::Key::F8))
+    {
+        state.enqueue(AppEvent::ToggleBreakpointAtCaret);
+    }
     if comment_editor.is_some_and(|id| ctx.memory(|memory| memory.focused() == Some(id)))
         && ctx.input_mut(|input| {
             input.consume_key(egui::Modifiers::COMMAND, egui::Key::Slash)
@@ -310,8 +502,8 @@ pub fn keyboard_shortcuts(ctx: &egui::Context, state: &mut AppState) {
     if ctx.input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, egui::Key::W)) {
         state.enqueue(AppEvent::CloseActiveFile);
     }
-    if ctx.input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, egui::Key::P)) {
-        state.enqueue(AppEvent::QuickOpenOpen);
+    if let Some(event) = recent_files_shortcut_event(ctx) {
+        state.enqueue(event);
     }
     if ctx.input_mut(|input| {
         input.consume_key(egui::Modifiers::CTRL | egui::Modifiers::ALT, egui::Key::O)
@@ -326,10 +518,31 @@ pub fn keyboard_shortcuts(ctx: &egui::Context, state: &mut AppState) {
             egui::Key::O,
         )
     }) {
-        state.enqueue(AppEvent::SymbolSearchOpen);
+        state.enqueue(AppEvent::SearchEverywhereOpen(
+            super::search_everywhere::SearchTab::JavaSymbols,
+        ));
     }
-    if ctx.input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, egui::Key::F12)) {
+    if ctx.input_mut(|input| {
+        input.consume_key(
+            egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
+            egui::Key::F12,
+        )
+    }) {
+        if state.settings.show_tool_window {
+            state.settings.show_tool_window = false;
+            state.enqueue(AppEvent::SettingsChanged);
+        }
+    } else if ctx.input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, egui::Key::F12)) {
         state.enqueue(AppEvent::FileStructureOpen);
+    } else if ctx.input_mut(|input| input.consume_key(egui::Modifiers::SHIFT, egui::Key::F12)) {
+        // Shift+F12 has no binding in IntelliJ's predefined macOS keymap.
+    } else if ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::F12)) {
+        let panel = state.last_tool_window.unwrap_or(state.active_panel);
+        state.set_active_panel(panel);
+        if !state.settings.show_tool_window {
+            state.settings.show_tool_window = true;
+            save_settings(state);
+        }
     }
     if ctx.input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, egui::Key::L)) {
         state.enqueue(AppEvent::GoToLineOpen);
@@ -384,6 +597,21 @@ pub fn keyboard_shortcuts(ctx: &egui::Context, state: &mut AppState) {
     }
     for (modifiers, key, command) in [
         (
+            egui::Modifiers::COMMAND,
+            egui::Key::P,
+            crate::java::lsp::EditorCommand::SignatureHelp,
+        ),
+        (
+            egui::Modifiers::COMMAND,
+            egui::Key::B,
+            crate::java::lsp::EditorCommand::Declaration,
+        ),
+        (
+            egui::Modifiers::ALT,
+            egui::Key::F7,
+            crate::java::lsp::EditorCommand::References,
+        ),
+        (
             egui::Modifiers::CTRL,
             egui::Key::Space,
             crate::java::lsp::EditorCommand::Completion,
@@ -398,34 +626,58 @@ pub fn keyboard_shortcuts(ctx: &egui::Context, state: &mut AppState) {
             egui::Key::F1,
             crate::java::lsp::EditorCommand::Hover,
         ),
-        (
-            egui::Modifiers::SHIFT,
-            egui::Key::F12,
-            crate::java::lsp::EditorCommand::References,
-        ),
-        (
-            egui::Modifiers::NONE,
-            egui::Key::F12,
-            crate::java::lsp::EditorCommand::Definition,
-        ),
     ] {
         if ctx.input_mut(|input| input.consume_key(modifiers, key)) {
             state.enqueue(AppEvent::EditorCommand(command));
         }
     }
-    let open_project = ctx.input_mut(|input| {
+    let go_to_file = ctx.input_mut(|input| {
         input.consume_key(
             egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
             egui::Key::O,
         )
     });
-    let open_file =
+    let go_to_class =
         ctx.input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, egui::Key::O));
-    if open_project {
-        open_project_dialog(state);
-    } else if open_file {
-        open_file_dialog(state);
+    if go_to_file {
+        state.enqueue(AppEvent::SearchEverywhereOpen(
+            super::search_everywhere::SearchTab::Files,
+        ));
+    } else if go_to_class {
+        state.enqueue(AppEvent::SearchEverywhereOpen(
+            super::search_everywhere::SearchTab::JavaClasses,
+        ));
     }
+}
+
+fn double_shift_pressed(input: &egui::InputState, last_release: &mut Option<f64>) -> bool {
+    if !input.focused {
+        *last_release = None;
+        return false;
+    }
+    let mut triggered = false;
+    for event in &input.events {
+        match event {
+            egui::Event::Key {
+                key: egui::Key::ShiftLeft | egui::Key::ShiftRight,
+                pressed: true,
+                repeat: false,
+                ..
+            } => {
+                // shortcut: fixed 500 ms double-press window, make configurable if users need a different cadence.
+                triggered |= last_release
+                    .take()
+                    .is_some_and(|released| (0.0..=0.5).contains(&(input.time - released)));
+            }
+            egui::Event::Key {
+                key: egui::Key::ShiftLeft | egui::Key::ShiftRight,
+                pressed: false,
+                ..
+            } => *last_release = Some(input.time),
+            _ => {}
+        }
+    }
+    triggered
 }
 
 /// The sole shell reducer. Later tasks dispatch service commands here and return
@@ -453,7 +705,7 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
             AppEvent::OpenProject(path) => {
                 state.pending_run = None;
                 state.quick_open.cancel();
-                state.symbol_search.close();
+                state.search_everywhere.close();
                 state.new_java_class = None;
                 state.new_java_project = None;
                 state.rename_symbol = None;
@@ -819,7 +1071,7 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
             }
             AppEvent::OpenFile(path) => {
                 if let Some(index) = state.editor_tabs.iter().position(|tab| tab.path == path) {
-                    state.active_tab = Some(index);
+                    state.activate_tab(index);
                 } else if !state.quit_requested && state.loading_files.insert(path.clone()) {
                     match state.editor_io.load(path.clone()) {
                         Ok(()) => state.status = format!("Opening {}…", path.display()),
@@ -900,14 +1152,11 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                     Err(error) => state.last_error = Some(error),
                 }
             }
-            AppEvent::QuickOpenOpen => {
+            AppEvent::SearchEverywhereOpen(tab) => {
                 if !state.quit_requested {
-                    state.quick_open.open();
-                }
-            }
-            AppEvent::SymbolSearchOpen => {
-                if !state.quit_requested {
-                    state.symbol_search.open();
+                    state.quick_open.reset_selection();
+                    state.symbol_search.reset_selection();
+                    state.search_everywhere.open(tab);
                 }
             }
             AppEvent::FileStructureOpen => {
@@ -968,11 +1217,43 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
             }
             AppEvent::NavigateBack => move_navigation_history(state, true),
             AppEvent::NavigateForward => move_navigation_history(state, false),
+            AppEvent::ToggleTestSource => {
+                if let Some(path) = state
+                    .active_tab
+                    .and_then(|index| state.editor_tabs.get(index))
+                    .and_then(|tab| test_source_target(&tab.path))
+                {
+                    state.enqueue(AppEvent::OpenFile(path));
+                } else {
+                    state.status = "No matching test or production source".into();
+                }
+            }
+            AppEvent::ToggleBreakpointAtCaret => {
+                if let Some(tab) = state
+                    .active_tab
+                    .and_then(|index| state.editor_tabs.get(index))
+                    .filter(|tab| {
+                        tab.path
+                            .extension()
+                            .is_some_and(|extension| extension == "java")
+                    })
+                {
+                    state.enqueue(AppEvent::Debugger(
+                        super::events::DebuggerAction::ToggleBreakpoint {
+                            source: tab.path.clone(),
+                            line: tab.document.lsp_position().line.saturating_add(1),
+                            modified: tab.document.is_dirty(),
+                        },
+                    ));
+                } else {
+                    state.status = "Open a Java file to toggle a breakpoint".into();
+                }
+            }
             AppEvent::NextEditorTab => select_editor_tab(state, true),
             AppEvent::PreviousEditorTab => select_editor_tab(state, false),
             AppEvent::Search(action) => match action {
                 super::events::SearchAction::Open => {
-                    state.active_panel = super::ActivePanel::Search;
+                    state.set_active_panel(super::ActivePanel::Search);
                     let show_window_changed = !state.settings.show_tool_window;
                     state.settings.show_tool_window = true;
                     state.search.focus_requested = true;
@@ -1092,7 +1373,10 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                 state.pending_close = None;
                 state.quit_requested = false;
             }
-            AppEvent::RequestQuit => state.quit_requested = true,
+            AppEvent::RequestQuit => {
+                state.quit_requested = true;
+                state.search_everywhere.close();
+            }
             AppEvent::EditorCompleted(completion) => editor_completed(state, completion),
             AppEvent::EditorCommand(command) => {
                 let (tab_size, insert_spaces) = state
@@ -1328,7 +1612,15 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
             }
             AppEvent::RestartLanguage => restart_language(state),
             AppEvent::ShowPanel(panel) => {
-                state.active_panel = panel;
+                state.set_active_panel(panel);
+                if !state.settings.show_tool_window {
+                    state.settings.show_tool_window = true;
+                    save_settings(state);
+                }
+            }
+            AppEvent::ShowBreakpoints => {
+                state.debugger.breakpoints_open_requested = true;
+                state.set_active_panel(super::ActivePanel::Debugger);
                 if !state.settings.show_tool_window {
                     state.settings.show_tool_window = true;
                     save_settings(state);
@@ -1987,7 +2279,7 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                         }
                     }
                     RunAction::Start => {
-                        state.active_panel = super::ActivePanel::Run;
+                        state.set_active_panel(super::ActivePanel::Run);
                         state.settings.show_tool_window = true;
                         begin_run_flow(state);
                     }
@@ -2012,7 +2304,7 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                 match action {
                     DebuggerAction::Stop => state.debugger.cancel(),
                     DebuggerAction::Start => {
-                        state.active_panel = super::ActivePanel::Debugger;
+                        state.set_active_panel(super::ActivePanel::Debugger);
                         state.settings.show_tool_window = true;
                         let result = (|| {
                             if state.pending_language_restart {
@@ -2607,7 +2899,7 @@ fn close_file(state: &mut AppState, path: &std::path::Path) {
     let tab = &state.editor_tabs[index];
     if tab.document.is_dirty() || tab.saving {
         state.pending_close = Some(tab.path.clone());
-        state.active_tab = Some(index);
+        state.activate_tab(index);
     } else {
         remove_tab(state, path);
     }
@@ -2618,12 +2910,17 @@ fn remove_tab(state: &mut AppState, path: &std::path::Path) {
         return;
     };
     state.editor_tabs.remove(index);
-    state.active_tab = match state.active_tab {
+    let active_tab = match state.active_tab {
         _ if state.editor_tabs.is_empty() => None,
         Some(active) if active > index => Some(active - 1),
         Some(active) => Some(active.min(state.editor_tabs.len() - 1)),
         None => Some(0),
     };
+    if let Some(index) = active_tab {
+        state.activate_tab(index);
+    } else {
+        state.active_tab = None;
+    }
     if state.pending_close.as_deref() == Some(path) {
         state.pending_close = None;
     }
@@ -2922,10 +3219,15 @@ fn finish_workspace_rename(
             state.editor_tabs.push(tab);
         }
     }
-    state.active_tab = state
+    let active_tab = state
         .editor_tabs
         .iter()
         .position(|tab| tab.path == pending.source_path);
+    if let Some(index) = active_tab {
+        state.activate_tab(index);
+    } else {
+        state.active_tab = None;
+    }
     state.last_error = None;
     state.status = format!(
         "Renamed Java symbol across {changed} file(s); save changed tabs to keep the edits"
@@ -3218,7 +3520,9 @@ fn finish_workspace_replace(
             state.editor_tabs.push(EditorTab::new(document));
         }
     }
-    state.active_tab = state.editor_tabs.len().checked_sub(1);
+    if let Some(index) = state.editor_tabs.len().checked_sub(1) {
+        state.activate_tab(index);
+    }
     state.last_error = None;
     state.search.clear_replace_preview();
     state.search.message =
@@ -3257,7 +3561,7 @@ fn editor_completed(state: &mut AppState, completion: EditorCompletion) {
                         state.editor_tabs.push(EditorTab::new(document));
                         state.editor_tabs.len() - 1
                     };
-                    state.active_tab = Some(index);
+                    state.activate_tab(index);
                     if let Some(position) = state.pending_navigation.remove(&requested_path) {
                         navigate_tab_to_position(&mut state.editor_tabs[index], position);
                     }
@@ -3276,6 +3580,7 @@ fn editor_completed(state: &mut AppState, completion: EditorCompletion) {
             snapshot,
             result,
         } => {
+            let renamed = saved_path != path && result.is_ok();
             if result.is_ok() {
                 state.language.did_save(path.clone());
             }
@@ -3352,6 +3657,9 @@ fn editor_completed(state: &mut AppState, completion: EditorCompletion) {
                     }
                     state.last_error = Some(error);
                 }
+            }
+            if renamed {
+                state.rename_recent_file(path, saved_path);
             }
             if let Some(directory) = refresh_directory {
                 state.enqueue(AppEvent::RefreshProjectTree(directory));
@@ -3451,8 +3759,8 @@ pub fn jdk_selector(
         .map(|id| {
             jdks.iter()
                 .find(|jdk| jdk.id == id)
-                .map(|jdk| jdk.label())
-                .unwrap_or_else(|| format!("Missing JDK ({id})"))
+                .map(|jdk| jdk.label_with(&crate::i18n::ui_text(ui, "invalid path")))
+                .unwrap_or_else(|| crate::i18n::ui_format(ui, "Missing JDK ({id})", &[("id", id)]))
         })
         .unwrap_or_else(|| empty_label.to_owned());
     ui.horizontal(|ui| {
@@ -3462,8 +3770,12 @@ pub fn jdk_selector(
                 ui.selectable_value(selected, None, inherited_label);
                 for jdk in jdks.iter() {
                     ui.add_enabled_ui(jdk.valid && jdk.version.major >= minimum_major, |ui| {
-                        ui.selectable_value(selected, Some(jdk.id.clone()), jdk.label())
-                            .on_hover_text(jdk.home.display().to_string());
+                        ui.selectable_value(
+                            selected,
+                            Some(jdk.id.clone()),
+                            jdk.label_with(&crate::i18n::ui_text(ui, "invalid path")),
+                        )
+                        .on_hover_text(jdk.home.display().to_string());
                     });
                 }
             });
@@ -3543,9 +3855,12 @@ pub fn jdk_settings_ui(ui: &mut egui::Ui, state: &mut AppState) {
             for jdk in &state.settings.jdks {
                 ui.horizontal(|ui| {
                     if jdk.valid {
-                        ui.label(jdk.label());
+                        ui.label(jdk.label_with(&crate::i18n::ui_text(ui, "invalid path")));
                     } else {
-                        ui.colored_label(ui.visuals().error_fg_color, jdk.label());
+                        ui.colored_label(
+                            ui.visuals().error_fg_color,
+                            jdk.label_with(&crate::i18n::ui_text(ui, "invalid path")),
+                        );
                     }
                     if ui
                         .small_button(crate::i18n::ui_text(ui, "Remove"))
@@ -3570,8 +3885,8 @@ pub fn jdk_settings_ui(ui: &mut egui::Ui, state: &mut AppState) {
         "global_jdk",
         &mut state.settings.default_jdk_id,
         &mut state.settings.jdks,
-        "No global default",
-        "No global default",
+        &crate::i18n::ui_text(ui, "No global default"),
+        &crate::i18n::ui_text(ui, "No global default"),
         "Choose JDK…",
         0,
         crate::java::jdk::JdkSelectionTarget::Global,
@@ -3588,22 +3903,31 @@ pub fn jdk_settings_ui(ui: &mut egui::Ui, state: &mut AppState) {
         ui,
         "Changing the selected JDK restarts Java intelligence automatically.",
     ));
-    ui.label(format!(
-        "JDT Language Server runtime (Java {minimum_jdt_java}+)"
+    ui.label(crate::i18n::ui_format(
+        ui,
+        "JDT Language Server runtime (Java {version}+)",
+        &[("version", &minimum_jdt_java.to_string())],
     ))
-    .on_hover_text(if state.settings.jdt_ls_executable.is_some() {
-        "A custom JDT LS launcher requires Java 21 or newer."
-    } else {
-        "The bundled JDT LS requires Java 25 or newer."
-    });
+    .on_hover_text(crate::i18n::ui_text(
+        ui,
+        if state.settings.jdt_ls_executable.is_some() {
+            "A custom JDT LS launcher requires Java 21 or newer."
+        } else {
+            "The bundled JDT LS requires Java 25 or newer."
+        },
+    ));
     let selection_changed = jdk_selector(
         ui,
         "jdt_ls_jdk",
         &mut state.settings.jdt_ls_jdk_id,
         &mut state.settings.jdks,
-        "No JDT LS runtime",
-        "No JDT LS runtime",
-        &format!("Choose Java {minimum_jdt_java}+…"),
+        &crate::i18n::ui_text(ui, "No JDT LS runtime"),
+        &crate::i18n::ui_text(ui, "No JDT LS runtime"),
+        &crate::i18n::ui_format(
+            ui,
+            "Choose Java {version}+…",
+            &[("version", &minimum_jdt_java.to_string())],
+        ),
         minimum_jdt_java,
         crate::java::jdk::JdkSelectionTarget::JdtLs,
         &mut state.events,
@@ -3618,9 +3942,10 @@ pub fn jdk_settings_ui(ui: &mut egui::Ui, state: &mut AppState) {
     {
         ui.colored_label(
             ui.visuals().warn_fg_color,
-            format!(
-                "Saved JDT LS runtime is incompatible; using {} for Java intelligence.",
-                runtime.label()
+            crate::i18n::ui_format(
+                ui,
+                "Saved JDT LS runtime is incompatible; using {name} for Java intelligence.",
+                &[("name", &runtime.label())],
             ),
         );
     }
@@ -3765,14 +4090,18 @@ pub fn jdk_settings_ui(ui: &mut egui::Ui, state: &mut AppState) {
                 executable
                     .as_ref()
                     .map(|path| path.display().to_string())
-                    .unwrap_or_else(|| "Unconfigured".into()),
+                    .unwrap_or_else(|| crate::i18n::ui_text(ui, "Unconfigured")),
             );
             if ui
                 .small_button(crate::i18n::ui_text(ui, "Choose…"))
                 .clicked()
             {
                 if let Some(path) = rfd::FileDialog::new()
-                    .set_title(format!("Select {label} executable"))
+                    .set_title(crate::i18n::ui_format(
+                        ui,
+                        "Select {name} executable",
+                        &[("name", label)],
+                    ))
                     .pick_file()
                 {
                     *executable = Some(path);
@@ -3820,8 +4149,17 @@ pub fn project_jdk_ui(ui: &mut egui::Ui, state: &mut AppState) {
         .default_jdk_id
         .as_deref()
         .and_then(|id| state.settings.jdks.iter().find(|jdk| jdk.id == id))
-        .map(|jdk| format!("Use global default ({})", jdk.label()))
-        .unwrap_or_else(|| "Use global default (unconfigured)".into());
+        .map(|jdk| {
+            crate::i18n::ui_format(
+                ui,
+                "Use global default ({name})",
+                &[(
+                    "name",
+                    &jdk.label_with(&crate::i18n::ui_text(ui, "invalid path")),
+                )],
+            )
+        })
+        .unwrap_or_else(|| crate::i18n::ui_text(ui, "Use global default (unconfigured)"));
     let selection_changed = jdk_selector(
         ui,
         "project_jdk",
@@ -3845,7 +4183,11 @@ pub fn project_jdk_ui(ui: &mut egui::Ui, state: &mut AppState) {
     }
     match state.settings.selected_jdk(&root, None) {
         Ok(jdk) => {
-            ui.label(format!("Effective JDK: {}", jdk.label()));
+            ui.label(crate::i18n::ui_format(
+                ui,
+                "Effective JDK: {name}",
+                &[("name", &jdk.label())],
+            ));
             ui.small(jdk.home.display().to_string());
         }
         Err(error) => {

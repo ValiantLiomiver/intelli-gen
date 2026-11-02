@@ -23,7 +23,7 @@ cargo run -- /path/to/project-or-file
 1. Open **Settings** and discover or add installed JDKs.
 2. Choose a JDK 25 or newer as the **JDT Language Server runtime** for the bundled server. A custom launcher accepts Java 21 or newer. This runtime starts the language server and is separate from the project's JDK.
 3. Open **Project Structure** and choose the JDK for the project. Intelli-gen preserves build-file compiler targets and toolchains.
-4. Open a Maven or Gradle project. Java completion opens after two identifier characters or immediately after a dot, expands supported Java snippets, synchronizes repeated placeholders as you type, and lets Tab move through fields; navigation, diagnostics, and debugging require the language server and Java Debug Server plugin. Lombok-generated members are supported when the project declares Lombok and its JAR is cached. If a successful build resolves the JAR after project open, Intelli-gen automatically restarts Java intelligence; dependencies resolved outside the IDE still need a manual restart.
+4. Open a Maven or Gradle project. Java completion opens beside the caret after two identifier characters or immediately after a dot; F1 documentation appears at the caret. Supported Java snippets expand, synchronize repeated placeholders as you type, and let Tab move through fields. Navigation, diagnostics, and debugging require the language server and Java Debug Server plugin. Lombok-generated members are supported when the project declares Lombok and its JAR is cached. If a successful build resolves the JAR after project open, Intelli-gen automatically restarts Java intelligence; dependencies resolved outside the IDE still need a manual restart.
 
 Release packaging places pinned Eclipse JDT Language Server and Microsoft Java Debug Server tooling inside the app bundle's resources. For a source build, use **Settings** to select installed tooling when it is not bundled beside the executable. The launcher and debug plugin can each be overridden independently. Intelli-gen does not install Java or other toolchains silently.
 
@@ -35,25 +35,35 @@ The command-line link accepts the same optional project or file path: `dist/inte
 
 | Action | Shortcut |
 | --- | --- |
-| Open project / file | `⇧⌘O` / `⌘O` |
-| Next / previous editor tab | `Ctrl+Tab` / `Ctrl+Shift+Tab` |
-| Go to file | `⌘P` |
+| Open project / file | File → Open Project… / Open File… |
+| Go to class | `⌘O` |
+| Go to file | `⇧⌘O` |
+| Search Everywhere | `Double Shift`; also Navigate → Search Everywhere… |
+| Find IDE action | `⌘⇧A`; also Navigate → Find Action… |
+| Next / previous editor tab | `⌘⇧]` / `⌘⇧[` (`Ctrl+Tab` aliases) |
+| Recent files | `⌘E` |
 | Find / replace in file | `⌘F` / `⌘R` |
+| Next / previous match in file | `⌘G` / `⌘⇧G` |
 | Find in project | `⇧⌘F` |
 | Go to line | `⌘L` |
-| Navigate to previous / next code location | `Ctrl+Alt+←` / `Ctrl+Alt+→` |
+| Navigate back / forward | `⌘[` / `⌘]` (`Ctrl+Alt+←` / `Ctrl+Alt+→` aliases) |
+| Jump to last tool window / hide all tool windows | `F12` / `⌘⇧F12` |
 | Reformat Java file | `⌥⌘L` |
-| Organize Java imports | `Ctrl+Alt+O` |
+| Organize Java imports | `⌃⌥O` |
 | Go to Java symbol | `⌘⌥O` |
+| Switch between a Java test and its production source | `⌘⇧T` |
 | File structure | `⌘F12` |
-| Complete / parameter info / hover | `Ctrl+Space` / `Ctrl+Shift+Space` / `F1` |
-| Go to definition / find references | `F12` / `Shift+F12` |
+| Complete / parameter info / hover | `Ctrl+Space` / `⌘P` / `F1` (`Ctrl+Shift+Space` alias for parameter info) |
+| Go to declaration / definition / find usages | `⌘B` / Code menu / `⌥F7` |
 | Rename Java symbol | `Shift+F6` |
 | Toggle Java line comment | `⌘/` |
 | Indent Java code / selected lines; navigate snippet fields | `Tab` / `⇧Tab` |
 | Java quick fixes | `⌥↩` |
 | Go to type definition | `⇧⌘B` |
 | Go to implementation | `⌥⌘B` |
+| Toggle line breakpoint | `⌘F8` |
+| View breakpoints | `⌘⇧F8` |
+| Run / debug selected configuration | `⌃R` / `⌃D` |
 | Save / save all | `⌘S` / `⇧⌘S` |
 
 ## Project scope
@@ -62,10 +72,26 @@ The Run Console accepts line input for interactive Java processes. The Build pan
 
 The first release targets macOS and Java projects using Maven or Gradle. Use **File → New Java Project…** to create a minimal Maven or Gradle starter locally; it creates no wrapper and downloads no tools. The starter includes a run configuration for `Main`; select an installed JDK before launching. **Run** builds the project first and asks before saving open project files with unsaved changes; a failed build does not launch the program. Start, stop, or manage configurations from the **Run** menu. Use a project-tree directory's context menu to create a Java class; an optional package name creates matching subdirectories beneath the selected directory. Set Java indentation to 1–8 spaces or tabs in **Settings**; the editor and Java formatter use the same preference. Parent, root, and nested `.editorconfig` files override these choices by file pattern up to the nearest `root=true`. Files up to 16 MiB are editable; files above 256 KiB use a bounded page editor that keeps the complete document available for save and find/replace. **Find in Project** also supports preview-first replacement: review and select matching files before applying edits to editor buffers, then save those files to keep the changes. Run configurations can select a Maven/Gradle module or detect one from the main class; the JPMS module name remains a separate launch option. The app also includes an integrated terminal, local Git operations, and a Java debugger. Java language services depend on installed or packaged JDT LS and Java Debug Server tooling; editing and builds remain available if optional Java tooling is unavailable.
 
+**Navigate → Test / production source** (`⌘⇧T`) switches between matching files in the conventional `src/main/java` and `src/test/java` trees when the counterpart exists.
+
 ## IntelliJ reverse-engineering evidence
 
-The local reference inspected with REA 6.7.0 is IntelliJ IDEA Ultimate 2026.3,
-build `IU-263.7307.44`. Run REA with Node 26 when reproducing these observations.
+The local reference is IntelliJ IDEA Ultimate 2026.3, currently installed as
+build `IU-263.7307.112` (2026.3 RC). Run REA with Node 26 when reproducing these
+observations. In this session, REA's artifact inventory
+Evidence `ev_197a48a21bd285a492c45770de0061946531c998fabe998cb972ae20483b9711`
+identified the current `.app` bundle with SHA-256
+`8f081ef0a900148af899b8cd1e5a3a9960b1b6e6a5a829894ff4381027d0baf5`; the
+completed inventory substep is Evidence
+`ev_c50e47dfca8462105506064cad1c8225b59d23e7a38e664582da97305281ddc6`.
+Its `product-info.json` declares 86 modules and 164 bundled plugins. This is
+package-structure evidence only; no runtime behavior is inferred from it.
+
+The focused Java logpoint and Gradle module observations below were first
+recorded on build `IU-263.7307.44`. The current installed logpoint JAR has the
+same SHA-256, so that artifact evidence remains applicable; the Gradle evidence
+remains tied to build `.44`. Run REA with Node 26 when reproducing these
+observations.
 In this session, the default Node 20 invocation reported an integrity mismatch;
 Node 26 successfully inspected the same logpoint JAR with its previously recorded
 digest. Those failed invocations do not establish that the installed JAR changed.
@@ -104,6 +130,16 @@ Build output/cancellation flow. The action requires online mode and may contact
 repositories or download dependencies. No JetBrains implementation code is included in Intelli-gen.
 
 ## Java tooling runtime verification
+
+On 2026-11-02, REA observed the packaged native window through macOS
+Accessibility after opening the app with Launch Services (Evidence
+`ev_1133777feb23fd52749d57ab74c83c22e0362a933d1e7e3c59a0c53a7db829ac`,
+executable SHA-256 `d8bbac0cc84205d33a16526b77d625d23c3059b78c95f7c7b22c8ca574c188c3`).
+The untruncated tree showed the opened Maven project and Italian menus/panels.
+This exposed untranslated run-selector and project-opening text, now covered by
+regression tests and the two language catalogs. Screen capture was disabled
+because the host lacked macOS Screen Recording permission; this observation
+does not establish visual layout or the full edit/build/debug widget workflow.
 
 A local protocol smoke test on 2026-10-30 started the packaged JDT LS 1.62.0
 with the existing IntelliJ JBR 25.0.4.1 runtime, a temporary workspace, and a
@@ -165,11 +201,13 @@ differs from the source directory name, which is important for expression
 evaluation in remapped Gradle modules. Existing name inference remains available
 when the server returns no matching main class.
 
-The optional `live_worker_resolves_server_project_name` test passed using the
-production `JavaLanguageService` worker and `ClasspathResolver`. It started the
-packaged server, received runtime classpaths, resolved the server project name
-`smoke` rather than the deliberately incorrect model name `directory-fallback`,
-and joined the language worker after shutdown.
+The optional `live_worker_resolves_server_project_name` test passed on
+2026-11-02 using the packaged app built from commit `4f6256c`. It exercised the
+production `JavaLanguageService`, `ClasspathResolver`, and `DebugService`: Maven
+import, project-name resolution, breakpoint and expression evaluation, step over,
+step into/out, conditional logpoint output, cancellation, and worker cleanup.
+The server resolved `smoke` rather than the deliberately incorrect model name
+`directory-fallback`.
 
 For this test, use the same `smoke` fixture with an Eclipse `.project` declaring
 `org.eclipse.jdt.core.javanature` and a `.classpath` with the source root, JRE
@@ -236,11 +274,13 @@ public class MainTest {
 ```
 
 The optional `live_maven_worker_prefers_wrapper_and_reports_test_failures` test
-passed with Maven 3.9.9, Corretto JDK 8, and a reactor containing `custom/app`.
-It shares the build/test/clean assertions with the Gradle worker test, which also
-passed again after that refactor. The Maven fixture provides an executable
-`mvnw` that invokes the installed Maven with `--offline`; the configured Maven
-path is deliberately nonexistent to verify wrapper precedence.
+passed again on 2026-11-02 with Maven 3.9.9, JDK 21, and a reactor containing
+`custom/app` (it was previously verified with Corretto JDK 8). It exercises the
+production build worker for Build, Test, and Clean, confirms JDK reporting,
+checks one passing and one failing JUnit test plus its source location, and
+verifies that Clean removes the compiled class. The Maven fixture provides an
+executable `mvnw` that invokes the installed Maven with `--offline`; the
+configured Maven path is deliberately nonexistent to verify wrapper precedence.
 
 Set `INTELLI_GEN_MAVEN_PROJECT` to this disposable reactor and
 `INTELLI_GEN_BUILD_JAVA_HOME` to its JDK, then run
@@ -263,12 +303,27 @@ sessions (breakpoint/evaluation/stepping plus conditional logpoint/cancellation)
 
 To reproduce this variant, use the same environment and ignored test command,
 but provide a POM with group/artifact `smoke:smoke`, version `1`, and Java
-source/target/release `25`, without dependencies. Put the seven-line `Main.java`
-fixture in `src/main/java/` and compile it with debug information into
-`target/classes` before the test. The fixture intentionally uses a different
-physical directory name from its Maven artifact name. This verifies the import
-and debug workers together; native project opening and widget routing remain
-outside this test.
+source/target/release `25`, without dependencies. Put this `Main.java` in
+`src/main/java/` and compile it with debug information into `target/classes`
+before the test. The helper method at line 8 is used by the step-into assertion;
+line 4 is the initial breakpoint and line 5 is the following statement.
+
+```java
+public class Main {
+  public static void main(String[] args) {
+    int value = 40;
+    value = add(value, 2);
+    System.out.println(value);
+  }
+  static int add(int left, int right) {
+    return left + right;
+  }
+}
+```
+
+The fixture intentionally uses a different physical directory name from its
+Maven artifact name. This verifies project import and the Java debug worker
+together; native project opening and widget routing remain outside this test.
 
 The same live worker test passed for a Gradle 8.12.1 project with no Eclipse
 metadata or wrapper, using its local distribution and an isolated Gradle cache
@@ -277,13 +332,28 @@ debug launch used JBR Java 25. It checked the server project name `smoke-project
 the imported `bin/main` classpath and compiled `Main.class`, then completed both
 debug sessions. Evaluating `System.getProperty("java.specification.version")`
 inside the debuggee confirmed Java 25. These are worker-level checks, not native
-UI verification.
+UI verification. The same run now also covers step into the `add` method on
+line 8, step out to its call on line 4, and step over to line 5.
 
 To reproduce the Gradle variant, use a disposable directory named `project`,
 `settings.gradle` containing `rootProject.name = 'smoke'`, and `build.gradle`
-containing `plugins { id 'java' }`. Put the same seven-line `Main.java` under
-`src/main/java/` and run the installed Gradle's `--offline --no-daemon classes`
-with Java 23 first. Set `INTELLI_GEN_DAP_PROJECT`, `INTELLI_GEN_JAVA_HOME` and
+containing `plugins { id 'java' }`. Put this `Main.java` under `src/main/java/`:
+
+```java
+public class Main {
+  public static void main(String[] args) {
+    int value = 40;
+    value = add(value, 2);
+    System.out.println(value);
+  }
+  static int add(int left, int right) {
+    return left + right;
+  }
+}
+```
+
+Run the installed Gradle's `--offline --no-daemon classes` with Java 23 first.
+Set `INTELLI_GEN_DAP_PROJECT`, `INTELLI_GEN_JAVA_HOME` and
 `INTELLI_GEN_JAVA_RESOURCES` as above, plus `INTELLI_GEN_PROJECT_JAVA_HOME` to
 Java 23 and `INTELLI_GEN_GRADLE_HOME` to the Gradle distribution root. Keep
 `GRADLE_USER_HOME` on the same disposable cache for the build and test. Run

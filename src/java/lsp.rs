@@ -35,6 +35,7 @@ pub enum EditorCommand {
     Completion,
     SignatureHelp,
     Hover,
+    Declaration,
     Definition,
     TypeDefinition,
     Implementation,
@@ -51,6 +52,7 @@ impl EditorCommand {
             Self::Completion => "textDocument/completion",
             Self::SignatureHelp => "textDocument/signatureHelp",
             Self::Hover => "textDocument/hover",
+            Self::Declaration => "textDocument/declaration",
             Self::Definition => "textDocument/definition",
             Self::TypeDefinition => "textDocument/typeDefinition",
             Self::Implementation => "textDocument/implementation",
@@ -376,32 +378,49 @@ pub enum LanguageEvent {
     SignatureHelp {
         path: PathBuf,
         version: i64,
+        position: Position,
         signatures: Vec<SignatureInformation>,
         active_signature: usize,
     },
     Hover {
         path: PathBuf,
         version: i64,
+        position: Position,
         text: String,
     },
     Definition {
         path: PathBuf,
         version: i64,
+        position: Position,
+        request_id: Option<u64>,
+        locations: Vec<Location>,
+    },
+    Declaration {
+        path: PathBuf,
+        version: i64,
+        position: Position,
+        request_id: Option<u64>,
         locations: Vec<Location>,
     },
     TypeDefinition {
         path: PathBuf,
         version: i64,
+        position: Position,
+        request_id: Option<u64>,
         locations: Vec<Location>,
     },
     Implementation {
         path: PathBuf,
         version: i64,
+        position: Position,
+        request_id: Option<u64>,
         locations: Vec<Location>,
     },
     References {
         path: PathBuf,
         version: i64,
+        position: Position,
+        request_id: Option<u64>,
         locations: Vec<Location>,
     },
     CodeActions {
@@ -778,7 +797,7 @@ mod main_project_tests {
             Some("smoke={value}".into()),
             true,
         );
-        points.toggle(source, 5);
+        points.toggle(source.clone(), 5);
         let resolver = DebugAdapterResolver {
             commands: session.commands.clone(),
             root: project.root.clone(),
@@ -848,6 +867,121 @@ mod main_project_tests {
             }
         ));
         assert!(!second.needs_host_restart());
+        let resolver = DebugAdapterResolver {
+            commands: session.commands.clone(),
+            root: project.root.clone(),
+            bundle: config.debug_bundle.clone(),
+        };
+        let mut step_points = crate::debugger::breakpoints::Breakpoints::default();
+        step_points.toggle(source, 4);
+        let step_service =
+            crate::debugger::DebugService::new(resolver, config.debug_bundle.clone().unwrap())
+                .with_initial_requests(step_points.initial_requests());
+        let mut stepping = step_service.start(&run, &project, &config.jdks[0]).unwrap();
+        let thread = stopped(&mut stepping).await;
+        let client = stepping.client();
+        client
+            .request("stepIn", json!({"threadId":thread}))
+            .await
+            .unwrap();
+        let thread = stopped(&mut stepping).await;
+        let stack = client
+            .request("stackTrace", json!({"threadId":thread}))
+            .await
+            .unwrap();
+        assert_eq!(stack["stackFrames"][0]["line"], 8);
+        client
+            .request("stepOut", json!({"threadId":thread}))
+            .await
+            .unwrap();
+        let thread = stopped(&mut stepping).await;
+        let stack = client
+            .request("stackTrace", json!({"threadId":thread}))
+            .await
+            .unwrap();
+        assert_eq!(stack["stackFrames"][0]["line"], 4);
+        client
+            .request("next", json!({"threadId":thread}))
+            .await
+            .unwrap();
+        let thread = stopped(&mut stepping).await;
+        let stack = client
+            .request("stackTrace", json!({"threadId":thread}))
+            .await
+            .unwrap();
+        assert_eq!(stack["stackFrames"][0]["line"], 5);
+        client
+            .request("continue", json!({"threadId":thread}))
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                stepping.poll();
+                if let Some(result) = stepping.reap() {
+                    result.unwrap();
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("step-in/step-out debug session reaped");
+        assert!(!stepping.needs_host_restart());
+        if std::env::var_os("INTELLI_GEN_VERIFY_PAUSE").is_some() {
+            let pause_run = crate::java::run_config::RunConfiguration {
+                main_class: "PauseMain".into(),
+                ..run.clone()
+            };
+            let mut pausing = crate::debugger::DebugService::new(
+                DebugAdapterResolver {
+                    commands: session.commands.clone(),
+                    root: project.root.clone(),
+                    bundle: config.debug_bundle.clone(),
+                },
+                config.debug_bundle.clone().unwrap(),
+            )
+            .start(&pause_run, &project, &config.jdks[0])
+            .unwrap();
+            tokio::time::timeout(Duration::from_secs(30), async {
+                loop {
+                    for event in pausing.poll() {
+                        match event {
+                            crate::debugger::session::DebugEvent::Ready => return,
+                            crate::debugger::session::DebugEvent::Failed(error) => {
+                                panic!("pause debug session failed: {error}")
+                            }
+                            _ => {}
+                        }
+                    }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await
+            .expect("pause debug session ready");
+            assert!(matches!(
+                pausing.state(),
+                crate::debugger::DebugState::Running
+            ));
+            pausing.controller().pause().await.unwrap();
+            stopped(&mut pausing).await;
+            assert!(matches!(
+                pausing.state(),
+                crate::debugger::DebugState::Stopped
+            ));
+            pausing.cancel();
+            tokio::time::timeout(Duration::from_secs(15), async {
+                loop {
+                    pausing.poll();
+                    if let Some(result) = pausing.reap() {
+                        result.unwrap();
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await
+            .expect("paused session reaped");
+        }
         session.shutdown();
         session.worker.take().unwrap().join().unwrap();
     }
@@ -1104,6 +1238,7 @@ enum LanguageCommand {
         range: Range,
         diagnostics: Vec<LanguageDiagnostic>,
         version: i64,
+        navigation_request_id: Option<u64>,
         rename_to: Option<String>,
         tab_size: usize,
         insert_spaces: bool,
@@ -1687,6 +1822,7 @@ struct Pending {
     project_root: PathBuf,
     version: i64,
     position: Position,
+    navigation_request_id: Option<u64>,
     rename_to: Option<String>,
     sent: Instant,
 }
@@ -1717,6 +1853,7 @@ async fn protocol(
                 "signatureHelp": {"signatureInformation": {"documentationFormat": ["plaintext"]}},
                 "hover": {"contentFormat": ["plaintext"]}, "definition": {"linkSupport": true},
                 "implementation": {"linkSupport": true},
+                "declaration": {"linkSupport": true},
                 "typeDefinition": {"linkSupport": true}}},
         "initializationOptions": {"settings": settings.clone(), "workspaceFolders": [root_uri], "bundles": bundles,
             "extendedClientCapabilities": {"classFileContentsSupport": false}}
@@ -1820,7 +1957,7 @@ async fn protocol(
                     LanguageCommand::Change { path, text, version } => notify(input, "textDocument/didChange", json!({"textDocument": {"uri": uri(&path)?, "version": version}, "contentChanges": [{"text": text}]})).await?,
                     LanguageCommand::Save(path) => notify(input, "textDocument/didSave", json!({"textDocument": {"uri": uri(&path)?}})).await?,
                     LanguageCommand::Close(path) => notify(input, "textDocument/didClose", json!({"textDocument": {"uri": uri(&path)?}})).await?,
-                    LanguageCommand::Request { command, path, project_root, position, document_end, range, diagnostics, version, rename_to, tab_size, insert_spaces } => {
+                    LanguageCommand::Request { command, path, project_root, position, document_end, range, diagnostics, version, navigation_request_id, rename_to, tab_size, insert_spaces } => {
                         let id = next_id; next_id += 1;
                         let mut params = json!({"textDocument": {"uri": uri(&path)?}, "position": position});
                         if let Some(new_name) = &rename_to {
@@ -1842,7 +1979,7 @@ async fn protocol(
                             }
                             continue;
                         }
-                        pending.insert(id, Pending { command, path, project_root, version, position, rename_to, sent: Instant::now() });
+                        pending.insert(id, Pending { command, path, project_root, version, position, navigation_request_id, rename_to, sent: Instant::now() });
                         send(input, json!({"jsonrpc": "2.0", "id": id, "method": command.method(), "params": params})).await?;
                     }
                     LanguageCommand::SearchSymbols { query } => {
@@ -2071,6 +2208,7 @@ async fn deliver_response(request: Pending, result: &Value, events: &LanguageEve
         path,
         version,
         position,
+        navigation_request_id,
         ..
     } = request;
     let event = match command {
@@ -2149,6 +2287,7 @@ async fn deliver_response(request: Pending, result: &Value, events: &LanguageEve
         EditorCommand::Hover => LanguageEvent::Hover {
             path,
             version,
+            position,
             text: hover_text(&result["contents"]),
         },
         EditorCommand::SignatureHelp => {
@@ -2187,28 +2326,44 @@ async fn deliver_response(request: Pending, result: &Value, events: &LanguageEve
             LanguageEvent::SignatureHelp {
                 path,
                 version,
+                position,
                 active_signature: active_signature.min(signatures.len().saturating_sub(1)),
                 signatures,
             }
         }
+        EditorCommand::Declaration => LanguageEvent::Declaration {
+            path,
+            version,
+            position,
+            request_id: navigation_request_id,
+            locations: locations(result),
+        },
         EditorCommand::Definition => LanguageEvent::Definition {
             path,
             version,
+            position,
+            request_id: navigation_request_id,
             locations: locations(result),
         },
         EditorCommand::TypeDefinition => LanguageEvent::TypeDefinition {
             path,
             version,
+            position,
+            request_id: navigation_request_id,
             locations: locations(result),
         },
         EditorCommand::Implementation => LanguageEvent::Implementation {
             path,
             version,
+            position,
+            request_id: navigation_request_id,
             locations: locations(result),
         },
         EditorCommand::References => LanguageEvent::References {
             path,
             version,
+            position,
+            request_id: navigation_request_id,
             locations: locations(result),
         },
         EditorCommand::CodeActions => {
@@ -2829,6 +2984,17 @@ struct SyncedDocument {
     version: i64,
 }
 
+fn is_location_command(command: EditorCommand) -> bool {
+    matches!(
+        command,
+        EditorCommand::Definition
+            | EditorCommand::Declaration
+            | EditorCommand::TypeDefinition
+            | EditorCommand::Implementation
+            | EditorCommand::References
+    )
+}
+
 #[derive(Default)]
 pub struct LanguageTool {
     session: Option<LanguageSession>,
@@ -2855,10 +3021,12 @@ pub struct LanguageTool {
     pub code_actions_error: Option<(PathBuf, i64, String)>,
     pub completion: Option<(PathBuf, i64, Position, Vec<CompletionItem>)>,
     pub completion_selection: Option<usize>,
-    pub signature_help: Option<(PathBuf, i64, Vec<SignatureInformation>, usize)>,
-    pub hover: Option<(PathBuf, String)>,
+    pub signature_help: Option<(PathBuf, i64, Position, Vec<SignatureInformation>, usize)>,
+    pub hover: Option<(PathBuf, i64, Position, String)>,
     pub locations: Vec<Location>,
     pub locations_title: String,
+    pending_location_request: Option<(u64, EditorCommand, PathBuf, i64, Position)>,
+    next_location_request_id: u64,
     pub root: Option<PathBuf>,
     symbol_query_pending: Option<(String, Instant)>,
     pub workspace_symbol_query: String,
@@ -3025,6 +3193,7 @@ impl LanguageTool {
         self.signature_help = None;
         self.hover = None;
         self.locations.clear();
+        self.pending_location_request = None;
         self.workspace_symbol_query.clear();
         self.workspace_symbols.clear();
         self.workspace_symbols_error = None;
@@ -3315,6 +3484,7 @@ impl LanguageTool {
                 range: document_line_range(&document.text, document.lsp_position().line),
                 diagnostics: Vec::new(),
                 version: synced.version,
+                navigation_request_id: None,
                 rename_to: None,
                 tab_size: 4,
                 insert_spaces: true,
@@ -3439,6 +3609,26 @@ impl LanguageTool {
         tab_size: usize,
         insert_spaces: bool,
     ) {
+        let position = document.lsp_position();
+        let navigation_request_id = is_location_command(command).then(|| {
+            self.next_location_request_id = self.next_location_request_id.wrapping_add(1).max(1);
+            self.next_location_request_id
+        });
+        let location_request = navigation_request_id.and_then(|request_id| {
+            self.documents.get(&document.path).map(|synced| {
+                (
+                    request_id,
+                    command,
+                    document.path.clone(),
+                    synced.version,
+                    position,
+                )
+            })
+        });
+        if is_location_command(command) {
+            self.pending_location_request = location_request;
+            self.locations.clear();
+        }
         if command == EditorCommand::CodeActions {
             self.code_actions = None;
             self.code_actions_error = None;
@@ -3462,7 +3652,7 @@ impl LanguageTool {
                     .root
                     .clone()
                     .ok_or_else(|| LspError("No Java workspace is open".into()))?,
-                position: document.lsp_position(),
+                position,
                 document_end: document_end_position(&document.text),
                 range: document_line_range(&document.text, document.lsp_position().line),
                 diagnostics: if command == EditorCommand::CodeActions {
@@ -3480,13 +3670,20 @@ impl LanguageTool {
                     Vec::new()
                 },
                 version: synced.version,
+                navigation_request_id,
                 rename_to: None,
                 tab_size: tab_size.clamp(1, 8),
                 insert_spaces,
             })
         })();
-        if let Err(error) = result {
-            self.summary = error.to_string();
+        match result {
+            Ok(()) => {}
+            Err(error) => {
+                if is_location_command(command) {
+                    self.pending_location_request = None;
+                }
+                self.summary = error.to_string();
+            }
         }
     }
     pub fn request_rename(
@@ -3530,6 +3727,7 @@ impl LanguageTool {
                 range: document_line_range(&document.text, position.line),
                 diagnostics: Vec::new(),
                 version: synced.version,
+                navigation_request_id: None,
                 rename_to: Some(new_name.trim().to_owned()),
                 tab_size: 4,
                 insert_spaces: true,
@@ -3563,6 +3761,25 @@ impl LanguageTool {
         self.documents
             .get(path)
             .is_some_and(|document| document.version == version)
+    }
+    fn current_location_request(
+        &self,
+        request_id: Option<u64>,
+        command: EditorCommand,
+        path: &Path,
+        version: i64,
+        position: Position,
+    ) -> bool {
+        self.pending_location_request
+            .as_ref()
+            .is_some_and(|request| {
+                Some(request.0) == request_id
+                    && request.1 == command
+                    && request.2 == path
+                    && request.3 == version
+                    && request.4 == position
+            })
+            && self.current(path, version)
     }
     pub fn receive(&mut self, update: LanguageUpdate) {
         if update.generation != self.generation {
@@ -3610,18 +3827,22 @@ impl LanguageTool {
             LanguageEvent::SignatureHelp {
                 path,
                 version,
+                position,
                 signatures,
                 active_signature,
             } if self.current(&path, version) => {
-                self.signature_help = Some((path, version, signatures, active_signature));
+                self.signature_help = Some((path, version, position, signatures, active_signature));
             }
             LanguageEvent::Hover {
                 path,
                 version,
+                position,
                 text,
             } if self.current(&path, version) => {
                 self.hover = Some((
                     path,
+                    version,
+                    position,
                     if text.is_empty() {
                         "No documentation at this position".into()
                     } else {
@@ -3632,19 +3853,60 @@ impl LanguageTool {
             LanguageEvent::Definition {
                 path,
                 version,
+                position,
+                request_id,
                 locations,
-            } if self.current(&path, version) => {
+            } if self.current_location_request(
+                request_id,
+                EditorCommand::Definition,
+                &path,
+                version,
+                position,
+            ) =>
+            {
+                self.pending_location_request = None;
                 self.locations = locations;
                 self.locations_title = "Definitions".into();
                 if self.locations.is_empty() {
                     self.summary = "No file-backed definition found".into();
                 }
             }
+            LanguageEvent::Declaration {
+                path,
+                version,
+                position,
+                request_id,
+                locations,
+            } if self.current_location_request(
+                request_id,
+                EditorCommand::Declaration,
+                &path,
+                version,
+                position,
+            ) =>
+            {
+                self.pending_location_request = None;
+                self.locations = locations;
+                self.locations_title = "Declarations".into();
+                if self.locations.is_empty() {
+                    self.summary = "No file-backed declaration found".into();
+                }
+            }
             LanguageEvent::Implementation {
                 path,
                 version,
+                position,
+                request_id,
                 locations,
-            } if self.current(&path, version) => {
+            } if self.current_location_request(
+                request_id,
+                EditorCommand::Implementation,
+                &path,
+                version,
+                position,
+            ) =>
+            {
+                self.pending_location_request = None;
                 self.locations = locations;
                 self.locations_title = "Implementations".into();
                 if self.locations.is_empty() {
@@ -3654,8 +3916,18 @@ impl LanguageTool {
             LanguageEvent::TypeDefinition {
                 path,
                 version,
+                position,
+                request_id,
                 locations,
-            } if self.current(&path, version) => {
+            } if self.current_location_request(
+                request_id,
+                EditorCommand::TypeDefinition,
+                &path,
+                version,
+                position,
+            ) =>
+            {
+                self.pending_location_request = None;
                 self.locations = locations;
                 self.locations_title = "Type Definitions".into();
                 if self.locations.is_empty() {
@@ -3665,8 +3937,18 @@ impl LanguageTool {
             LanguageEvent::References {
                 path,
                 version,
+                position,
+                request_id,
                 locations,
-            } if self.current(&path, version) => {
+            } if self.current_location_request(
+                request_id,
+                EditorCommand::References,
+                &path,
+                version,
+                position,
+            ) =>
+            {
+                self.pending_location_request = None;
                 self.locations = locations;
                 self.locations_title = "References".into();
                 if self.locations.is_empty() {
@@ -3893,6 +4175,165 @@ fn maven_import_arguments(root_pom_uri: &str) -> Value {
 }
 
 /// Compact result views stay in the editor and issue normal editor/app commands.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CompletionPopupAction {
+    Apply(usize),
+    Dismiss,
+}
+
+pub fn render_hover_popup(
+    ctx: &eframe::egui::Context,
+    path: &Path,
+    document: &Document,
+    position: eframe::egui::Pos2,
+    language: &mut LanguageTool,
+) -> bool {
+    let Some((result_path, version, result_position, text)) = language.hover.as_ref() else {
+        return false;
+    };
+    if result_path != path
+        || *result_position != document.lsp_position()
+        || !language.is_document_current(result_path, *version, &document.text)
+    {
+        return false;
+    }
+    let text = text.clone();
+    let mut dismiss = false;
+    eframe::egui::Area::new(eframe::egui::Id::unique(("java_hover_popup", path)))
+        .order(eframe::egui::Order::Foreground)
+        .fixed_pos(position)
+        .constrain(true)
+        .show(ctx, |ui| {
+            eframe::egui::Frame::popup(ui.style()).show(ui, |ui| {
+                ui.set_max_width(480.0);
+                eframe::egui::ScrollArea::vertical()
+                    .max_height(280.0)
+                    .show(ui, |ui| {
+                        ui.label(text);
+                    });
+                dismiss = ui
+                    .small_button(crate::i18n::ui_text(ui, "Dismiss documentation"))
+                    .clicked();
+            });
+        });
+    dismiss
+}
+
+pub fn render_signature_popup(
+    ctx: &eframe::egui::Context,
+    path: &Path,
+    document: &Document,
+    position: eframe::egui::Pos2,
+    language: &mut LanguageTool,
+) -> bool {
+    let Some((result_path, version, result_position, signatures, active_signature)) =
+        language.signature_help.as_ref()
+    else {
+        return false;
+    };
+    if result_path != path
+        || *result_position != document.lsp_position()
+        || !language.is_document_current(result_path, *version, &document.text)
+    {
+        return false;
+    }
+    let Some(signature) = signatures.get(*active_signature) else {
+        return false;
+    };
+    let signature = signature.clone();
+    let mut dismiss = false;
+    eframe::egui::Area::new(eframe::egui::Id::unique(("java_signature_popup", path)))
+        .order(eframe::egui::Order::Foreground)
+        .fixed_pos(position)
+        .constrain(true)
+        .show(ctx, |ui| {
+            eframe::egui::Frame::popup(ui.style()).show(ui, |ui| {
+                ui.set_max_width(480.0);
+                ui.monospace(&signature.label);
+                if let Some(parameter) = &signature.active_parameter {
+                    ui.small(crate::i18n::ui_format(
+                        ui,
+                        "Current parameter: {parameter}",
+                        &[("parameter", parameter)],
+                    ));
+                }
+                if !signature.documentation.is_empty() {
+                    ui.label(&signature.documentation);
+                }
+                dismiss = ui
+                    .small_button(crate::i18n::ui_text(ui, "Dismiss parameter info"))
+                    .clicked();
+            });
+        });
+    dismiss
+}
+
+pub fn render_completion_popup(
+    ctx: &eframe::egui::Context,
+    path: &Path,
+    document: &Document,
+    position: eframe::egui::Pos2,
+    language: &mut LanguageTool,
+) -> Option<CompletionPopupAction> {
+    let Some((result_path, version, result_position, items)) = language.completion.as_ref() else {
+        return None;
+    };
+    if result_path != path
+        || *result_position != document.lsp_position()
+        || !language.is_document_current(result_path, *version, &document.text)
+    {
+        return None;
+    }
+    let selected = language.completion_selection;
+    let mut hovered = None;
+    let mut action = None;
+    eframe::egui::Area::new(eframe::egui::Id::unique(("java_completion_popup", path)))
+        .order(eframe::egui::Order::Foreground)
+        .fixed_pos(position)
+        .constrain(true)
+        .show(ctx, |ui| {
+            eframe::egui::Frame::popup(ui.style()).show(ui, |ui| {
+                ui.set_min_width(280.0);
+                if items.is_empty() {
+                    ui.weak(crate::i18n::ui_text(ui, "No completions"));
+                } else {
+                    eframe::egui::ScrollArea::vertical()
+                        .max_height(220.0)
+                        .show(ui, |ui| {
+                            for (index, item) in items.iter().enumerate() {
+                                let response = ui
+                                    .add_enabled(
+                                        item.applicable,
+                                        eframe::egui::Button::new(&item.label)
+                                            .selected(selected == Some(index)),
+                                    )
+                                    .on_hover_text(&item.detail);
+                                if selected == Some(index) {
+                                    response.scroll_to_me(Some(eframe::egui::Align::Center));
+                                }
+                                if response.hovered() {
+                                    hovered = Some(index);
+                                }
+                                if response.clicked() && item.applicable {
+                                    action = Some(CompletionPopupAction::Apply(index));
+                                }
+                            }
+                        });
+                }
+                if ui
+                    .small_button(crate::i18n::ui_text(ui, "Dismiss completions"))
+                    .clicked()
+                {
+                    action = Some(CompletionPopupAction::Dismiss);
+                }
+            });
+        });
+    if let Some(index) = hovered {
+        language.completion_selection = Some(index);
+    }
+    action
+}
+
 pub fn render(ui: &mut eframe::egui::Ui, state: &mut crate::app::AppState) {
     use crate::app::events::AppEvent;
     use eframe::egui;
@@ -3981,6 +4422,10 @@ pub fn render(ui: &mut eframe::egui::Ui, state: &mut crate::app::AppState) {
         .active_tab
         .and_then(|index| state.editor_tabs.get(index))
         .map(|tab| tab.path.clone());
+    let paged_editor = state
+        .active_tab
+        .and_then(|index| state.editor_tabs.get(index))
+        .is_some_and(|tab| tab.document.text.len() > crate::editor::document::PAGED_EDITOR_BYTES);
     if let Some(path) = &active_path {
         if let Some((error_path, error_version, error)) = &state.language.code_actions_error
             && error_path == path
@@ -4013,20 +4458,22 @@ pub fn render(ui: &mut eframe::egui::Ui, state: &mut crate::app::AppState) {
                     "No direct quick fixes at the caret",
                 ));
             } else {
-                egui::CollapsingHeader::new(format!("Quick fixes ({})", actions.len())).show(
+                egui::CollapsingHeader::new(crate::i18n::ui_format(
                     ui,
-                    |ui| {
-                        egui::ScrollArea::vertical()
-                            .max_height(120.0)
-                            .show(ui, |ui| {
-                                for (index, action) in actions.iter().take(30).enumerate() {
-                                    if ui.button(&action.title).clicked() {
-                                        events.push(AppEvent::ApplyCodeAction(index));
-                                    }
+                    "Quick fixes ({count})",
+                    &[("count", &actions.len().to_string())],
+                ))
+                .show(ui, |ui| {
+                    egui::ScrollArea::vertical()
+                        .max_height(120.0)
+                        .show(ui, |ui| {
+                            for (index, action) in actions.iter().take(30).enumerate() {
+                                if ui.button(&action.title).clicked() {
+                                    events.push(AppEvent::ApplyCodeAction(index));
                                 }
-                            });
-                    },
-                );
+                            }
+                        });
+                });
             }
         }
         if let Some(items) = state.language.diagnostics.get(path) {
@@ -4068,8 +4515,20 @@ pub fn render(ui: &mut eframe::egui::Ui, state: &mut crate::app::AppState) {
                     });
             });
         }
-        if let Some((hover_path, text)) = &state.language.hover {
-            if hover_path == path {
+        if let Some((hover_path, hover_version, hover_position, text)) = &state.language.hover {
+            let hover_is_current = state
+                .active_tab
+                .and_then(|index| state.editor_tabs.get(index))
+                .is_some_and(|tab| {
+                    &tab.path == hover_path
+                        && tab.document.lsp_position() == *hover_position
+                        && state.language.is_document_current(
+                            hover_path,
+                            *hover_version,
+                            &tab.document.text,
+                        )
+                });
+            if paged_editor && hover_is_current {
                 egui::ScrollArea::vertical()
                     .id_salt("java_hover")
                     .max_height(120.0)
@@ -4084,10 +4543,28 @@ pub fn render(ui: &mut eframe::egui::Ui, state: &mut crate::app::AppState) {
                 }
             }
         }
-        if let Some((signature_path, _, signatures, active_signature)) =
-            &state.language.signature_help
+        if let Some((
+            signature_path,
+            signature_version,
+            signature_position,
+            signatures,
+            active_signature,
+        )) = &state.language.signature_help
         {
-            if signature_path == path {
+            if paged_editor
+                && signature_path == path
+                && state
+                    .active_tab
+                    .and_then(|index| state.editor_tabs.get(index))
+                    .is_some_and(|tab| {
+                        tab.document.lsp_position() == *signature_position
+                            && state.language.is_document_current(
+                                signature_path,
+                                *signature_version,
+                                &tab.document.text,
+                            )
+                    })
+            {
                 if let Some(signature) = signatures.get(*active_signature) {
                     egui::CollapsingHeader::new(crate::i18n::ui_text(ui, "Parameter info"))
                         .default_open(true)
@@ -4114,7 +4591,7 @@ pub fn render(ui: &mut eframe::egui::Ui, state: &mut crate::app::AppState) {
         }
     }
     if let Some((path, _, _, items)) = &state.language.completion {
-        if active_path.as_ref() == Some(path) {
+        if paged_editor && active_path.as_ref() == Some(path) {
             ui.label(if items.is_empty() {
                 crate::i18n::ui_text(ui, "No completions")
             } else {

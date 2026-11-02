@@ -7,6 +7,41 @@ use crate::project::ProjectKind;
 use crate::project::maven_view::{MavenModuleView, MavenTask};
 use crate::project::tree::TreeAction;
 
+fn build_menu_action(
+    ui: &mut egui::Ui,
+    supported_project: bool,
+    running: bool,
+    cancelling: bool,
+) -> Option<AppEvent> {
+    use super::events::BuildAction;
+
+    for (label, action) in [
+        ("Build", BuildAction::Build),
+        ("Test", BuildAction::Test),
+        ("Clean", BuildAction::Clean),
+    ] {
+        if ui
+            .add_enabled(
+                supported_project && !running,
+                egui::Button::new(crate::i18n::ui_text(ui, label)),
+            )
+            .clicked()
+        {
+            return Some(AppEvent::Build(action));
+        }
+    }
+    if ui
+        .add_enabled(
+            running && !cancelling,
+            egui::Button::new(crate::i18n::ui_text(ui, "Cancel")),
+        )
+        .clicked()
+    {
+        return Some(AppEvent::Build(BuildAction::Cancel));
+    }
+    None
+}
+
 pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
     crate::i18n::install(ui.ctx(), &state.translator);
     let translator = state.translator.clone();
@@ -17,16 +52,24 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
                     state.enqueue(AppEvent::NewJavaProjectOpen);
                     ui.close();
                 }
-                if ui.button(translator.text("Open Project…     ⇧⌘O")).clicked() {
+                if ui.button(translator.text("Open Project…")).clicked() {
                     ui.close();
                     actions::open_project_dialog(state);
                 }
-                if ui.button(translator.text("Open File…             ⌘O")).clicked() {
+                if ui.button(translator.text("Open File…")).clicked() {
                     ui.close();
                     actions::open_file_dialog(state);
                 }
-                if ui.add_enabled(state.project.is_some(), egui::Button::new(crate::i18n::ui_text(ui, "Go to File…             ⌘P"))).clicked() {
-                    state.enqueue(AppEvent::QuickOpenOpen);
+                if ui.add_enabled(state.project.is_some(), egui::Button::new(crate::i18n::ui_text(ui, "Go to File…    ⇧⌘O"))).clicked() {
+                    state.enqueue(AppEvent::SearchEverywhereOpen(
+                        super::search_everywhere::SearchTab::Files,
+                    ));
+                    ui.close();
+                }
+                if ui.add_enabled(state.project.is_some(), egui::Button::new(translator.text("Recent Files…    ⌘E"))).clicked() {
+                    state.enqueue(AppEvent::SearchEverywhereOpen(
+                        super::search_everywhere::SearchTab::Files,
+                    ));
                     ui.close();
                 }
                 ui.menu_button(translator.text("Recent Projects"), |ui| {
@@ -73,11 +116,11 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
                     ui.close();
                 }
                 ui.separator();
-                if ui.add_enabled(state.editor_tabs.len() > 1, egui::Button::new(crate::i18n::ui_text(ui, "Next Tab    Ctrl+Tab"))).clicked() {
+                if ui.add_enabled(state.editor_tabs.len() > 1, egui::Button::new(crate::i18n::ui_text(ui, "Next Tab    ⌘⇧]"))).clicked() {
                     state.enqueue(AppEvent::NextEditorTab);
                     ui.close();
                 }
-                if ui.add_enabled(state.editor_tabs.len() > 1, egui::Button::new(crate::i18n::ui_text(ui, "Previous Tab    Ctrl+Shift+Tab"))).clicked() {
+                if ui.add_enabled(state.editor_tabs.len() > 1, egui::Button::new(crate::i18n::ui_text(ui, "Previous Tab    ⌘⇧["))).clicked() {
                     state.enqueue(AppEvent::PreviousEditorTab);
                     ui.close();
                 }
@@ -111,11 +154,37 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
                 }
             });
             ui.menu_button(translator.text("Navigate"), |ui| {
-                if ui.add_enabled(!state.navigation_back.is_empty(), egui::Button::new(translator.text("Back    Ctrl+Alt+←"))).clicked() {
+                if ui.add_enabled(state.project.is_some(), egui::Button::new(crate::i18n::ui_text(ui, "Go to Class…    ⌘O"))).clicked() {
+                    state.enqueue(AppEvent::SearchEverywhereOpen(
+                        super::search_everywhere::SearchTab::JavaClasses,
+                    ));
+                    ui.close();
+                }
+                if ui.button(translator.text("Search Everywhere…    ⇧⇧")).clicked() {
+                    state.enqueue(AppEvent::SearchEverywhereOpen(
+                        super::search_everywhere::SearchTab::Files,
+                    ));
+                    ui.close();
+                }
+                if ui.button(translator.text("Find Action…    ⌘⇧A")).clicked() {
+                    state.enqueue(AppEvent::SearchEverywhereOpen(
+                        super::search_everywhere::SearchTab::Actions,
+                    ));
+                    ui.close();
+                }
+                let test_source_available = state
+                    .active_tab
+                    .and_then(|index| state.editor_tabs.get(index))
+                    .is_some_and(|tab| super::actions::test_source_target(&tab.path).is_some());
+                if ui.add_enabled(test_source_available, egui::Button::new(crate::i18n::ui_text(ui, "Test / production source    ⌘⇧T"))).clicked() {
+                    state.enqueue(AppEvent::ToggleTestSource);
+                    ui.close();
+                }
+                if ui.add_enabled(!state.navigation_back.is_empty(), egui::Button::new(translator.text("Back    ⌘["))).clicked() {
                     state.enqueue(AppEvent::NavigateBack);
                     ui.close();
                 }
-                if ui.add_enabled(!state.navigation_forward.is_empty(), egui::Button::new(translator.text("Forward    Ctrl+Alt+→"))).clicked() {
+                if ui.add_enabled(!state.navigation_forward.is_empty(), egui::Button::new(translator.text("Forward    ⌘]"))).clicked() {
                     state.enqueue(AppEvent::NavigateForward);
                     ui.close();
                 }
@@ -204,24 +273,43 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
             });
             ui.menu_button(translator.text("Code"), |ui| {
                 for (label, command) in [("Complete    Ctrl+Space", crate::java::lsp::EditorCommand::Completion),
-                    ("Parameter info    Ctrl+Shift+Space", crate::java::lsp::EditorCommand::SignatureHelp),
+                    ("Parameter info    ⌘P", crate::java::lsp::EditorCommand::SignatureHelp),
                     ("Hover    F1", crate::java::lsp::EditorCommand::Hover),
-                    ("Go to definition    F12", crate::java::lsp::EditorCommand::Definition),
+                    ("Go to declaration    ⌘B", crate::java::lsp::EditorCommand::Declaration),
+                    ("Go to definition", crate::java::lsp::EditorCommand::Definition),
                     ("Go to type definition    ⇧⌘B", crate::java::lsp::EditorCommand::TypeDefinition),
                     ("Go to implementation    ⌥⌘B", crate::java::lsp::EditorCommand::Implementation),
-                    ("Find references    Shift+F12", crate::java::lsp::EditorCommand::References),
-                    ("Organize imports    Ctrl+Alt+O", crate::java::lsp::EditorCommand::OrganizeImports),
+                    ("Find usages    ⌥F7", crate::java::lsp::EditorCommand::References),
+                    ("Organize imports    ⌃⌥O", crate::java::lsp::EditorCommand::OrganizeImports),
                     ("Reformat code    ⌥⌘L", crate::java::lsp::EditorCommand::Format)] {
                     if ui.add_enabled(state.active_tab.is_some(), egui::Button::new(translator.text(label))).clicked() {
                         state.enqueue(AppEvent::EditorCommand(command)); ui.close();
                     }
                 }
                 if ui.button(translator.text("Go to Java Symbol…    ⌘⌥O")).clicked() {
-                    state.enqueue(AppEvent::SymbolSearchOpen);
+                    state.enqueue(AppEvent::SearchEverywhereOpen(
+                        super::search_everywhere::SearchTab::JavaSymbols,
+                    ));
                     ui.close();
                 }
                 if ui.add_enabled(state.active_tab.is_some(), egui::Button::new(translator.text("File Structure…    ⌘F12"))).clicked() {
                     state.enqueue(AppEvent::FileStructureOpen);
+                    ui.close();
+                }
+            });
+            let build_supported = state
+                .project
+                .as_ref()
+                .and_then(|project| project.model.as_ref())
+                .is_some_and(|model| model.kind != ProjectKind::Unknown);
+            ui.menu_button(translator.text("Build"), |ui| {
+                if let Some(event) = build_menu_action(
+                    ui,
+                    build_supported,
+                    state.build.running(),
+                    state.build.is_cancelling(),
+                ) {
+                    state.enqueue(event);
                     ui.close();
                 }
             });
@@ -238,6 +326,17 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
                 }
                 if ui.add_enabled(can_launch && !state.debugger.has_workers(), egui::Button::new(translator.text("Debug Selected Configuration"))).clicked() {
                     state.enqueue(AppEvent::Debugger(super::events::DebuggerAction::Start));
+                    ui.close();
+                }
+                let has_java_tab = state.active_tab
+                    .and_then(|index| state.editor_tabs.get(index))
+                    .is_some_and(|tab| tab.path.extension().is_some_and(|extension| extension == "java"));
+                if ui.add_enabled(has_java_tab, egui::Button::new(crate::i18n::ui_text(ui, "Toggle line breakpoint    ⌘F8"))).clicked() {
+                    state.enqueue(AppEvent::ToggleBreakpointAtCaret);
+                    ui.close();
+                }
+                if ui.button(crate::i18n::ui_text(ui, "View Breakpoints…    ⌘⇧F8")).clicked() {
+                    state.enqueue(AppEvent::ShowBreakpoints);
                     ui.close();
                 }
                 if ui.button(translator.text("Run Configurations…")).clicked() {
@@ -638,14 +737,20 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
             crate::editor::tabs::render(ui, state);
         }
     });
-    if let Some(path) = state.quick_open.render(ui.ctx()) {
+    let (file, search_actions, location) = state.search_everywhere.render(
+        ui.ctx(),
+        &mut state.quick_open,
+        &mut state.symbol_search,
+        &state.language,
+        &state.recent_files,
+    );
+    if let Some(path) = file {
         state.enqueue(AppEvent::OpenFile(path));
     }
-    let (symbol_actions, symbol_location) = state.symbol_search.render(ui.ctx(), &state.language);
-    for action in symbol_actions {
+    for action in search_actions {
         state.enqueue(action);
     }
-    if let Some(location) = symbol_location {
+    if let Some(location) = location {
         state.enqueue(AppEvent::OpenFileAtPosition(
             location.path,
             location.range.start,
@@ -801,8 +906,10 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
                 ui,
                 "Save project files before running?",
             ));
-            ui.label(format!(
-                "{file_count} open project file(s) have unsaved changes."
+            ui.label(crate::i18n::ui_format(
+                ui,
+                "{count} open project file(s) have unsaved changes.",
+                &[("count", &file_count.to_string())],
             ));
             ui.horizontal(|ui| {
                 confirm = ui
@@ -987,12 +1094,16 @@ fn render_gradle_sidebar(ui: &mut egui::Ui, state: &mut AppState) {
                 .find(|module| &module.root == path)
                 .map(|module| module.name.clone())
         })
-        .unwrap_or_else(|| format!("{} (root)", model.name));
+        .unwrap_or_else(|| crate::i18n::ui_format(ui, "{name} (root)", &[("name", &model.name)]));
     let mut selected = state.gradle_selected_project.clone();
     egui::ComboBox::from_id_salt("gradle_project_selector")
         .selected_text(project_name)
         .show_ui(ui, |ui| {
-            ui.selectable_value(&mut selected, None, format!("{} (root)", model.name));
+            ui.selectable_value(
+                &mut selected,
+                None,
+                crate::i18n::ui_format(ui, "{name} (root)", &[("name", &model.name)]),
+            );
             for module in &model.modules {
                 ui.selectable_value(&mut selected, Some(module.root.clone()), &module.name);
             }
@@ -1192,5 +1303,182 @@ fn render_maven_task(
             module: module.clone(),
             goal: task.goal.clone(),
         }));
+    }
+}
+
+#[cfg(test)]
+mod build_menu_tests {
+    use super::*;
+
+    fn frame(
+        context: &egui::Context,
+        events: Vec<egui::Event>,
+        supported_project: bool,
+        running: bool,
+        cancelling: bool,
+    ) -> (egui::FullOutput, Option<AppEvent>) {
+        let mut action = None;
+        let mut output = context.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(800.0, 600.0),
+                )),
+                events,
+                ..Default::default()
+            },
+            |root| {
+                egui::CentralPanel::default().show(root, |ui| {
+                    egui::MenuBar::new().ui(ui, |ui| {
+                        ui.menu_button(crate::i18n::ui_text(ui, "Build"), |ui| {
+                            action = build_menu_action(ui, supported_project, running, cancelling);
+                        });
+                    });
+                });
+            },
+        );
+        output.textures_delta.clear();
+        (output, action)
+    }
+
+    fn click(position: egui::Pos2) -> Vec<egui::Event> {
+        vec![
+            egui::Event::PointerMoved(position),
+            egui::Event::PointerButton {
+                pos: position,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            },
+            egui::Event::PointerButton {
+                pos: position,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            },
+        ]
+    }
+
+    fn text_positions(shape: &egui::epaint::Shape, label: &str, positions: &mut Vec<egui::Pos2>) {
+        match shape {
+            egui::epaint::Shape::Text(text) if text.galley.text() == label => {
+                positions.push(text.pos + text.galley.size() / 2.0);
+            }
+            egui::epaint::Shape::Vec(shapes) => {
+                for shape in shapes {
+                    text_positions(shape, label, positions);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn click_menu_item(
+        language: crate::i18n::LanguagePreference,
+        label: &str,
+        supported_project: bool,
+        running: bool,
+        cancelling: bool,
+    ) -> Option<AppEvent> {
+        let context = egui::Context::default();
+        context.global_style_mut(|style| style.animation_time = 0.0);
+        let (translator, _) = crate::i18n::Translator::load(language, None);
+        crate::i18n::install(&context, &translator);
+
+        let (output, _) = frame(&context, Vec::new(), supported_project, running, cancelling);
+        let menu_label = crate::i18n::text(&context, "Build");
+        let mut positions = Vec::new();
+        for shape in &output.shapes {
+            text_positions(&shape.shape, &menu_label, &mut positions);
+        }
+        let menu = *positions.last().expect("Build menu label");
+        frame(
+            &context,
+            click(menu),
+            supported_project,
+            running,
+            cancelling,
+        );
+        let (output, _) = frame(&context, Vec::new(), supported_project, running, cancelling);
+        let mut positions = Vec::new();
+        for shape in &output.shapes {
+            text_positions(&shape.shape, label, &mut positions);
+        }
+        let item = *positions.last().expect("Build menu item");
+        frame(
+            &context,
+            click(item),
+            supported_project,
+            running,
+            cancelling,
+        )
+        .1
+    }
+
+    #[test]
+    fn build_menu_dispatches_actions_and_respects_build_state() {
+        use crate::app::events::BuildAction;
+        use crate::i18n::LanguagePreference::English;
+
+        for (label, supported, running, cancelling, expected) in [
+            ("Build", true, false, false, Some(BuildAction::Build)),
+            ("Test", true, false, false, Some(BuildAction::Test)),
+            ("Clean", true, false, false, Some(BuildAction::Clean)),
+            ("Cancel", true, true, false, Some(BuildAction::Cancel)),
+            ("Test", false, false, false, None),
+            ("Build", true, true, false, None),
+            ("Cancel", true, true, true, None),
+        ] {
+            let action = click_menu_item(English, label, supported, running, cancelling);
+            match expected {
+                Some(expected) => assert!(
+                    matches!(&action, Some(AppEvent::Build(action)) if std::mem::discriminant(action) == std::mem::discriminant(&expected)),
+                    "{label}, supported={supported}, running={running}, cancelling={cancelling}: {action:?}"
+                ),
+                None => assert!(action.is_none(), "disabled {label} emitted {action:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn build_menu_labels_are_localized() {
+        for (language, labels) in [
+            (
+                crate::i18n::LanguagePreference::English,
+                ["Build", "Test", "Clean", "Cancel"],
+            ),
+            (
+                crate::i18n::LanguagePreference::Italian,
+                ["Compila", "Test", "Pulisci", "Annulla"],
+            ),
+        ] {
+            let context = egui::Context::default();
+            let (translator, _) = crate::i18n::Translator::load(language, None);
+            crate::i18n::install(&context, &translator);
+            let (output, _) = frame(&context, Vec::new(), true, false, false);
+            let mut positions = Vec::new();
+            for shape in &output.shapes {
+                text_positions(
+                    &shape.shape,
+                    &crate::i18n::text(&context, "Build"),
+                    &mut positions,
+                );
+            }
+            frame(
+                &context,
+                click(*positions.last().expect("Build menu label")),
+                true,
+                false,
+                false,
+            );
+            let (output, _) = frame(&context, Vec::new(), true, false, false);
+            for label in labels {
+                let mut positions = Vec::new();
+                for shape in &output.shapes {
+                    text_positions(&shape.shape, label, &mut positions);
+                }
+                assert!(!positions.is_empty(), "missing menu label {label}");
+            }
+        }
     }
 }
