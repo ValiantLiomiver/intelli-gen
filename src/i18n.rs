@@ -397,6 +397,20 @@ mod tests {
     }
 
     #[test]
+    fn run_and_debug_statuses_translate_dynamic_values() {
+        let (translator, error) = Translator::load(LanguagePreference::Italian, None);
+        assert!(error.is_none());
+        for (source, expected) in [
+            ("Preparing Java run…", "Preparazione dell’esecuzione Java…"),
+            ("Running Demo", "In esecuzione: Demo"),
+            ("Finished — exit 0", "Terminato — codice 0"),
+            ("Debug finished — exit 17", "Debug terminato — codice 17"),
+        ] {
+            assert_eq!(translator.message(source), expected);
+        }
+    }
+
+    #[test]
     fn builtin_catalogs_parse_and_preserve_translation_parameters() {
         let english = parse_catalog(ENGLISH).expect("valid English catalog");
         let italian = parse_catalog(ITALIAN).expect("valid Italian catalog");
