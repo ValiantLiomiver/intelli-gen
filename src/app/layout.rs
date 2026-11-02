@@ -7,6 +7,41 @@ use crate::project::ProjectKind;
 use crate::project::maven_view::{MavenModuleView, MavenTask};
 use crate::project::tree::TreeAction;
 
+fn build_menu_action(
+    ui: &mut egui::Ui,
+    supported_project: bool,
+    running: bool,
+    cancelling: bool,
+) -> Option<AppEvent> {
+    use super::events::BuildAction;
+
+    for (label, action) in [
+        ("Build", BuildAction::Build),
+        ("Test", BuildAction::Test),
+        ("Clean", BuildAction::Clean),
+    ] {
+        if ui
+            .add_enabled(
+                supported_project && !running,
+                egui::Button::new(crate::i18n::ui_text(ui, label)),
+            )
+            .clicked()
+        {
+            return Some(AppEvent::Build(action));
+        }
+    }
+    if ui
+        .add_enabled(
+            running && !cancelling,
+            egui::Button::new(crate::i18n::ui_text(ui, "Cancel")),
+        )
+        .clicked()
+    {
+        return Some(AppEvent::Build(BuildAction::Cancel));
+    }
+    None
+}
+
 pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
     crate::i18n::install(ui.ctx(), &state.translator);
     let translator = state.translator.clone();
@@ -222,6 +257,22 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
                 }
                 if ui.add_enabled(state.active_tab.is_some(), egui::Button::new(translator.text("File Structure…    ⌘F12"))).clicked() {
                     state.enqueue(AppEvent::FileStructureOpen);
+                    ui.close();
+                }
+            });
+            let build_supported = state
+                .project
+                .as_ref()
+                .and_then(|project| project.model.as_ref())
+                .is_some_and(|model| model.kind != ProjectKind::Unknown);
+            ui.menu_button(translator.text("Build"), |ui| {
+                if let Some(event) = build_menu_action(
+                    ui,
+                    build_supported,
+                    state.build.running(),
+                    state.build.is_cancelling(),
+                ) {
+                    state.enqueue(event);
                     ui.close();
                 }
             });
@@ -1194,5 +1245,182 @@ fn render_maven_task(
             module: module.clone(),
             goal: task.goal.clone(),
         }));
+    }
+}
+
+#[cfg(test)]
+mod build_menu_tests {
+    use super::*;
+
+    fn frame(
+        context: &egui::Context,
+        events: Vec<egui::Event>,
+        supported_project: bool,
+        running: bool,
+        cancelling: bool,
+    ) -> (egui::FullOutput, Option<AppEvent>) {
+        let mut action = None;
+        let mut output = context.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(800.0, 600.0),
+                )),
+                events,
+                ..Default::default()
+            },
+            |root| {
+                egui::CentralPanel::default().show(root, |ui| {
+                    egui::MenuBar::new().ui(ui, |ui| {
+                        ui.menu_button(crate::i18n::ui_text(ui, "Build"), |ui| {
+                            action = build_menu_action(ui, supported_project, running, cancelling);
+                        });
+                    });
+                });
+            },
+        );
+        output.textures_delta.clear();
+        (output, action)
+    }
+
+    fn click(position: egui::Pos2) -> Vec<egui::Event> {
+        vec![
+            egui::Event::PointerMoved(position),
+            egui::Event::PointerButton {
+                pos: position,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            },
+            egui::Event::PointerButton {
+                pos: position,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            },
+        ]
+    }
+
+    fn text_positions(shape: &egui::epaint::Shape, label: &str, positions: &mut Vec<egui::Pos2>) {
+        match shape {
+            egui::epaint::Shape::Text(text) if text.galley.text() == label => {
+                positions.push(text.pos + text.galley.size() / 2.0);
+            }
+            egui::epaint::Shape::Vec(shapes) => {
+                for shape in shapes {
+                    text_positions(shape, label, positions);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn click_menu_item(
+        language: crate::i18n::LanguagePreference,
+        label: &str,
+        supported_project: bool,
+        running: bool,
+        cancelling: bool,
+    ) -> Option<AppEvent> {
+        let context = egui::Context::default();
+        context.global_style_mut(|style| style.animation_time = 0.0);
+        let (translator, _) = crate::i18n::Translator::load(language, None);
+        crate::i18n::install(&context, &translator);
+
+        let (output, _) = frame(&context, Vec::new(), supported_project, running, cancelling);
+        let menu_label = crate::i18n::text(&context, "Build");
+        let mut positions = Vec::new();
+        for shape in &output.shapes {
+            text_positions(&shape.shape, &menu_label, &mut positions);
+        }
+        let menu = *positions.last().expect("Build menu label");
+        frame(
+            &context,
+            click(menu),
+            supported_project,
+            running,
+            cancelling,
+        );
+        let (output, _) = frame(&context, Vec::new(), supported_project, running, cancelling);
+        let mut positions = Vec::new();
+        for shape in &output.shapes {
+            text_positions(&shape.shape, label, &mut positions);
+        }
+        let item = *positions.last().expect("Build menu item");
+        frame(
+            &context,
+            click(item),
+            supported_project,
+            running,
+            cancelling,
+        )
+        .1
+    }
+
+    #[test]
+    fn build_menu_dispatches_actions_and_respects_build_state() {
+        use crate::app::events::BuildAction;
+        use crate::i18n::LanguagePreference::English;
+
+        for (label, supported, running, cancelling, expected) in [
+            ("Build", true, false, false, Some(BuildAction::Build)),
+            ("Test", true, false, false, Some(BuildAction::Test)),
+            ("Clean", true, false, false, Some(BuildAction::Clean)),
+            ("Cancel", true, true, false, Some(BuildAction::Cancel)),
+            ("Test", false, false, false, None),
+            ("Build", true, true, false, None),
+            ("Cancel", true, true, true, None),
+        ] {
+            let action = click_menu_item(English, label, supported, running, cancelling);
+            match expected {
+                Some(expected) => assert!(
+                    matches!(&action, Some(AppEvent::Build(action)) if std::mem::discriminant(action) == std::mem::discriminant(&expected)),
+                    "{label}, supported={supported}, running={running}, cancelling={cancelling}: {action:?}"
+                ),
+                None => assert!(action.is_none(), "disabled {label} emitted {action:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn build_menu_labels_are_localized() {
+        for (language, labels) in [
+            (
+                crate::i18n::LanguagePreference::English,
+                ["Build", "Test", "Clean", "Cancel"],
+            ),
+            (
+                crate::i18n::LanguagePreference::Italian,
+                ["Compila", "Test", "Pulisci", "Annulla"],
+            ),
+        ] {
+            let context = egui::Context::default();
+            let (translator, _) = crate::i18n::Translator::load(language, None);
+            crate::i18n::install(&context, &translator);
+            let (output, _) = frame(&context, Vec::new(), true, false, false);
+            let mut positions = Vec::new();
+            for shape in &output.shapes {
+                text_positions(
+                    &shape.shape,
+                    &crate::i18n::text(&context, "Build"),
+                    &mut positions,
+                );
+            }
+            frame(
+                &context,
+                click(*positions.last().expect("Build menu label")),
+                true,
+                false,
+                false,
+            );
+            let (output, _) = frame(&context, Vec::new(), true, false, false);
+            for label in labels {
+                let mut positions = Vec::new();
+                for shape in &output.shapes {
+                    text_positions(&shape.shape, label, &mut positions);
+                }
+                assert!(!positions.is_empty(), "missing menu label {label}");
+            }
+        }
     }
 }

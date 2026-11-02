@@ -1197,6 +1197,9 @@ impl BuildTool {
     pub fn running(&self) -> bool {
         self.handle.is_some()
     }
+    pub fn is_cancelling(&self) -> bool {
+        self.cancelling
+    }
     pub fn has_workers(&self) -> bool {
         self.running() || !self.retiring.is_empty()
     }
