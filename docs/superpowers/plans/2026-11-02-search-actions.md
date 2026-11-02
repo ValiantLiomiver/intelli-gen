@@ -47,4 +47,4 @@
 - [x] Add matching action names, tab title, hint, empty state and shortcut translations to both catalogs.
 - [x] Document the shortcut in README.
 - [x] Run `cargo fmt --check`, `cargo check`, `cargo build --release`, and `git diff --check`.
-- [ ] Commit the implementation on `main` and push to `origin/main`.
+- [x] Commit the implementation on `main` and push to `origin/main`.
