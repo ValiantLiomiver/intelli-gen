@@ -1445,7 +1445,31 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
         );
         let path = tab.path.clone();
         if let Some(position) = completion_position {
-            if state.language.completion.is_none() {
+            let caret = tab.document.lsp_position();
+            let completion_is_current = state.language.completion.as_ref().is_some_and(
+                |(result_path, version, result_position, _)| {
+                    result_path == &path
+                        && *result_position == caret
+                        && state.language.is_document_current(
+                            result_path,
+                            *version,
+                            &tab.document.text,
+                        )
+                },
+            );
+            let hover_is_current = state.language.hover.as_ref().is_some_and(
+                |(result_path, version, result_position, _)| {
+                    result_path == &path
+                        && *result_position == caret
+                        && state.language.is_document_current(
+                            result_path,
+                            *version,
+                            &tab.document.text,
+                        )
+                },
+            );
+            let mut signature_popup_dismissed = false;
+            if !completion_is_current {
                 hover_popup_dismissed = crate::java::lsp::render_hover_popup(
                     ui.ctx(),
                     &path,
@@ -1453,6 +1477,15 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
                     position,
                     &mut state.language,
                 );
+                if !hover_is_current {
+                    signature_popup_dismissed = crate::java::lsp::render_signature_popup(
+                        ui.ctx(),
+                        &path,
+                        &tab.document,
+                        position,
+                        &mut state.language,
+                    );
+                }
             }
             completion_popup_action = crate::java::lsp::render_completion_popup(
                 ui.ctx(),
@@ -1461,6 +1494,9 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
                 position,
                 &mut state.language,
             );
+            if signature_popup_dismissed {
+                state.language.signature_help = None;
+            }
         }
         if tab.document.revision != revision
             && path

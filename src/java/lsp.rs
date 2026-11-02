@@ -376,6 +376,7 @@ pub enum LanguageEvent {
     SignatureHelp {
         path: PathBuf,
         version: i64,
+        position: Position,
         signatures: Vec<SignatureInformation>,
         active_signature: usize,
     },
@@ -2315,6 +2316,7 @@ async fn deliver_response(request: Pending, result: &Value, events: &LanguageEve
             LanguageEvent::SignatureHelp {
                 path,
                 version,
+                position,
                 active_signature: active_signature.min(signatures.len().saturating_sub(1)),
                 signatures,
             }
@@ -3001,7 +3003,7 @@ pub struct LanguageTool {
     pub code_actions_error: Option<(PathBuf, i64, String)>,
     pub completion: Option<(PathBuf, i64, Position, Vec<CompletionItem>)>,
     pub completion_selection: Option<usize>,
-    pub signature_help: Option<(PathBuf, i64, Vec<SignatureInformation>, usize)>,
+    pub signature_help: Option<(PathBuf, i64, Position, Vec<SignatureInformation>, usize)>,
     pub hover: Option<(PathBuf, i64, Position, String)>,
     pub locations: Vec<Location>,
     pub locations_title: String,
@@ -3807,10 +3809,11 @@ impl LanguageTool {
             LanguageEvent::SignatureHelp {
                 path,
                 version,
+                position,
                 signatures,
                 active_signature,
             } if self.current(&path, version) => {
-                self.signature_help = Some((path, version, signatures, active_signature));
+                self.signature_help = Some((path, version, position, signatures, active_signature));
             }
             LanguageEvent::Hover {
                 path,
@@ -4177,6 +4180,55 @@ pub fn render_hover_popup(
     dismiss
 }
 
+pub fn render_signature_popup(
+    ctx: &eframe::egui::Context,
+    path: &Path,
+    document: &Document,
+    position: eframe::egui::Pos2,
+    language: &mut LanguageTool,
+) -> bool {
+    let Some((result_path, version, result_position, signatures, active_signature)) =
+        language.signature_help.as_ref()
+    else {
+        return false;
+    };
+    if result_path != path
+        || *result_position != document.lsp_position()
+        || !language.is_document_current(result_path, *version, &document.text)
+    {
+        return false;
+    }
+    let Some(signature) = signatures.get(*active_signature) else {
+        return false;
+    };
+    let signature = signature.clone();
+    let mut dismiss = false;
+    eframe::egui::Area::new(eframe::egui::Id::unique(("java_signature_popup", path)))
+        .order(eframe::egui::Order::Foreground)
+        .fixed_pos(position)
+        .constrain(true)
+        .show(ctx, |ui| {
+            eframe::egui::Frame::popup(ui.style()).show(ui, |ui| {
+                ui.set_max_width(480.0);
+                ui.monospace(&signature.label);
+                if let Some(parameter) = &signature.active_parameter {
+                    ui.small(crate::i18n::ui_format(
+                        ui,
+                        "Current parameter: {parameter}",
+                        &[("parameter", parameter)],
+                    ));
+                }
+                if !signature.documentation.is_empty() {
+                    ui.label(&signature.documentation);
+                }
+                dismiss = ui
+                    .small_button(crate::i18n::ui_text(ui, "Dismiss parameter info"))
+                    .clicked();
+            });
+        });
+    dismiss
+}
+
 pub fn render_completion_popup(
     ctx: &eframe::egui::Context,
     path: &Path,
@@ -4452,10 +4504,28 @@ pub fn render(ui: &mut eframe::egui::Ui, state: &mut crate::app::AppState) {
                 }
             }
         }
-        if let Some((signature_path, _, signatures, active_signature)) =
-            &state.language.signature_help
+        if let Some((
+            signature_path,
+            signature_version,
+            signature_position,
+            signatures,
+            active_signature,
+        )) = &state.language.signature_help
         {
-            if signature_path == path {
+            if paged_editor
+                && signature_path == path
+                && state
+                    .active_tab
+                    .and_then(|index| state.editor_tabs.get(index))
+                    .is_some_and(|tab| {
+                        tab.document.lsp_position() == *signature_position
+                            && state.language.is_document_current(
+                                signature_path,
+                                *signature_version,
+                                &tab.document.text,
+                            )
+                    })
+            {
                 if let Some(signature) = signatures.get(*active_signature) {
                     egui::CollapsingHeader::new(crate::i18n::ui_text(ui, "Parameter info"))
                         .default_open(true)
