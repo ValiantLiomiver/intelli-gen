@@ -154,7 +154,7 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
                 }
             });
             ui.menu_button(translator.text("Navigate"), |ui| {
-                if ui.button(translator.text("Search Everywhere…")).clicked() {
+                if ui.button(translator.text("Search Everywhere…    ⇧⇧")).clicked() {
                     state.enqueue(AppEvent::SearchEverywhereOpen(
                         super::search_everywhere::SearchTab::Files,
                     ));

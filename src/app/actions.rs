@@ -200,6 +200,11 @@ pub fn keyboard_shortcuts(ctx: &egui::Context, state: &mut AppState) {
     if state.quit_approved {
         return;
     }
+    if ctx.input(|input| double_shift_pressed(input, &mut state.last_shift_release)) {
+        state.enqueue(AppEvent::SearchEverywhereOpen(
+            super::search_everywhere::SearchTab::Files,
+        ));
+    }
     if ctx.input_mut(|input| {
         input.consume_key(
             egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
@@ -537,6 +542,36 @@ pub fn keyboard_shortcuts(ctx: &egui::Context, state: &mut AppState) {
     } else if open_project {
         open_project_dialog(state);
     }
+}
+
+fn double_shift_pressed(input: &egui::InputState, last_release: &mut Option<f64>) -> bool {
+    if !input.focused {
+        *last_release = None;
+        return false;
+    }
+    let mut triggered = false;
+    for event in &input.events {
+        match event {
+            egui::Event::Key {
+                key: egui::Key::ShiftLeft | egui::Key::ShiftRight,
+                pressed: true,
+                repeat: false,
+                ..
+            } => {
+                // shortcut: fixed 500 ms double-press window, make configurable if users need a different cadence.
+                triggered |= last_release
+                    .take()
+                    .is_some_and(|released| (0.0..=0.5).contains(&(input.time - released)));
+            }
+            egui::Event::Key {
+                key: egui::Key::ShiftLeft | egui::Key::ShiftRight,
+                pressed: false,
+                ..
+            } => *last_release = Some(input.time),
+            _ => {}
+        }
+    }
+    triggered
 }
 
 /// The sole shell reducer. Later tasks dispatch service commands here and return

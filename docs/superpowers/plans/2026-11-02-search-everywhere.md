@@ -14,7 +14,7 @@
 
 - Use one search dialog with two tabs: **Files** and **Java Symbols**.
 - `⇧⌘O` opens Files; **Code → Go to Java Symbol…** opens Java Symbols.
-- **Navigate → Search Everywhere…** opens the shared dialog on Files.
+- Double Shift and **Navigate → Search Everywhere…** open the shared dialog on Files.
 - Keep file indexing and LSP requests off the UI frame.
 - Do not add dependencies, an Actions tab, blended ranking, or new search backends.
 - Preserve English and Italian labels and keyboard operation.

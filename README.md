@@ -38,7 +38,7 @@ The command-line link accepts the same optional project or file path: `dist/inte
 | Open project | `⌘O` |
 | Open file | File → Open File… |
 | Go to file | `⇧⌘O` |
-| Search Everywhere | Navigate → Search Everywhere… |
+| Search Everywhere | `Double Shift`; also Navigate → Search Everywhere… |
 | Next / previous editor tab | `⌘⇧]` / `⌘⇧[` (`Ctrl+Tab` aliases) |
 | Recent files | `⌘E` |
 | Find / replace in file | `⌘F` / `⌘R` |
