@@ -23,7 +23,7 @@ Make the commands already available in Intelli-gen searchable from the shared Se
 ## Design
 
 - Add an **Actions** tab and open it with `⌘⇧A` and **Navigate → Find Action…**.
-- Search localized and English action names case-insensitively with subsequence matching and relevance ranking. Accept one edit error across a query and a small set of explicit English/Italian aliases. Show each matching command with its existing shortcut; allow arrow-key selection, Enter, and click.
+- Search localized and English action names case-insensitively with subsequence matching and relevance ranking. Accept one single-character edit or adjacent transposition across a query and a small set of explicit English/Italian aliases. Show each matching command with its existing shortcut; allow arrow-key selection, Enter, and click.
 - Catalog: Go to File, Recent Files, Go to Class, Go to Java Symbol, Search Everywhere, Find Action, Go to Line, File Structure, Find/Replace in File, Find in Project, Go to definition/type definition/implementation, Find usages, Quick fixes, Rename Symbol, Organize imports, Reformat code, Save, Save All, Close File, Build, Test, Clean, Run Selected Configuration, Debug Selected Configuration, and Terminal.
 - Keep the existing Files and Java Symbols flows and shared-query behavior unchanged. Translate every new visible string in `en.ini` and `it.ini`.
 
@@ -35,6 +35,6 @@ Make the commands already available in Intelli-gen searchable from the shared Se
 ## Implementation calls
 
 - Reuse the existing file-search fuzzy scorer; do not add another matcher or dependency.
-- Allow at most one single-character edit across the query's words and use only explicit aliases for supported actions.
+- Allow at most one single-character edit or adjacent transposition across the query's words and use only explicit aliases for supported actions.
 - Do not attempt to reproduce IntelliJ's semantic search or ML ranking.
 - Keep the catalog beside Search Everywhere, where its labels, shortcuts and existing event dispatch are used.

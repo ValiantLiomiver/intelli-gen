@@ -368,6 +368,13 @@ fn one_edit_apart(left: &str, right: &str) -> bool {
             if edits > 1 {
                 return false;
             }
+            if left.len() == right.len()
+                && left_index + 1 < left.len()
+                && left[left_index] == right[right_index + 1]
+                && left[left_index + 1] == right[right_index]
+            {
+                return left[left_index + 2..] == right[right_index + 2..];
+            }
             match left.len().cmp(&right.len()) {
                 std::cmp::Ordering::Greater => left_index += 1,
                 std::cmp::Ordering::Less => right_index += 1,

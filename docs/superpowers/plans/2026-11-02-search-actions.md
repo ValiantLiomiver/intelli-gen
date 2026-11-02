@@ -24,7 +24,7 @@
 - `⌘⇧A` opens Actions while ordinary Shift+A does not; verify by code-path review.
 - Localized titles and English action names both remain searchable; verify by code-path review.
 - Partial names rank by match quality and preserve the existing catalog order for an empty query; verify by code-path review.
-- A one-character typo can match one action, and curated English/Italian aliases match only their mapped action; verify by code-path review.
+- One character edit or adjacent-letter transposition can match one action, and curated English/Italian aliases match only their mapped action; verify by code-path review.
 
 ---
 
@@ -72,9 +72,10 @@
 
 **Interfaces:**
 - Match localized and English action labels, then curated aliases, with `action_search_score`.
-- If subsequence matching fails, allow at most one single-character edit across all query words; keep typo-only scores below fuzzy matches.
+- If subsequence matching fails, allow at most one single-character edit or adjacent transposition across all query words; keep typo-only scores below fuzzy matches.
 
 - [x] Add explicit English and Italian aliases for declaration navigation, references, quick fixes, formatting, build, tests, save all, and terminal.
 - [x] Add one-edit matching for query words of at least four characters.
+- [x] Treat one adjacent-letter transposition as a single typo.
 - [x] Verify with `cargo fmt --check`, `cargo check`, and `git diff --check`.
 - [x] Commit the alias update to `main` and push to `origin/main`.
