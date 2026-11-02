@@ -4,7 +4,7 @@
 
 **Goal:** Search and run Intelli-gen's supported commands from an Actions tab in Search Everywhere.
 
-**Architecture:** Keep a small action catalog in `SearchEverywhere`, filter it against the shared query, render keyboard- and mouse-selectable results, and dispatch existing `AppEvent`s. Route `⌘⇧A` and Navigate → Find Action… to the tab.
+**Architecture:** Keep a small action catalog in `SearchEverywhere`, rank localized and English names with the existing file-search fuzzy scorer, render keyboard- and mouse-selectable results, and dispatch existing `AppEvent`s. Route `⌘⇧A` and Navigate → Find Action… to the tab.
 
 **Tech Stack:** Rust 2024, eframe/egui, existing app events and INI catalogs.
 
@@ -23,6 +23,7 @@
 - Query changes reset keyboard selection; selecting with Enter or click dispatches one event and closes the dialog; verify by code-path review.
 - `⌘⇧A` opens Actions while ordinary Shift+A does not; verify by code-path review.
 - Localized titles and English action names both remain searchable; verify by code-path review.
+- Partial names rank by match quality and preserve the existing catalog order for an empty query; verify by code-path review.
 
 ---
 
@@ -47,4 +48,18 @@
 - [x] Add matching action names, tab title, hint, empty state and shortcut translations to both catalogs.
 - [x] Document the shortcut in README.
 - [x] Run `cargo fmt --check`, `cargo check`, `cargo build --release`, and `git diff --check`.
-- [x] Commit the implementation on `main` and push to `origin/main`.
+
+### Task 2: Rank fuzzy action matches
+
+**Files:**
+- Modify: `src/app/quick_open.rs`
+- Modify: `src/app/search_everywhere.rs`
+
+**Interfaces:**
+- Expose `quick_open::fuzzy_score` to sibling app modules with `pub(super)`.
+- Search localized and English action labels, normalize spaces to underscores, and sort nonempty-query results by descending score.
+
+- [x] Reuse the file-search scorer for action labels, keeping English and Italian labels searchable.
+- [x] Preserve catalog order for an empty query and reset selection when the query changes.
+- [x] Verify with `cargo fmt --check`, `cargo check`, and `git diff --check`.
+- [x] Commit the matcher update to `main` and push to `origin/main`.

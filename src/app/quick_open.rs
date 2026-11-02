@@ -437,7 +437,7 @@ fn index_files(
     Ok((files, warning))
 }
 
-fn fuzzy_score(path: &str, filename: &str, query: &str) -> Option<i64> {
+pub(super) fn fuzzy_score(path: &str, filename: &str, query: &str) -> Option<i64> {
     if query.is_empty() {
         return Some(0);
     }

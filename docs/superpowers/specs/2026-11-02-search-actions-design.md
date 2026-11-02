@@ -22,9 +22,8 @@ Make the commands already available in Intelli-gen searchable from the shared Se
 ## Design
 
 - Add an **Actions** tab and open it with `⌘⇧A` and **Navigate → Find Action…**.
-- Search the localized and English action names case-insensitively by substring. Show each matching command with its existing shortcut; allow arrow-key selection, Enter, and click.
+- Search the localized and English action names case-insensitively with subsequence matching; rank better matches first using the existing file-search scorer. Show each matching command with its existing shortcut; allow arrow-key selection, Enter, and click.
 - Catalog: Go to File, Recent Files, Go to Class, Go to Java Symbol, Search Everywhere, Find Action, Go to Line, File Structure, Find/Replace in File, Find in Project, Go to definition/type definition/implementation, Find usages, Quick fixes, Rename Symbol, Organize imports, Reformat code, Save, Save All, Close File, Build, Test, Clean, Run Selected Configuration, Debug Selected Configuration, and Terminal.
-- Include the existing project navigation, code navigation/refactoring, file editing/search, Build/Test/Clean, and Terminal commands listed in the implementation plan. Dispatch through existing `AppEvent`s and close after selection.
 - Keep the existing Files and Java Symbols flows and shared-query behavior unchanged. Translate every new visible string in `en.ini` and `it.ini`.
 
 ## Non-goals
@@ -34,5 +33,6 @@ Make the commands already available in Intelli-gen searchable from the shared Se
 
 ## Implementation calls
 
-- Use case-insensitive substring matching for this first catalog; do not add another fuzzy matcher or dependency.
+- Reuse the existing file-search fuzzy scorer; do not add another matcher or dependency.
+- Typo-tolerant edit-distance matching and semantic synonyms remain out of scope.
 - Keep the catalog beside Search Everywhere, where its labels, shortcuts and existing event dispatch are used.

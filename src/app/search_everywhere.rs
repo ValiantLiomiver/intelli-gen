@@ -158,7 +158,7 @@ impl SearchEverywhere {
             self.action_query.clone_from(&self.query);
             self.selected_action = 0;
         }
-        let query = self.query.trim().to_lowercase();
+        let query = self.query.trim().to_lowercase().replace(' ', "_");
         let items = [
             (
                 "Go to File…    ⇧⌘O",
@@ -246,15 +246,25 @@ impl SearchEverywhere {
                 AppEvent::Terminal(super::events::TerminalAction::Open),
             ),
         ];
-        let results: Vec<_> = items
+        let mut results: Vec<_> = items
             .iter()
-            .filter(|(label, _)| {
-                let translated = crate::i18n::ui_text(ui, label).to_lowercase();
-                query.is_empty()
-                    || translated.contains(&query)
-                    || label.to_lowercase().contains(&query)
+            .filter_map(|(label, event)| {
+                let translated = crate::i18n::ui_text(ui, label)
+                    .to_lowercase()
+                    .replace(' ', "_");
+                let english = label.to_lowercase().replace(' ', "_");
+                let score = crate::app::quick_open::fuzzy_score(&translated, &translated, &query)
+                    .into_iter()
+                    .chain(crate::app::quick_open::fuzzy_score(
+                        &english, &english, &query,
+                    ))
+                    .max()?;
+                Some((label, event, score))
             })
             .collect();
+        if !query.is_empty() {
+            results.sort_by(|left, right| right.2.cmp(&left.2));
+        }
         let (up, down, enter) = ui.input(|input| {
             (
                 input.key_pressed(egui::Key::ArrowUp),
@@ -277,13 +287,13 @@ impl SearchEverywhere {
         egui::ScrollArea::vertical()
             .max_height(310.0)
             .show(ui, |ui| {
-                for (index, (label, event)) in results.iter().enumerate() {
+                for (index, (label, event, _)) in results.iter().enumerate() {
                     let response = ui.selectable_label(
                         index == self.selected_action,
                         crate::i18n::ui_text(ui, label),
                     );
                     if response.clicked() {
-                        chosen = Some(event.clone());
+                        chosen = Some((**event).clone());
                     }
                     if response.hovered() {
                         self.selected_action = index;
