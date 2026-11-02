@@ -24,6 +24,7 @@ Make the commands already available in Intelli-gen searchable from the shared Se
 
 - Add an **Actions** tab and open it with `⌘⇧A` and **Navigate → Find Action…**.
 - Search localized and English action names case-insensitively with subsequence matching and relevance ranking. Accept one single-character edit or adjacent transposition across a query and a small set of explicit English/Italian aliases. Show each matching command with its existing shortcut; allow arrow-key selection, Enter, and click.
+- Treat “Optimize imports” / “Ottimizza importazioni” as aliases for Intelli-gen's “Organize imports” action.
 - Catalog: Go to File, Recent Files, Go to Class, Go to Java Symbol, Search Everywhere, Find Action, Go to Line, File Structure, Find/Replace in File, Find in Project, Go to definition/type definition/implementation, Find usages, Quick fixes, Rename Symbol, Organize imports, Reformat code, Save, Save All, Close File, Build, Test, Clean, Run Selected Configuration, Debug Selected Configuration, and Terminal.
 - Keep the existing Files and Java Symbols flows and shared-query behavior unchanged. Translate every new visible string in `en.ini` and `it.ini`.
 

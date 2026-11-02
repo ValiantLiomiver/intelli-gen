@@ -315,6 +315,7 @@ fn action_search_aliases(label: &str) -> &'static [&'static str] {
         "Go to definition    ⌘B" => &["go_to_declaration", "vai_alla_dichiarazione"],
         "Find usages    ⌥F7" => &["references", "riferimenti"],
         "Quick fixes    ⌥↩" => &["intentions", "correzioni_rapide"],
+        "Organize imports    ⌃⌥O" => &["optimize_imports", "ottimizza_importazioni"],
         "Reformat code    ⌥⌘L" => &["format_code", "formatta_codice"],
         "Build" => &["compile_project", "compila_progetto"],
         "Test" => &["run_tests", "esegui_test"],
