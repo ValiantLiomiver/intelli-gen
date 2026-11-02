@@ -519,7 +519,10 @@ pub fn render(ui: &mut eframe::egui::Ui, state: &mut crate::app::AppState) {
                 }
             });
             ui.separator();
-            egui::CollapsingHeader::new(crate::i18n::ui_text(ui, "Source breakpoints")).show(ui, |ui| {
+            let open_requested = std::mem::take(&mut state.debugger.breakpoints_open_requested);
+            egui::CollapsingHeader::new(crate::i18n::ui_text(ui, "Source breakpoints"))
+                .open(open_requested.then_some(true))
+                .show(ui, |ui| {
                 for points in state.debugger.breakpoints.sources.values() {
                     for point in points {
                         let source = point.source.clone();

@@ -335,6 +335,10 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
                     state.enqueue(AppEvent::ToggleBreakpointAtCaret);
                     ui.close();
                 }
+                if ui.button(crate::i18n::ui_text(ui, "View Breakpoints…    ⌘⇧F8")).clicked() {
+                    state.enqueue(AppEvent::ShowBreakpoints);
+                    ui.close();
+                }
                 if ui.button(translator.text("Run Configurations…")).clicked() {
                     state.enqueue(AppEvent::ShowPanel(ActivePanel::Run));
                     ui.close();

@@ -194,6 +194,7 @@ impl SearchEverywhere {
                 "Toggle line breakpoint    ⌘F8",
                 AppEvent::ToggleBreakpointAtCaret,
             ),
+            ("View Breakpoints…    ⌘⇧F8", AppEvent::ShowBreakpoints),
             (
                 "Find in File…    ⌘F",
                 AppEvent::Find(crate::editor::find_replace::FindAction::Open { replace: false }),
@@ -327,6 +328,7 @@ fn action_search_aliases(label: &str) -> &'static [&'static str] {
         "Go to declaration    ⌘B" => &["go_to_declaration", "vai_alla_dichiarazione"],
         "Test / production source    ⌘⇧T" => &["test_subject", "vai_al_test"],
         "Toggle line breakpoint    ⌘F8" => &["toggle_breakpoint", "punto_interruzione"],
+        "View Breakpoints…    ⌘⇧F8" => &["view_breakpoints", "visualizza_breakpoint"],
         "Find usages    ⌥F7" => &["references", "riferimenti"],
         "Quick fixes    ⌥↩" => &["intentions", "correzioni_rapide"],
         "Organize imports    ⌃⌥O" => &["optimize_imports", "ottimizza_importazioni"],

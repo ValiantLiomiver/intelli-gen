@@ -263,6 +263,14 @@ pub fn keyboard_shortcuts(ctx: &egui::Context, state: &mut AppState) {
     }) {
         state.enqueue(AppEvent::ToggleTestSource);
     }
+    if ctx.input_mut(|input| {
+        input.consume_key(
+            egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
+            egui::Key::F8,
+        )
+    }) {
+        state.enqueue(AppEvent::ShowBreakpoints);
+    }
     if state.find_replace.visible
         && ctx.input_mut(|input| {
             input.consume_key(
@@ -1605,6 +1613,14 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
             AppEvent::RestartLanguage => restart_language(state),
             AppEvent::ShowPanel(panel) => {
                 state.set_active_panel(panel);
+                if !state.settings.show_tool_window {
+                    state.settings.show_tool_window = true;
+                    save_settings(state);
+                }
+            }
+            AppEvent::ShowBreakpoints => {
+                state.debugger.breakpoints_open_requested = true;
+                state.set_active_panel(super::ActivePanel::Debugger);
                 if !state.settings.show_tool_window {
                     state.settings.show_tool_window = true;
                     save_settings(state);

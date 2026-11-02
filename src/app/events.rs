@@ -72,6 +72,7 @@ pub enum AppEvent {
     Language(crate::java::lsp::LanguageUpdate),
     RestartLanguage,
     ShowPanel(ActivePanel),
+    ShowBreakpoints,
     SettingsChanged,
     SettingsSaved {
         generation: u64,
