@@ -249,16 +249,7 @@ impl SearchEverywhere {
         let mut results: Vec<_> = items
             .iter()
             .filter_map(|(label, event)| {
-                let translated = crate::i18n::ui_text(ui, label)
-                    .to_lowercase()
-                    .replace(' ', "_");
-                let english = label.to_lowercase().replace(' ', "_");
-                let score = crate::app::quick_open::fuzzy_score(&translated, &translated, &query)
-                    .into_iter()
-                    .chain(crate::app::quick_open::fuzzy_score(
-                        &english, &english, &query,
-                    ))
-                    .max()?;
+                let score = action_search_score(ui, label, &query)?;
                 Some((label, event, score))
             })
             .collect();
@@ -302,6 +293,92 @@ impl SearchEverywhere {
             });
         chosen
     }
+}
+
+fn action_search_score(ui: &egui::Ui, label: &str, query: &str) -> Option<i64> {
+    let translated = crate::i18n::ui_text(ui, label)
+        .to_lowercase()
+        .replace(' ', "_");
+    let english = label.to_lowercase().replace(' ', "_");
+    let aliases = action_search_aliases(label);
+    let mut names = vec![translated.as_str(), english.as_str()];
+    names.extend(aliases.iter().copied());
+    let score = names
+        .iter()
+        .filter_map(|name| crate::app::quick_open::fuzzy_score(name, name, query))
+        .max();
+    score.or_else(|| action_typo_score(&names, query))
+}
+
+fn action_search_aliases(label: &str) -> &'static [&'static str] {
+    match label {
+        "Go to definition    ⌘B" => &["go_to_declaration", "vai_alla_dichiarazione"],
+        "Find usages    ⌥F7" => &["references", "riferimenti"],
+        "Quick fixes    ⌥↩" => &["intentions", "correzioni_rapide"],
+        "Reformat code    ⌥⌘L" => &["format_code", "formatta_codice"],
+        "Build" => &["compile_project", "compila_progetto"],
+        "Test" => &["run_tests", "esegui_test"],
+        "Save All                 ⇧⌘S" => &["save_all_files", "salva_tutti_i_file"],
+        "Terminal" => &["command_line", "riga_di_comando"],
+        _ => &[],
+    }
+}
+
+fn action_typo_score(names: &[&str], query: &str) -> Option<i64> {
+    let query_words: Vec<_> = query.split('_').filter(|word| !word.is_empty()).collect();
+    if query_words.is_empty() {
+        return None;
+    }
+    let words: Vec<_> = names
+        .iter()
+        .flat_map(|name| name.split(|character: char| !character.is_alphanumeric()))
+        .filter(|word| !word.is_empty())
+        .collect();
+    let mut typo_used = false;
+    let mut score = -100;
+    for query_word in query_words {
+        if words.iter().any(|word| word.contains(query_word)) {
+            score += 10;
+        } else if !typo_used
+            && query_word.chars().count() >= 4
+            && words.iter().any(|word| one_edit_apart(word, query_word))
+        {
+            typo_used = true;
+            score += 1;
+        } else {
+            return None;
+        }
+    }
+    Some(score)
+}
+
+fn one_edit_apart(left: &str, right: &str) -> bool {
+    let left: Vec<_> = left.chars().collect();
+    let right: Vec<_> = right.chars().collect();
+    if left.len().abs_diff(right.len()) > 1 {
+        return false;
+    }
+    let (mut left_index, mut right_index, mut edits) = (0, 0, 0);
+    while left_index < left.len() && right_index < right.len() {
+        if left[left_index] == right[right_index] {
+            left_index += 1;
+            right_index += 1;
+        } else {
+            edits += 1;
+            if edits > 1 {
+                return false;
+            }
+            match left.len().cmp(&right.len()) {
+                std::cmp::Ordering::Greater => left_index += 1,
+                std::cmp::Ordering::Less => right_index += 1,
+                std::cmp::Ordering::Equal => {
+                    left_index += 1;
+                    right_index += 1;
+                }
+            }
+        }
+    }
+    edits + usize::from(left_index < left.len() || right_index < right.len()) <= 1
 }
 
 #[cfg(test)]
