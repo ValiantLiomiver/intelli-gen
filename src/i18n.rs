@@ -364,6 +364,25 @@ mod tests {
     }
 
     #[test]
+    fn common_project_and_file_statuses_are_translated_with_paths_intact() {
+        let (translator, error) = Translator::load(LanguagePreference::Italian, None);
+        assert!(error.is_none());
+        for (source, expected) in [
+            ("Opening /tmp/progetto…", "Apertura di /tmp/progetto…"),
+            ("Saving /tmp/Main.java…", "Salvataggio di /tmp/Main.java…"),
+            ("Opened /tmp/Main.java", "Aperto /tmp/Main.java"),
+            ("Saved /tmp/Main.java", "Salvato /tmp/Main.java"),
+            ("Created /tmp/New.java", "Creato /tmp/New.java"),
+            (
+                "JDK catalog updated: 2 installation(s)",
+                "Catalogo JDK aggiornato: 2 installazioni",
+            ),
+        ] {
+            assert_eq!(translator.message(source), expected);
+        }
+    }
+
+    #[test]
     fn builtin_catalogs_parse_and_preserve_translation_parameters() {
         let english = parse_catalog(ENGLISH).expect("valid English catalog");
         let italian = parse_catalog(ITALIAN).expect("valid Italian catalog");
