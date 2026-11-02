@@ -803,26 +803,30 @@ impl EditorTab {
         diagnostics: &[crate::java::lsp::LanguageDiagnostic],
         indent_size: usize,
         insert_spaces: bool,
-    ) -> Option<super::GutterBreakpointAction> {
+    ) -> (Option<super::GutterBreakpointAction>, Option<egui::Pos2>) {
         if self.document.text.len() > PAGED_EDITOR_BYTES {
             self.active_snippet_tab_stop = None;
             self.snippet_tab_stops.clear();
             self.pending_selection = None;
-            return self.render_paged_editor(
-                ui,
-                allow_edits && !self.close_after_save,
-                breakpoints,
-                logpoints,
-                disabled_breakpoints,
-                breakpoint_status,
-                current_line,
-                diagnostics,
-                indent_size,
-                insert_spaces,
+            return (
+                self.render_paged_editor(
+                    ui,
+                    allow_edits && !self.close_after_save,
+                    breakpoints,
+                    logpoints,
+                    disabled_breakpoints,
+                    breakpoint_status,
+                    current_line,
+                    diagnostics,
+                    indent_size,
+                    insert_spaces,
+                ),
+                None,
             );
         }
         self.page_end = 0;
         let mut toggled = None;
+        let mut cursor_screen_pos = None;
         let editor_id = egui::Id::new(("source_editor", &self.path));
         if let Some((start, end)) = self.pending_selection.take() {
             let mut state =
@@ -958,6 +962,13 @@ impl EditorTab {
                     }
                     if let Some(cursor) = output.cursor_range {
                         self.document.set_cursor(cursor.primary.index.into());
+                        let cursor_rect = output
+                            .galley
+                            .pos_from_cursor(cursor.primary)
+                            .translate(output.galley_pos.to_vec2());
+                        if output.text_clip_rect.contains(cursor_rect.center()) {
+                            cursor_screen_pos = Some(cursor_rect.left_bottom());
+                        }
                     }
                 });
             });
@@ -975,7 +986,7 @@ impl EditorTab {
             self.active_snippet_tab_stop = None;
             self.snippet_tab_stops.clear();
         }
-        toggled
+        (toggled, cursor_screen_pos)
     }
 
     fn adjust_snippet_tab_stops(&mut self, previous_length: usize) {
@@ -1385,6 +1396,7 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
         .map_or(&[][..], Vec::as_slice);
     let mut editor_command = None;
     let mut breakpoint_action = None;
+    let mut completion_popup_action = None;
     let (indent_size, insert_spaces) = state
         .active_tab
         .and_then(|index| state.editor_tabs.get(index))
@@ -1418,7 +1430,7 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
             .filter(|frame| frame.source.as_ref() == Some(&tab.path))
             .map(|frame| frame.line);
         let revision = tab.document.revision;
-        let toggled = tab.render_editor(
+        let (toggled, completion_position) = tab.render_editor(
             ui,
             !state.quit_approved,
             &lines,
@@ -1431,6 +1443,15 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
             insert_spaces,
         );
         let path = tab.path.clone();
+        if let Some(position) = completion_position {
+            completion_popup_action = crate::java::lsp::render_completion_popup(
+                ui.ctx(),
+                &path,
+                &tab.document,
+                position,
+                &mut state.language,
+            );
+        }
         if tab.document.revision != revision
             && path
                 .extension()
@@ -1492,6 +1513,15 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
                 }
             });
         }
+    }
+    match completion_popup_action {
+        Some(crate::java::lsp::CompletionPopupAction::Apply(index)) => {
+            state.enqueue(AppEvent::ApplyCompletion(index));
+        }
+        Some(crate::java::lsp::CompletionPopupAction::Dismiss) => {
+            state.language.dismiss_completion();
+        }
+        None => {}
     }
     if let Some(command) = editor_command {
         state.enqueue(AppEvent::EditorCommand(command));

@@ -4128,6 +4128,78 @@ fn maven_import_arguments(root_pom_uri: &str) -> Value {
 }
 
 /// Compact result views stay in the editor and issue normal editor/app commands.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CompletionPopupAction {
+    Apply(usize),
+    Dismiss,
+}
+
+pub fn render_completion_popup(
+    ctx: &eframe::egui::Context,
+    path: &Path,
+    document: &Document,
+    position: eframe::egui::Pos2,
+    language: &mut LanguageTool,
+) -> Option<CompletionPopupAction> {
+    let Some((result_path, version, result_position, items)) = language.completion.as_ref() else {
+        return None;
+    };
+    if result_path != path
+        || *result_position != document.lsp_position()
+        || !language.is_document_current(result_path, *version, &document.text)
+    {
+        return None;
+    }
+    let selected = language.completion_selection;
+    let mut hovered = None;
+    let mut action = None;
+    eframe::egui::Area::new(eframe::egui::Id::unique(("java_completion_popup", path)))
+        .order(eframe::egui::Order::Foreground)
+        .fixed_pos(position)
+        .constrain(true)
+        .show(ctx, |ui| {
+            eframe::egui::Frame::popup(ui.style()).show(ui, |ui| {
+                ui.set_min_width(280.0);
+                if items.is_empty() {
+                    ui.weak(crate::i18n::ui_text(ui, "No completions"));
+                } else {
+                    eframe::egui::ScrollArea::vertical()
+                        .max_height(220.0)
+                        .show(ui, |ui| {
+                            for (index, item) in items.iter().enumerate() {
+                                let response = ui
+                                    .add_enabled(
+                                        item.applicable,
+                                        eframe::egui::Button::new(&item.label)
+                                            .selected(selected == Some(index)),
+                                    )
+                                    .on_hover_text(&item.detail);
+                                if selected == Some(index) {
+                                    response.scroll_to_me(Some(eframe::egui::Align::Center));
+                                }
+                                if response.hovered() {
+                                    hovered = Some(index);
+                                }
+                                if response.clicked() && item.applicable {
+                                    action = Some(CompletionPopupAction::Apply(index));
+                                }
+                            }
+                        });
+                }
+                if ui
+                    .small_button(crate::i18n::ui_text(ui, "Dismiss completions"))
+                    .clicked()
+                {
+                    action = Some(CompletionPopupAction::Dismiss);
+                }
+            });
+        });
+    if let Some(index) = hovered {
+        language.completion_selection = Some(index);
+    }
+    action
+}
+
 pub fn render(ui: &mut eframe::egui::Ui, state: &mut crate::app::AppState) {
     use crate::app::events::AppEvent;
     use eframe::egui;
@@ -4351,7 +4423,13 @@ pub fn render(ui: &mut eframe::egui::Ui, state: &mut crate::app::AppState) {
         }
     }
     if let Some((path, _, _, items)) = &state.language.completion {
-        if active_path.as_ref() == Some(path) {
+        let paged_editor = state
+            .active_tab
+            .and_then(|index| state.editor_tabs.get(index))
+            .is_some_and(|tab| {
+                tab.document.text.len() > crate::editor::document::PAGED_EDITOR_BYTES
+            });
+        if paged_editor && active_path.as_ref() == Some(path) {
             ui.label(if items.is_empty() {
                 crate::i18n::ui_text(ui, "No completions")
             } else {
