@@ -271,7 +271,7 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
                     ("Go to type definition    ⇧⌘B", crate::java::lsp::EditorCommand::TypeDefinition),
                     ("Go to implementation    ⌥⌘B", crate::java::lsp::EditorCommand::Implementation),
                     ("Find usages    ⌥F7", crate::java::lsp::EditorCommand::References),
-                    ("Organize imports    Ctrl+Alt+O", crate::java::lsp::EditorCommand::OrganizeImports),
+                    ("Organize imports    ⌃⌥O", crate::java::lsp::EditorCommand::OrganizeImports),
                     ("Reformat code    ⌥⌘L", crate::java::lsp::EditorCommand::Format)] {
                     if ui.add_enabled(state.active_tab.is_some(), egui::Button::new(translator.text(label))).clicked() {
                         state.enqueue(AppEvent::EditorCommand(command)); ui.close();

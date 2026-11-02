@@ -49,7 +49,7 @@ The command-line link accepts the same optional project or file path: `dist/inte
 | Navigate back / forward | `⌘[` / `⌘]` (`Ctrl+Alt+←` / `Ctrl+Alt+→` aliases) |
 | Jump to last tool window / hide all tool windows | `F12` / `⌘⇧F12` |
 | Reformat Java file | `⌥⌘L` |
-| Organize Java imports | `Ctrl+Alt+O` |
+| Organize Java imports | `⌃⌥O` |
 | Go to Java symbol | `⌘⌥O` |
 | File structure | `⌘F12` |
 | Complete / parameter info / hover | `Ctrl+Space` / `⌘P` / `F1` (`Ctrl+Shift+Space` alias for parameter info) |

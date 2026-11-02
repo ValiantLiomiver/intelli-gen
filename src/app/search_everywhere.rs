@@ -220,7 +220,7 @@ impl SearchEverywhere {
             ),
             ("Rename Symbol…    Shift+F6", AppEvent::RenameSymbolOpen),
             (
-                "Organize imports    Ctrl+Alt+O",
+                "Organize imports    ⌃⌥O",
                 AppEvent::EditorCommand(crate::java::lsp::EditorCommand::OrganizeImports),
             ),
             (
