@@ -52,7 +52,7 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
                     state.enqueue(AppEvent::NewJavaProjectOpen);
                     ui.close();
                 }
-                if ui.button(translator.text("Open Project…     ⌘O")).clicked() {
+                if ui.button(translator.text("Open Project…")).clicked() {
                     ui.close();
                     actions::open_project_dialog(state);
                 }
@@ -154,6 +154,12 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
                 }
             });
             ui.menu_button(translator.text("Navigate"), |ui| {
+                if ui.add_enabled(state.project.is_some(), egui::Button::new(crate::i18n::ui_text(ui, "Go to Class…    ⌘O"))).clicked() {
+                    state.enqueue(AppEvent::SearchEverywhereOpen(
+                        super::search_everywhere::SearchTab::JavaClasses,
+                    ));
+                    ui.close();
+                }
                 if ui.button(translator.text("Search Everywhere…    ⇧⇧")).clicked() {
                     state.enqueue(AppEvent::SearchEverywhereOpen(
                         super::search_everywhere::SearchTab::Files,

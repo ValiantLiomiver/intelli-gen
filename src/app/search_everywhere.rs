@@ -12,12 +12,14 @@ pub enum SearchTab {
     #[default]
     Files,
     JavaSymbols,
+    JavaClasses,
 }
 
 #[derive(Default)]
 pub struct SearchEverywhere {
     visible: bool,
     active_tab: SearchTab,
+    class_only: bool,
     query: String,
     focus_query: bool,
 }
@@ -25,7 +27,12 @@ pub struct SearchEverywhere {
 impl SearchEverywhere {
     pub fn open(&mut self, tab: SearchTab) {
         self.visible = true;
-        self.active_tab = tab;
+        self.class_only = tab == SearchTab::JavaClasses;
+        self.active_tab = if self.class_only {
+            SearchTab::JavaSymbols
+        } else {
+            tab
+        };
         self.query.clear();
         self.focus_query = true;
     }
@@ -82,6 +89,7 @@ impl SearchEverywhere {
                 .clicked()
             {
                 self.active_tab = SearchTab::Files;
+                self.class_only = false;
             }
             if ui
                 .selectable_label(
@@ -91,11 +99,13 @@ impl SearchEverywhere {
                 .clicked()
             {
                 self.active_tab = SearchTab::JavaSymbols;
+                self.class_only = false;
             }
         });
         let hint = match self.active_tab {
             SearchTab::Files => "Type a file name or path…",
-            SearchTab::JavaSymbols => "Class, method, or field name…",
+            SearchTab::JavaSymbols | SearchTab::JavaClasses if self.class_only => "Class name…",
+            SearchTab::JavaSymbols | SearchTab::JavaClasses => "Class, method, or field name…",
         };
         let response = ui.add(
             egui::TextEdit::singleline(&mut self.query)
@@ -112,8 +122,9 @@ impl SearchEverywhere {
                 Vec::new(),
                 None,
             ),
-            SearchTab::JavaSymbols => {
-                let (actions, location) = symbols.render_results(ui, &self.query, language);
+            SearchTab::JavaSymbols | SearchTab::JavaClasses => {
+                let (actions, location) =
+                    symbols.render_results(ui, &self.query, language, self.class_only);
                 (None, actions, location)
             }
         }

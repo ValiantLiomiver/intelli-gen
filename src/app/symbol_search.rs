@@ -19,6 +19,7 @@ impl SymbolSearch {
         ui: &mut egui::Ui,
         query: &str,
         language: &LanguageTool,
+        classes_only: bool,
     ) -> (Vec<AppEvent>, Option<Location>) {
         let mut actions = Vec::new();
         let mut chosen = None;
@@ -29,7 +30,10 @@ impl SymbolSearch {
         if !query.is_empty() && language.workspace_symbol_query != query {
             actions.push(AppEvent::SearchWorkspaceSymbols(query.to_owned()));
         }
-        let symbols = matching_symbols(query, language);
+        let symbols: Vec<_> = matching_symbols(query, language)
+            .iter()
+            .filter(|symbol| !classes_only || matches!(symbol.kind, 5 | 10 | 11))
+            .collect();
         let (up, down, enter) = ui.input(|input| {
             (
                 input.key_pressed(egui::Key::ArrowUp),

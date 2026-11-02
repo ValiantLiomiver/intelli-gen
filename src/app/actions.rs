@@ -533,14 +533,16 @@ pub fn keyboard_shortcuts(ctx: &egui::Context, state: &mut AppState) {
             egui::Key::O,
         )
     });
-    let open_project =
+    let go_to_class =
         ctx.input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, egui::Key::O));
     if go_to_file {
         state.enqueue(AppEvent::SearchEverywhereOpen(
             super::search_everywhere::SearchTab::Files,
         ));
-    } else if open_project {
-        open_project_dialog(state);
+    } else if go_to_class {
+        state.enqueue(AppEvent::SearchEverywhereOpen(
+            super::search_everywhere::SearchTab::JavaClasses,
+        ));
     }
 }
 

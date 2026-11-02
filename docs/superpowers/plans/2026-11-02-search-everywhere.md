@@ -13,7 +13,7 @@
 ## Global Constraints
 
 - Use one search dialog with two tabs: **Files** and **Java Symbols**.
-- `⇧⌘O` opens Files; **Code → Go to Java Symbol…** opens Java Symbols.
+- `⌘O` opens Java Symbols on the class search; `⇧⌘O` opens Files; **Code → Go to Java Symbol…** (`⌘⌥O`) opens Java Symbols.
 - Double Shift and **Navigate → Search Everywhere…** open the shared dialog on Files.
 - Keep file indexing and LSP requests off the UI frame.
 - Do not add dependencies, an Actions tab, blended ranking, or new search backends.

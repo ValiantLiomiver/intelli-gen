@@ -35,9 +35,10 @@ The command-line link accepts the same optional project or file path: `dist/inte
 
 | Action | Shortcut |
 | --- | --- |
-| Open project | `⌘O` |
-| Open file | File → Open File… |
+| Open project / file | File → Open Project… / Open File… |
+| Go to class | `⌘O` |
 | Go to file | `⇧⌘O` |
+| Go to Java symbol | `⌘⌥O` |
 | Search Everywhere | `Double Shift`; also Navigate → Search Everywhere… |
 | Next / previous editor tab | `⌘⇧]` / `⌘⇧[` (`Ctrl+Tab` aliases) |
 | Recent files | `⌘E` |
