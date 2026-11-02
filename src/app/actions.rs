@@ -361,6 +361,11 @@ pub fn keyboard_shortcuts(ctx: &egui::Context, state: &mut AppState) {
             }
         });
     if comment_editor.is_some_and(|id| ctx.memory(|memory| memory.focused() == Some(id)))
+        && ctx.input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, egui::Key::F8))
+    {
+        state.enqueue(AppEvent::ToggleBreakpointAtCaret);
+    }
+    if comment_editor.is_some_and(|id| ctx.memory(|memory| memory.focused() == Some(id)))
         && ctx.input_mut(|input| {
             input.consume_key(egui::Modifiers::COMMAND, egui::Key::Slash)
                 || input.consume_key(
@@ -1213,6 +1218,27 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                     state.enqueue(AppEvent::OpenFile(path));
                 } else {
                     state.status = "No matching test or production source".into();
+                }
+            }
+            AppEvent::ToggleBreakpointAtCaret => {
+                if let Some(tab) = state
+                    .active_tab
+                    .and_then(|index| state.editor_tabs.get(index))
+                    .filter(|tab| {
+                        tab.path
+                            .extension()
+                            .is_some_and(|extension| extension == "java")
+                    })
+                {
+                    state.enqueue(AppEvent::Debugger(
+                        super::events::DebuggerAction::ToggleBreakpoint {
+                            source: tab.path.clone(),
+                            line: tab.document.lsp_position().line.saturating_add(1),
+                            modified: tab.document.is_dirty(),
+                        },
+                    ));
+                } else {
+                    state.status = "Open a Java file to toggle a breakpoint".into();
                 }
             }
             AppEvent::NextEditorTab => select_editor_tab(state, true),

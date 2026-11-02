@@ -35,6 +35,7 @@ pub enum AppEvent {
     NavigateBack,
     NavigateForward,
     ToggleTestSource,
+    ToggleBreakpointAtCaret,
     NextEditorTab,
     PreviousEditorTab,
     NewJavaClass(PathBuf),

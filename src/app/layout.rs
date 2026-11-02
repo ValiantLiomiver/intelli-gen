@@ -328,6 +328,13 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
                     state.enqueue(AppEvent::Debugger(super::events::DebuggerAction::Start));
                     ui.close();
                 }
+                let has_java_tab = state.active_tab
+                    .and_then(|index| state.editor_tabs.get(index))
+                    .is_some_and(|tab| tab.path.extension().is_some_and(|extension| extension == "java"));
+                if ui.add_enabled(has_java_tab, egui::Button::new(crate::i18n::ui_text(ui, "Toggle line breakpoint    ⌘F8"))).clicked() {
+                    state.enqueue(AppEvent::ToggleBreakpointAtCaret);
+                    ui.close();
+                }
                 if ui.button(translator.text("Run Configurations…")).clicked() {
                     state.enqueue(AppEvent::ShowPanel(ActivePanel::Run));
                     ui.close();

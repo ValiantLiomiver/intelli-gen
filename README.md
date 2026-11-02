@@ -61,6 +61,7 @@ The command-line link accepts the same optional project or file path: `dist/inte
 | Java quick fixes | `⌥↩` |
 | Go to type definition | `⇧⌘B` |
 | Go to implementation | `⌥⌘B` |
+| Toggle line breakpoint | `⌘F8` |
 | Run / debug selected configuration | `⌃R` / `⌃D` |
 | Save / save all | `⌘S` / `⇧⌘S` |
 
