@@ -48,7 +48,8 @@
 - [x] Add a shortcut-routing test confirming `⌘E` opens Files and plain `E` does not.
 - [x] Run focused tests before implementation and confirm they fail for the missing MRU/shortcut behavior.
 - [x] Implement the app-level MRU and record successful file loads, existing-file opens, navigation, and editor-tab activation.
+- [x] Keep MRU selection stable during index completion, replace renamed paths, and update history for every tab activation route.
 - [x] Render the recent list and localized heading/empty state only when the shared query is empty; preserve existing indexed search for typed queries.
+- [x] Verify typed queries still select asynchronous index results.
 - [x] Route `⌘E` to `SearchEverywhereOpen(Files)`, add the localized File menu item, and list `⌘E` in README.
-- [x] Run `cargo fmt --check`, focused recent-file/shortcut tests (8 passed), `cargo check`, and `git diff --check`; the full suite remains unrun.
-- [ ] Commit and push the finished change directly on `main`.
+- [x] Run `cargo fmt --check`, focused recent-file/shortcut/search tests (10 passed), `cargo check`, and `git diff --check`; the full suite remains unrun.

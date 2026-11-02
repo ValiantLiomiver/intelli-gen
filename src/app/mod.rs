@@ -38,7 +38,7 @@ const MAX_RECENT_FILES: usize = 20;
 
 #[cfg(test)]
 mod recent_files_tests {
-    use super::remember_recent_file;
+    use super::{remember_recent_file, rename_recent_file};
     use std::path::PathBuf;
 
     #[test]
@@ -69,12 +69,40 @@ mod recent_files_tests {
         assert_eq!(recent[0], PathBuf::from("/project/20.java"));
         assert_eq!(recent[19], PathBuf::from("/project/1.java"));
     }
+
+    #[test]
+    fn renamed_recent_file_replaces_its_old_path() {
+        let mut recent = vec![
+            PathBuf::from("/project/Renamed.java"),
+            PathBuf::from("/project/Other.java"),
+            PathBuf::from("/project/Old.java"),
+        ];
+
+        rename_recent_file(
+            &mut recent,
+            PathBuf::from("/project/Old.java"),
+            PathBuf::from("/project/Renamed.java"),
+        );
+
+        assert_eq!(
+            recent,
+            [
+                PathBuf::from("/project/Renamed.java"),
+                PathBuf::from("/project/Other.java")
+            ]
+        );
+    }
 }
 
 fn remember_recent_file(recent_files: &mut Vec<PathBuf>, path: PathBuf) {
     recent_files.retain(|recent| recent != &path);
     recent_files.insert(0, path);
     recent_files.truncate(MAX_RECENT_FILES);
+}
+
+fn rename_recent_file(recent_files: &mut Vec<PathBuf>, old_path: PathBuf, new_path: PathBuf) {
+    recent_files.retain(|recent| recent != &old_path);
+    remember_recent_file(recent_files, new_path);
 }
 
 impl ActivePanel {
@@ -288,6 +316,17 @@ pub struct PendingRenameRequest {
 impl AppState {
     pub fn remember_recent_file(&mut self, path: PathBuf) {
         remember_recent_file(&mut self.recent_files, path);
+    }
+
+    pub fn rename_recent_file(&mut self, old_path: PathBuf, new_path: PathBuf) {
+        rename_recent_file(&mut self.recent_files, old_path, new_path);
+    }
+
+    pub fn activate_tab(&mut self, index: usize) {
+        if let Some(path) = self.editor_tabs.get(index).map(|tab| tab.path.clone()) {
+            self.active_tab = Some(index);
+            self.remember_recent_file(path);
+        }
     }
 
     pub fn enqueue(&mut self, event: AppEvent) {

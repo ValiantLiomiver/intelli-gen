@@ -151,7 +151,9 @@ impl QuickOpen {
                             self.files = Arc::new(entries);
                             self.indexed_root = Some(root);
                             self.warning = warning;
-                            self.last_query = "\0".into();
+                            if !self.last_query.is_empty() {
+                                self.last_query = "\0".into();
+                            }
                         }
                         Err(error) => self.error = Some(error),
                     }
@@ -530,6 +532,66 @@ mod tests {
     }
 
     #[test]
+    fn indexing_completion_preserves_recent_file_selection() {
+        let root = PathBuf::from("/workspace");
+        let recent_files = [
+            PathBuf::from("/workspace/src/Main.java"),
+            PathBuf::from("/workspace/src/Old.java"),
+        ];
+        let mut quick_open = QuickOpen::default();
+        quick_open.root = Some(root.clone());
+        quick_open.pending_root = Some(root.clone());
+        quick_open.loading = true;
+        let mut query = String::new();
+        let context = egui::Context::default();
+        let mut output = context.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(800.0, 600.0),
+                )),
+                events: vec![egui::Event::Key {
+                    key: egui::Key::ArrowDown,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                }],
+                ..Default::default()
+            },
+            |ui| {
+                quick_open.render_results(ui, &mut query, &recent_files);
+            },
+        );
+        output.textures_delta.clear();
+        let generation = quick_open.generation.load(Ordering::Acquire);
+        quick_open
+            .sender
+            .send(QuickOpenEvent::Indexed {
+                generation,
+                root: root.clone(),
+                result: Ok((Vec::new(), None)),
+            })
+            .unwrap();
+        quick_open.poll();
+        let mut selected = None;
+        let mut output = context.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(800.0, 600.0),
+                )),
+                events: press_enter(),
+                ..Default::default()
+            },
+            |ui| selected = quick_open.render_results(ui, &mut query, &recent_files),
+        );
+        output.textures_delta.clear();
+
+        assert_eq!(selected, Some(recent_files[1].clone()));
+    }
+
+    #[test]
     fn empty_file_query_ignores_recents_outside_workspace() {
         let mut query = String::new();
         let opened = render_results(
@@ -543,16 +605,53 @@ mod tests {
     }
 
     #[test]
-    fn typed_file_query_does_not_select_a_recent_entry() {
+    fn typed_file_query_selects_from_index_not_recent_files() {
+        let root = PathBuf::from("/workspace");
+        let indexed_file = PathBuf::from("/workspace/src/Main.java");
+        let mut quick_open = QuickOpen::default();
+        quick_open.root = Some(root.clone());
+        quick_open.indexed_root = Some(root.clone());
+        quick_open.files = Arc::new(vec![
+            Entry {
+                path: PathBuf::from("/workspace/src/Other.java"),
+                display: "src/Other.java".into(),
+                folded: "src/other.java".into(),
+                filename: "other.java".into(),
+            },
+            Entry {
+                path: indexed_file.clone(),
+                display: "src/Main.java".into(),
+                folded: "src/main.java".into(),
+                filename: "main.java".into(),
+            },
+        ]);
         let mut query = "Main".to_owned();
-        let opened = render_results(
-            PathBuf::from("/workspace"),
-            &mut query,
-            &[PathBuf::from("/workspace/src/Main.java")],
-            press_enter(),
-        );
+        quick_open.update_matches(&query);
+        for _ in 0..100 {
+            quick_open.poll();
+            if !quick_open.matches.is_empty() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert_eq!(quick_open.matches.len(), 1);
 
-        assert_eq!(opened, None);
+        let context = egui::Context::default();
+        let mut opened = None;
+        let mut output = context.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(800.0, 600.0),
+                )),
+                events: press_enter(),
+                ..Default::default()
+            },
+            |ui| opened = quick_open.render_results(ui, &mut query, &[indexed_file.clone()]),
+        );
+        output.textures_delta.clear();
+
+        assert_eq!(opened, Some(indexed_file));
     }
 
     #[test]

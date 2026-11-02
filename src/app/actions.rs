@@ -79,8 +79,7 @@ fn open_file_at_position(
     position: crate::java::lsp::Position,
 ) {
     if let Some(index) = state.editor_tabs.iter().position(|tab| tab.path == path) {
-        state.active_tab = Some(index);
-        state.remember_recent_file(path.clone());
+        state.activate_tab(index);
         navigate_tab_to_position(&mut state.editor_tabs[index], position);
     } else {
         state.pending_navigation.insert(path.clone(), position);
@@ -154,18 +153,12 @@ fn select_editor_tab(state: &mut AppState, forward: bool) {
         .active_tab
         .unwrap_or(if forward { count - 1 } else { 0 })
         .min(count - 1);
-    state.active_tab = Some(if forward {
+    let index = if forward {
         (current + 1) % count
     } else {
         (current + count - 1) % count
-    });
-    if let Some(path) = state
-        .active_tab
-        .and_then(|index| state.editor_tabs.get(index))
-        .map(|tab| tab.path.clone())
-    {
-        state.remember_recent_file(path);
-    }
+    };
+    state.activate_tab(index);
 }
 
 fn recent_files_shortcut_event(ctx: &egui::Context) -> Option<AppEvent> {
@@ -895,8 +888,7 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
             }
             AppEvent::OpenFile(path) => {
                 if let Some(index) = state.editor_tabs.iter().position(|tab| tab.path == path) {
-                    state.active_tab = Some(index);
-                    state.remember_recent_file(path);
+                    state.activate_tab(index);
                 } else if !state.quit_requested && state.loading_files.insert(path.clone()) {
                     match state.editor_io.load(path.clone()) {
                         Ok(()) => state.status = format!("Opening {}…", path.display()),
@@ -2684,7 +2676,7 @@ fn close_file(state: &mut AppState, path: &std::path::Path) {
     let tab = &state.editor_tabs[index];
     if tab.document.is_dirty() || tab.saving {
         state.pending_close = Some(tab.path.clone());
-        state.active_tab = Some(index);
+        state.activate_tab(index);
     } else {
         remove_tab(state, path);
     }
@@ -2695,12 +2687,17 @@ fn remove_tab(state: &mut AppState, path: &std::path::Path) {
         return;
     };
     state.editor_tabs.remove(index);
-    state.active_tab = match state.active_tab {
+    let active_tab = match state.active_tab {
         _ if state.editor_tabs.is_empty() => None,
         Some(active) if active > index => Some(active - 1),
         Some(active) => Some(active.min(state.editor_tabs.len() - 1)),
         None => Some(0),
     };
+    if let Some(index) = active_tab {
+        state.activate_tab(index);
+    } else {
+        state.active_tab = None;
+    }
     if state.pending_close.as_deref() == Some(path) {
         state.pending_close = None;
     }
@@ -2999,10 +2996,15 @@ fn finish_workspace_rename(
             state.editor_tabs.push(tab);
         }
     }
-    state.active_tab = state
+    let active_tab = state
         .editor_tabs
         .iter()
         .position(|tab| tab.path == pending.source_path);
+    if let Some(index) = active_tab {
+        state.activate_tab(index);
+    } else {
+        state.active_tab = None;
+    }
     state.last_error = None;
     state.status = format!(
         "Renamed Java symbol across {changed} file(s); save changed tabs to keep the edits"
@@ -3295,7 +3297,9 @@ fn finish_workspace_replace(
             state.editor_tabs.push(EditorTab::new(document));
         }
     }
-    state.active_tab = state.editor_tabs.len().checked_sub(1);
+    if let Some(index) = state.editor_tabs.len().checked_sub(1) {
+        state.activate_tab(index);
+    }
     state.last_error = None;
     state.search.clear_replace_preview();
     state.search.message =
@@ -3334,8 +3338,7 @@ fn editor_completed(state: &mut AppState, completion: EditorCompletion) {
                         state.editor_tabs.push(EditorTab::new(document));
                         state.editor_tabs.len() - 1
                     };
-                    state.active_tab = Some(index);
-                    state.remember_recent_file(state.editor_tabs[index].path.clone());
+                    state.activate_tab(index);
                     if let Some(position) = state.pending_navigation.remove(&requested_path) {
                         navigate_tab_to_position(&mut state.editor_tabs[index], position);
                     }
@@ -3354,6 +3357,7 @@ fn editor_completed(state: &mut AppState, completion: EditorCompletion) {
             snapshot,
             result,
         } => {
+            let renamed = saved_path != path && result.is_ok();
             if result.is_ok() {
                 state.language.did_save(path.clone());
             }
@@ -3430,6 +3434,9 @@ fn editor_completed(state: &mut AppState, completion: EditorCompletion) {
                     }
                     state.last_error = Some(error);
                 }
+            }
+            if renamed {
+                state.rename_recent_file(path, saved_path);
             }
             if let Some(directory) = refresh_directory {
                 state.enqueue(AppEvent::RefreshProjectTree(directory));
