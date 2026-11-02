@@ -405,24 +405,18 @@ fn find_range(
     if query.is_empty() {
         return None;
     }
-    let query_chars = query.chars().count();
+    let folded_query = (!case_sensitive)
+        .then(|| query.to_lowercase())
+        .unwrap_or_default();
     let mut first = None;
     let mut last = None;
     let mut before = None;
     let mut after = None;
     for (start, (byte, _)) in text.char_indices().enumerate() {
-        let Some(candidate) = text.get(byte..byte.saturating_add(query.len())) else {
+        let Some(end_byte) = match_end_at(text, byte, query, &folded_query, case_sensitive) else {
             continue;
         };
-        let matched = if case_sensitive {
-            candidate == query
-        } else {
-            candidate.eq_ignore_ascii_case(query)
-        };
-        if !matched {
-            continue;
-        }
-        let range = (start, start + query_chars);
+        let range = (start, start + text[byte..end_byte].chars().count());
         first.get_or_insert(range);
         last = Some(range);
         if range.1 <= cursor {
@@ -457,20 +451,15 @@ pub(crate) fn replace_all_text(
     let mut cursor_byte = 0;
     let mut count = 0;
     let mut first_start = None;
+    let folded_query = (!case_sensitive)
+        .then(|| query.to_lowercase())
+        .unwrap_or_default();
     for (start_char, (start_byte, _)) in text.char_indices().enumerate() {
         if start_byte < cursor_byte {
             continue;
         }
-        let Some(candidate) = text.get(start_byte..start_byte.saturating_add(query.len())) else {
-            continue;
-        };
-        let matched = if case_sensitive {
-            candidate == query
-        } else {
-            candidate.eq_ignore_ascii_case(query)
-        };
-        if matched {
-            let end_byte = start_byte + query.len();
+        if let Some(end_byte) = match_end_at(text, start_byte, query, &folded_query, case_sensitive)
+        {
             output.push_str(&text[cursor_byte..start_byte]);
             output.push_str(replacement);
             cursor_byte = end_byte;
@@ -505,13 +494,52 @@ fn char_range_matches(
     else {
         return false;
     };
-    text.get(byte_start..byte_end).is_some_and(|candidate| {
-        if case_sensitive {
-            candidate == query
-        } else {
-            candidate.eq_ignore_ascii_case(query)
+    let folded_query = (!case_sensitive)
+        .then(|| query.to_lowercase())
+        .unwrap_or_default();
+    match_end_at(text, byte_start, query, &folded_query, case_sensitive) == Some(byte_end)
+}
+
+fn match_end_at(
+    text: &str,
+    start_byte: usize,
+    query: &str,
+    folded_query: &str,
+    case_sensitive: bool,
+) -> Option<usize> {
+    let suffix = text.get(start_byte..)?;
+    if case_sensitive {
+        return suffix.strip_prefix(query).map(|_| start_byte + query.len());
+    }
+    if query.is_ascii()
+        && let Some(candidate) = suffix.get(..query.len())
+        && candidate.is_ascii()
+        && candidate.eq_ignore_ascii_case(query)
+    {
+        return Some(start_byte + query.len());
+    }
+    let mut folded = String::with_capacity(folded_query.len());
+    for (offset, character) in suffix.char_indices() {
+        folded.extend(character.to_lowercase());
+        if folded.starts_with(folded_query) {
+            return Some(start_byte + offset + character.len_utf8());
         }
-    })
+        if !folded_query.starts_with(&folded) {
+            return None;
+        }
+    }
+    None
+}
+
+pub(crate) fn contains_text(text: &str, query: &str, case_sensitive: bool) -> bool {
+    if query.is_empty() {
+        return false;
+    }
+    if case_sensitive {
+        text.contains(query)
+    } else {
+        text.to_lowercase().contains(&query.to_lowercase())
+    }
 }
 
 fn replace_char_range(text: &mut String, start: usize, end: usize, replacement: &str) {
@@ -526,4 +554,25 @@ fn replace_char_range(text: &mut String, start: usize, end: usize, replacement: 
         .map(|(byte, _)| byte)
         .unwrap_or(text.len());
     text.replace_range(byte_start..byte_end, replacement);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{find_range, replace_all_text};
+
+    #[test]
+    fn case_insensitive_search_and_replace_handle_unicode_case_mappings() {
+        assert_eq!(
+            find_range("Äpfel", "ä", false, 0, false),
+            Some((0, 1, false))
+        );
+        assert_eq!(
+            replace_all_text("Äpfel", "ä", "A", false),
+            ("Apfel".into(), 1, Some(0))
+        );
+        assert_eq!(
+            replace_all_text("İstanbul", "i", "x", false),
+            ("xstanbul".into(), 1, Some(0))
+        );
+    }
 }

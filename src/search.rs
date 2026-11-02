@@ -297,11 +297,6 @@ fn search(
         builder.add(Glob::new(glob).map_err(|error| format!("Invalid file glob: {error}"))?);
     }
     let globs = builder.build().map_err(|error| error.to_string())?;
-    let needle = if query.case_sensitive {
-        query.text.clone()
-    } else {
-        query.text.to_lowercase()
-    };
     let mut results = SearchResults::default();
     let mut walker = ignore::WalkBuilder::new(root);
     walker
@@ -353,11 +348,8 @@ fn search(
             if cancelled() {
                 return Ok(results);
             }
-            let matched = if query.case_sensitive {
-                line.contains(&needle)
-            } else {
-                line.to_lowercase().contains(&needle)
-            };
+            let matched =
+                crate::editor::find_replace::contains_text(line, &query.text, query.case_sensitive);
             if matched {
                 results.matches.push(SearchMatch {
                     path: entry.path().to_owned(),
