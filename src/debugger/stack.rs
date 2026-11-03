@@ -314,6 +314,7 @@ pub struct DebugInspector {
     pub error: Option<String>,
     pub console: Vec<(String, Result<Evaluation, String>)>,
     pub expression: String,
+    pub focus_expression_requested: bool,
     pub navigation: Option<(PathBuf, usize)>,
     pub control_pending: bool,
     control_epoch: Option<u64>,

@@ -307,7 +307,7 @@ impl QuickOpen {
         chosen
     }
 
-    fn update_matches(&mut self, query: &str) {
+    pub fn update_matches(&mut self, query: &str) {
         if self.last_query == query {
             return;
         }
@@ -353,6 +353,16 @@ impl QuickOpen {
             Ok(worker) => self.workers.push(worker),
             Err(error) => self.error = Some(format!("Cannot start file search: {error}")),
         }
+    }
+
+    pub fn first_match_path(&self, query: &str) -> Option<&Path> {
+        if self.last_query != query {
+            return None;
+        }
+        self.matches
+            .first()
+            .and_then(|(index, _)| self.files.get(*index))
+            .map(|entry| entry.path.as_path())
     }
 }
 

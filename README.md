@@ -36,6 +36,7 @@ The command-line link accepts the same optional project or file path: `dist/inte
 | Action | Shortcut |
 | --- | --- |
 | Open project / file | File → Open Project… / Open File… |
+| Show Project sidebar and navigate its tree | `⌘1`, then `↑` / `↓`, `←` / `→`, `Enter` |
 | Go to class | `⌘O` |
 | Go to file | `⇧⌘O` |
 | Search Everywhere | `Double Shift`; also Navigate → Search Everywhere… |
@@ -45,8 +46,12 @@ The command-line link accepts the same optional project or file path: `dist/inte
 | Find / replace in file | `⌘F` / `⌘R` |
 | Next / previous match in file | `⌘G` / `⌘⇧G` |
 | Find in project | `⇧⌘F` |
-| Go to line | `⌘L` |
+| Go to line or line and column | `⌘L` or click the current line/column in the status bar; enter `line` or `line:column` |
+| Next / previous Java or build problem | `F2` / `⇧F2` |
+| Open Problems tool window | `⌘6` |
 | Navigate back / forward | `⌘[` / `⌘]` (`Ctrl+Alt+←` / `Ctrl+Alt+→` aliases) |
+| Last edit location | `⇧⌘⌫` |
+| Toggle line bookmark / show bookmarks | `F3` / `⌘F3` |
 | Jump to last tool window / hide all tool windows | `F12` / `⌘⇧F12` |
 | Reformat Java file | `⌥⌘L` |
 | Organize Java imports | `⌃⌥O` |
@@ -63,14 +68,26 @@ The command-line link accepts the same optional project or file path: `dist/inte
 | Go to implementation | `⌥⌘B` |
 | Toggle line breakpoint | `⌘F8` |
 | View breakpoints | `⌘⇧F8` |
-| Run / debug selected configuration | `⌃R` / `⌃D` |
+| Run current test method/class (otherwise selected configuration) / debug selected configuration | `⌃R` / `⌃D` |
+| Debug: continue / step into / over / out | `⌘⌥R` / `F7` / `F8` / `⇧F8` |
+| Evaluate debugger expression | `⌥F8` |
 | Save / save all | `⌘S` / `⇧⌘S` |
+
+With the Project sidebar focused, use `↑` / `↓` to move through visible entries,
+`←` / `→` to collapse or expand folders, `Enter` to open files, or type a name
+prefix to search project files and reveal the best match in the tree. Backspace
+edits the query; Escape clears it.
 
 ## Project scope
 
-The Run Console accepts line input for interactive Java processes. The Build panel summarizes Maven Surefire and Gradle test totals and lists failures from fresh Surefire, Failsafe, and Gradle XML reports; select a failure to open its conventional Java test source and stack-trace line when available, or use **Run class** to rerun that class. The **Problems** tool window combines available Java language-server diagnostics with the latest build diagnostics; selecting a result opens its source location.
+The Run Console accepts line input for interactive Java processes. The Build panel summarizes Maven Surefire and Gradle test totals and lists failures from fresh Surefire, Failsafe, and Gradle XML reports; select a failure to open its conventional Java test source and stack-trace line when available, or use **Run class**/**Run method** to rerun it. Method reruns use Maven Surefire/Failsafe selectors or Gradle test filters and are shown for plain Java method names; Maven method filtering depends on the configured test provider. The **Problems** tool window combines available Java language-server diagnostics with the latest build diagnostics; selecting a result opens its source location.
 
 The first release targets macOS and Java projects using Maven or Gradle. Use **File → New Java Project…** to create a minimal Maven or Gradle starter locally; it creates no wrapper and downloads no tools. The starter includes a run configuration for `Main`; select an installed JDK before launching. **Run** builds the project first and asks before saving open project files with unsaved changes; a failed build does not launch the program. Start, stop, or manage configurations from the **Run** menu. Use a project-tree directory's context menu to create a Java class; an optional package name creates matching subdirectories beneath the selected directory. Set Java indentation to 1–8 spaces or tabs in **Settings**; the editor and Java formatter use the same preference. Parent, root, and nested `.editorconfig` files override these choices by file pattern up to the nearest `root=true`. Files up to 16 MiB are editable; files above 256 KiB use a bounded page editor that keeps the complete document available for save and find/replace. **Find in Project** also supports preview-first replacement: review and select matching files before applying edits to editor buffers, then save those files to keep the changes. Run configurations can select a Maven/Gradle module or detect one from the main class; the JPMS module name remains a separate launch option. The app also includes an integrated terminal, local Git operations, and a Java debugger. Java language services depend on installed or packaged JDT LS and Java Debug Server tooling; editing and builds remain available if optional Java tooling is unavailable.
+
+With a Java test open under a module's conventional `src/test/java` directory, use **Run → Run Current Test Class** or choose **Run Current Test Class** from the editor gutter menu. Place the caret on a directly annotated JUnit/TestNG test method or a JUnit 3 `test…` method to run it through the project's Maven or Gradle test task; the same method action is available from its declaration line in the gutter.
+
+Use **Navigate → Show Bookmarks** (`⌘F3`) to revisit or remove project line bookmarks; **F3** toggles a bookmark at the caret. Bookmarks are saved with Intelli-gen settings.
+Bookmarks below an inserted or removed line move with the edit; replacing a selection across multiple lines may require repositioning affected bookmarks.
 
 **Navigate → Test / production source** (`⌘⇧T`) switches between matching files in the conventional `src/main/java` and `src/test/java` trees when the counterpart exists.
 
@@ -86,6 +103,20 @@ completed inventory substep is Evidence
 `ev_c50e47dfca8462105506064cad1c8225b59d23e7a38e664582da97305281ddc6`.
 Its `product-info.json` declares 86 modules and 164 bundled plugins. This is
 package-structure evidence only; no runtime behavior is inferred from it.
+
+REA also inventoried the installed `intellij.platform.projectView.jar`
+(Evidence `ev_bbbbad1a5f12027ca29087b9d874e62ee05ac0d9a5155933b753e4f85572531c`,
+SHA-256 `3228a8dbe1db28ff8dce684d38ceaa9e66109cde0f8348b30ea3d2d353d5937e`).
+This confirms the Project View module is shipped. JetBrains documents arrow-key
+navigation for its tree views in the [Project tool window guide](https://www.jetbrains.com/help/idea/project-tool-window.html);
+the package inventory itself does not establish that runtime behavior.
+
+REA inventoried IntelliJ's `intellij.java.execution.jar` (Evidence
+`ev_c97068a5ea5c5d058757347c42db60745655b13349168fc2c8ffe52ec8555393`,
+SHA-256 `333c8562d13b4243703d8a972a679c7f11046402b3279a636572c4bde6f38560`).
+This confirms the Java execution module is shipped. JetBrains documents running
+Java tests from editor gutters in [Performing tests](https://www.jetbrains.com/help/idea/performing-tests.html);
+the package inventory itself does not establish that runtime behavior.
 
 The focused Java logpoint and Gradle module observations below were first
 recorded on build `IU-263.7307.44`. The current installed logpoint JAR has the
@@ -112,6 +143,13 @@ with SHA-256 `b9c8e1b2186d302bca9b0b7fe7b7070c2b18a7521d39e4a2f1d48968ef7ecce8`.
 Gradle extraction evidence
 `ev_4a4a5832b6e2241e69b3c07c4bf7de1892c285fb86ddb7f03b65f45220ec4aef`
 records verified containment and no integrity contradictions.
+
+REA inventory of IntelliJ's `intellij.java.bookmarks.jar` is evidence
+`ev_3b2f91dfc3a8a903954ccfb3cdd1b4e881efb70bdd0064ed07938d1913cc14ed`
+(SHA-256 `b8b1131204022062a9ef5ae1a1212c9cc221b848902838c6b95f0937f590ff1f`).
+This confirms the shipped bookmark module only; the bookmark shortcuts and
+workflow are corroborated by the official [macOS keymap](https://www.jetbrains.com/help/idea/reference-keymap-mac-default.html)
+and [bookmark guide](https://www.jetbrains.com/guide/java/tutorials/presenting/bookmarks/).
 
 The extracted `META-INF/plugin.xml` registers `Gradle.ExecuteTask`,
 `Gradle.ToggleOfflineAction`, and `Gradle.RefreshDependencies`, including toolbar

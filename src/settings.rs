@@ -34,6 +34,7 @@ pub struct UserSettings {
     /// Explicit external java-debug plugin JAR. No component is downloaded.
     pub java_debug_bundle: Option<PathBuf>,
     pub project_jdks: Vec<ProjectJdkSettings>,
+    pub project_bookmarks: Vec<ProjectBookmarks>,
     /// Used only when a project has no wrapper; values are executable paths, never shell commands.
     pub maven_executable: Option<PathBuf>,
     pub gradle_executable: Option<PathBuf>,
@@ -50,6 +51,19 @@ pub struct ProjectJdkSettings {
     pub selection: ProjectJdkSelection,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ProjectBookmarks {
+    pub root: PathBuf,
+    pub entries: Vec<LineBookmark>,
+}
+
+// shortcut: maps selected lines proportionally; use diff anchors for exact content tracking.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LineBookmark {
+    pub path: PathBuf,
+    pub line: u32,
+}
+
 impl Default for UserSettings {
     fn default() -> Self {
         Self {
@@ -64,6 +78,7 @@ impl Default for UserSettings {
             jdt_ls_executable: None,
             java_debug_bundle: None,
             project_jdks: Vec::new(),
+            project_bookmarks: Vec::new(),
             maven_executable: None,
             gradle_executable: None,
             gradle_offline: false,
@@ -152,6 +167,97 @@ impl UserSettings {
                 selection: ProjectJdkSelection { default_jdk_id },
             });
         }
+    }
+
+    pub fn project_bookmarks(&self, root: &std::path::Path) -> &[LineBookmark] {
+        self.project_bookmarks
+            .iter()
+            .find(|project| project.root == root)
+            .map_or(&[], |project| project.entries.as_slice())
+    }
+
+    pub fn toggle_line_bookmark(&mut self, root: PathBuf, path: PathBuf, line: u32) -> bool {
+        let index = self
+            .project_bookmarks
+            .iter()
+            .position(|project| project.root == root);
+        let bookmark = LineBookmark { path, line };
+        if let Some(index) = index {
+            let project = &mut self.project_bookmarks[index];
+            if let Some(existing) = project.entries.iter().position(|entry| entry == &bookmark) {
+                project.entries.remove(existing);
+                if project.entries.is_empty() {
+                    self.project_bookmarks.remove(index);
+                }
+                return false;
+            }
+            project.entries.push(bookmark);
+        } else {
+            self.project_bookmarks.push(ProjectBookmarks {
+                root,
+                entries: vec![bookmark],
+            });
+        }
+        true
+    }
+
+    pub fn rename_bookmark_path(&mut self, old: &std::path::Path, new: PathBuf) {
+        for bookmark in self
+            .project_bookmarks
+            .iter_mut()
+            .flat_map(|project| &mut project.entries)
+        {
+            if bookmark.path == old {
+                bookmark.path.clone_from(&new);
+            }
+        }
+    }
+
+    pub fn remap_bookmarks_after_edit(
+        &mut self,
+        root: &std::path::Path,
+        path: &std::path::Path,
+        start_line: u32,
+        end_line: u32,
+        delta: i64,
+        shift_start: bool,
+    ) -> bool {
+        if delta == 0 {
+            return false;
+        }
+        let Some(project) = self
+            .project_bookmarks
+            .iter_mut()
+            .find(|project| project.root == root)
+        else {
+            return false;
+        };
+        let mut changed = false;
+        let replaced_lines = i64::from(end_line.saturating_sub(start_line)) + 1;
+        let new_lines = (replaced_lines + delta).max(1);
+        for bookmark in &mut project.entries {
+            if bookmark.path != path {
+                continue;
+            }
+            let line = i64::from(bookmark.line);
+            if line > i64::from(end_line) {
+                bookmark.line = (line + delta).clamp(1, i64::from(u32::MAX)) as u32;
+                changed |= delta != 0;
+            } else if line >= i64::from(start_line) && (start_line != end_line || shift_start) {
+                let relative = line - i64::from(start_line);
+                let mapped = (i64::from(start_line) + relative.min(new_lines - 1))
+                    .clamp(1, i64::from(u32::MAX)) as u32;
+                changed |= mapped != bookmark.line;
+                bookmark.line = mapped;
+            }
+        }
+        if changed {
+            project
+                .entries
+                .sort_by(|left, right| left.path.cmp(&right.path).then(left.line.cmp(&right.line)));
+            project.entries.dedup();
+        }
+        changed
     }
 
     /// An explicit missing/invalid override is an error, never a silent fallback.

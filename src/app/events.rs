@@ -34,6 +34,17 @@ pub enum AppEvent {
     OpenFileAtPosition(PathBuf, crate::java::lsp::Position),
     NavigateBack,
     NavigateForward,
+    NavigateLastEditLocation,
+    ShowProjectPanel,
+    ToggleBookmarkAtCaret,
+    ShowBookmarks,
+    RemoveBookmark {
+        path: PathBuf,
+        line: u32,
+    },
+    NavigateProblem {
+        next: bool,
+    },
     ToggleTestSource,
     ToggleBreakpointAtCaret,
     NextEditorTab,
@@ -47,6 +58,8 @@ pub enum AppEvent {
     SearchEverywhereOpen(super::search_everywhere::SearchTab),
     FileStructureOpen,
     GoToLineOpen,
+    GoToLine(usize, usize),
+    RunContext,
     SearchWorkspaceSymbols(String),
     Find(crate::editor::find_replace::FindAction),
     Search(SearchAction),
@@ -73,6 +86,7 @@ pub enum AppEvent {
     RestartLanguage,
     ShowPanel(ActivePanel),
     ShowBreakpoints,
+    EvaluateExpressionOpen,
     SettingsChanged,
     SettingsSaved {
         generation: u64,
@@ -116,6 +130,7 @@ pub enum BuildAction {
     Test,
     RunTest {
         class_name: String,
+        method_name: Option<String>,
         module_root: PathBuf,
         test_task: String,
         integration: bool,

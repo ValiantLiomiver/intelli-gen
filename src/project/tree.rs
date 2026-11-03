@@ -14,6 +14,13 @@ static NEXT_TREE_REQUEST: AtomicU64 = AtomicU64::new(1);
 pub struct ProjectTree {
     pub root: PathBuf,
     entries: Vec<TreeEntry>,
+    focused_path: Option<PathBuf>,
+    focus_pending: bool,
+    tree_focused: bool,
+    typeahead_query: String,
+    typeahead_at: Option<Instant>,
+    typeahead_visible_match: bool,
+    reveal_path: Option<PathBuf>,
     root_error: Option<String>,
     root_loading_request: Option<u64>,
     root_validation_request: Option<u64>,
@@ -59,6 +66,13 @@ impl ProjectTree {
         Ok(Self {
             entries: read_visible_entries(&root, &root)?,
             root,
+            focused_path: None,
+            focus_pending: false,
+            tree_focused: false,
+            typeahead_query: String::new(),
+            typeahead_at: None,
+            typeahead_visible_match: false,
+            reveal_path: None,
             root_error: None,
             root_loading_request: None,
             root_validation_request: None,
@@ -203,7 +217,16 @@ impl ProjectTree {
             .collect()
     }
 
-    pub fn render(&mut self, ui: &mut egui::Ui) -> Vec<TreeAction> {
+    pub fn typeahead_query(&self) -> Option<&str> {
+        (self.tree_focused && !self.typeahead_query.is_empty()).then_some(&self.typeahead_query)
+    }
+
+    pub fn render(
+        &mut self,
+        ui: &mut egui::Ui,
+        focus_requested: &mut bool,
+        search_result: Option<(&str, &Path)>,
+    ) -> Vec<TreeAction> {
         let mut actions = Vec::new();
         if Instant::now() >= self.next_root_validation && self.root_validation_request.is_none() {
             let request = NEXT_TREE_REQUEST.fetch_add(1, Ordering::Relaxed);
@@ -214,13 +237,248 @@ impl ProjectTree {
             ui.weak(crate::i18n::ui_text(ui, "Empty directory"));
         }
         if let Some(error) = &self.root_error {
+            self.tree_focused = false;
             ui.colored_label(
                 ui.visuals().error_fg_color,
                 crate::i18n::message(ui.ctx(), error),
             );
             return actions;
         }
-        render_entries(ui, &self.root, &mut self.entries, &mut actions);
+        if *focus_requested
+            && let Some(first) = self
+                .entries
+                .iter()
+                .find(|entry| entry.directory || entry.error.is_none())
+        {
+            self.focused_path = Some(first.path.clone());
+            self.focus_pending = true;
+            *focus_requested = false;
+        }
+        let mut visible = Vec::new();
+        let mut has_focus = false;
+        render_entries(
+            ui,
+            &self.root,
+            &mut self.entries,
+            &mut actions,
+            &mut self.focused_path,
+            &mut self.focus_pending,
+            &mut visible,
+            &mut has_focus,
+        );
+        if let Some((query, path)) = search_result
+            && query == self.typeahead_query
+            && !self.typeahead_visible_match
+            && path.starts_with(&self.root)
+        {
+            self.reveal_path = Some(path.to_path_buf());
+        }
+        if let Some(target) = self.reveal_path.clone() {
+            if visible.iter().any(|entry| entry.path == target) {
+                if self.focused_path.as_ref() != Some(&target) {
+                    self.focused_path = Some(target);
+                    self.focus_pending = true;
+                    ui.ctx().request_repaint();
+                }
+                self.reveal_path = None;
+            } else if let Some(id) = visible.iter().find_map(|entry| {
+                let id = entry.collapsing_id?;
+                if !target.starts_with(&entry.path) || target == entry.path {
+                    return None;
+                }
+                let state = egui::collapsing_header::CollapsingState::load_with_default_open(
+                    ui.ctx(),
+                    id,
+                    false,
+                );
+                (!state.is_open()).then_some(id)
+            }) {
+                let mut state = egui::collapsing_header::CollapsingState::load_with_default_open(
+                    ui.ctx(),
+                    id,
+                    false,
+                );
+                state.set_open(true);
+                state.store(ui.ctx());
+                ui.ctx().request_repaint();
+            }
+        }
+        if self
+            .focused_path
+            .as_ref()
+            .is_some_and(|path| !visible.iter().any(|entry| &entry.path == path))
+        {
+            self.focused_path = self
+                .focused_path
+                .as_ref()
+                .and_then(|path| {
+                    path.ancestors()
+                        .find(|ancestor| visible.iter().any(|entry| &entry.path == *ancestor))
+                        .map(Path::to_path_buf)
+                })
+                .or_else(|| visible.first().map(|entry| entry.path.clone()));
+            self.focus_pending = self.focused_path.is_some();
+            ui.ctx().request_repaint();
+        }
+        if has_focus {
+            let index = self
+                .focused_path
+                .as_ref()
+                .and_then(|path| visible.iter().position(|entry| &entry.path == path));
+            let typed = ui.input(|input| {
+                if input.modifiers.command || input.modifiers.ctrl || input.modifiers.alt {
+                    return String::new();
+                }
+                input
+                    .events
+                    .iter()
+                    .filter_map(|event| match event {
+                        egui::Event::Text(text) => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<String>()
+            });
+            let continuing = self
+                .typeahead_at
+                .is_some_and(|last| last.elapsed() <= Duration::from_secs(1));
+            let backspace = ui.input_mut(|input| {
+                !self.typeahead_query.is_empty()
+                    && input.consume_key(egui::Modifiers::NONE, egui::Key::Backspace)
+            });
+            let escape = ui.input_mut(|input| {
+                !self.typeahead_query.is_empty()
+                    && input.consume_key(egui::Modifiers::NONE, egui::Key::Escape)
+            });
+            let mut search_changed = false;
+            if escape {
+                self.typeahead_query.clear();
+                self.typeahead_at = None;
+                self.typeahead_visible_match = false;
+                self.reveal_path = None;
+            } else {
+                if backspace {
+                    search_changed = self.typeahead_query.pop().is_some();
+                }
+                if !typed.is_empty() {
+                    if !continuing {
+                        self.typeahead_query.clear();
+                    }
+                    self.typeahead_query.push_str(&typed);
+                    search_changed = true;
+                }
+            }
+            if search_changed {
+                // shortcut: reuses the 100,000-file Quick Open index; raise its cap for larger workspaces.
+                self.typeahead_at = (!self.typeahead_query.is_empty()).then(Instant::now);
+                self.reveal_path = None;
+                let query = self.typeahead_query.to_lowercase();
+                if !query.is_empty() && !visible.is_empty() {
+                    let start = if backspace || continuing {
+                        index.unwrap_or(0)
+                    } else {
+                        index.map_or(0, |index| (index + 1) % visible.len())
+                    };
+                    let next = (0..visible.len())
+                        .map(|offset| (start + offset) % visible.len())
+                        .find(|index| visible[*index].name.to_lowercase().starts_with(&query));
+                    self.typeahead_visible_match = next.is_some();
+                    if let Some(next) = next {
+                        self.focused_path = Some(visible[next].path.clone());
+                        self.focus_pending = true;
+                        ui.ctx().request_repaint();
+                    }
+                } else {
+                    self.typeahead_visible_match = false;
+                }
+            }
+            let move_to = if ui
+                .input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown))
+            {
+                index.map(|index| (index + 1).min(visible.len().saturating_sub(1)))
+            } else if ui
+                .input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp))
+            {
+                index.map(|index| index.saturating_sub(1))
+            } else {
+                None
+            };
+            if let Some(next) = move_to
+                && let Some(entry) = visible.get(next)
+            {
+                self.focused_path = Some(entry.path.clone());
+                self.focus_pending = true;
+                ui.ctx().request_repaint();
+            } else if ui
+                .input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Enter))
+                && let Some(entry) = index.and_then(|index| visible.get(index))
+            {
+                if let Some(id) = entry.collapsing_id {
+                    let mut state =
+                        egui::collapsing_header::CollapsingState::load_with_default_open(
+                            ui.ctx(),
+                            id,
+                            false,
+                        );
+                    state.set_open(!state.is_open());
+                    state.store(ui.ctx());
+                    ui.ctx().request_repaint();
+                } else {
+                    actions.push(TreeAction::OpenFile(entry.path.clone()));
+                }
+            } else if ui
+                .input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowRight))
+                && let Some(entry) = index.and_then(|index| visible.get(index))
+                && let Some(id) = entry.collapsing_id
+            {
+                let mut state = egui::collapsing_header::CollapsingState::load_with_default_open(
+                    ui.ctx(),
+                    id,
+                    false,
+                );
+                if state.is_open() {
+                    if let Some(child) = visible.get(index.unwrap_or_default() + 1)
+                        && child.path.starts_with(&entry.path)
+                    {
+                        self.focused_path = Some(child.path.clone());
+                        self.focus_pending = true;
+                    }
+                } else {
+                    state.set_open(true);
+                }
+                state.store(ui.ctx());
+                ui.ctx().request_repaint();
+            } else if ui
+                .input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowLeft))
+                && let Some(entry) = index.and_then(|index| visible.get(index))
+            {
+                if let Some(id) = entry.collapsing_id {
+                    let mut state =
+                        egui::collapsing_header::CollapsingState::load_with_default_open(
+                            ui.ctx(),
+                            id,
+                            false,
+                        );
+                    if state.is_open() {
+                        state.set_open(false);
+                        state.store(ui.ctx());
+                        ui.ctx().request_repaint();
+                    } else if let Some(parent) = entry.path.parent()
+                        && visible.iter().any(|item| item.path == parent)
+                    {
+                        self.focused_path = Some(parent.to_path_buf());
+                        self.focus_pending = true;
+                        ui.ctx().request_repaint();
+                    }
+                } else if let Some(parent) = entry.path.parent()
+                    && visible.iter().any(|item| item.path == parent)
+                {
+                    self.focused_path = Some(parent.to_path_buf());
+                    self.focus_pending = true;
+                    ui.ctx().request_repaint();
+                }
+            }
+        }
+        self.tree_focused = has_focus;
         actions
     }
 }
@@ -465,43 +723,84 @@ fn render_entries(
     workspace: &Path,
     entries: &mut [TreeEntry],
     actions: &mut Vec<TreeAction>,
+    focused_path: &mut Option<PathBuf>,
+    focus_pending: &mut bool,
+    visible: &mut Vec<VisibleProjectEntry>,
+    has_focus: &mut bool,
 ) {
     for entry in entries {
+        if entry.directory || entry.error.is_none() {
+            visible.push(VisibleProjectEntry {
+                path: entry.path.clone(),
+                name: entry.name.clone(),
+                collapsing_id: entry.directory.then(|| ui.make_persistent_id(&entry.path)),
+            });
+        }
         if entry.directory {
-            let response = egui::CollapsingHeader::new(&entry.name)
-                .id_salt(&entry.path)
-                .show(ui, |ui| {
-                    if entry.children.is_none()
-                        && entry.error.is_none()
-                        && entry.loading_request.is_none()
-                    {
-                        let request = NEXT_TREE_REQUEST.fetch_add(1, Ordering::Relaxed);
-                        entry.loading_request = Some(request);
-                        actions.push(TreeAction::LoadChildren {
-                            path: entry.path.clone(),
-                            request,
-                        });
+            let id = ui.make_persistent_id(&entry.path);
+            let header = egui::collapsing_header::CollapsingState::load_with_default_open(
+                ui.ctx(),
+                id,
+                false,
+            )
+            .show_header(ui, |ui| {
+                ui.selectable_label(focused_path.as_ref() == Some(&entry.path), &entry.name)
+            });
+            let (toggle_response, header_response, _) = header.body(|ui| {
+                if entry.children.is_none()
+                    && entry.error.is_none()
+                    && entry.loading_request.is_none()
+                {
+                    let request = NEXT_TREE_REQUEST.fetch_add(1, Ordering::Relaxed);
+                    entry.loading_request = Some(request);
+                    actions.push(TreeAction::LoadChildren {
+                        path: entry.path.clone(),
+                        request,
+                    });
+                }
+                if let Some(error) = &entry.error {
+                    ui.colored_label(
+                        ui.visuals().error_fg_color,
+                        crate::i18n::message(ui.ctx(), error),
+                    );
+                }
+                if entry.loading_request.is_some() {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label(crate::i18n::ui_text(ui, "Loading…"));
+                    });
+                }
+                if let Some(children) = &mut entry.children {
+                    if children.is_empty() {
+                        ui.weak(crate::i18n::ui_text(ui, "Empty directory"));
                     }
-                    if let Some(error) = &entry.error {
-                        ui.colored_label(
-                            ui.visuals().error_fg_color,
-                            crate::i18n::message(ui.ctx(), error),
-                        );
-                    }
-                    if entry.loading_request.is_some() {
-                        ui.horizontal(|ui| {
-                            ui.spinner();
-                            ui.label(crate::i18n::ui_text(ui, "Loading…"));
-                        });
-                    }
-                    if let Some(children) = &mut entry.children {
-                        if children.is_empty() {
-                            ui.weak(crate::i18n::ui_text(ui, "Empty directory"));
-                        }
-                        render_entries(ui, workspace, children, actions);
-                    }
-                });
-            response.header_response.context_menu(|ui| {
+                    render_entries(
+                        ui,
+                        workspace,
+                        children,
+                        actions,
+                        focused_path,
+                        focus_pending,
+                        visible,
+                        has_focus,
+                    );
+                }
+            });
+            if toggle_response.clicked() {
+                *focused_path = Some(entry.path.clone());
+                *focus_pending = true;
+            }
+            if focused_path.as_ref() == Some(&entry.path) && *focus_pending {
+                header_response.inner.request_focus();
+                *focus_pending = false;
+            }
+            if header_response.inner.has_focus() {
+                *has_focus = true;
+            }
+            if header_response.inner.clicked() {
+                *focused_path = Some(entry.path.clone());
+            }
+            header_response.response.context_menu(|ui| {
                 context_menu(ui, &entry.path, true, entry.symlink, actions);
             });
         } else if let Some(error) = &entry.error {
@@ -518,13 +817,27 @@ fn render_entries(
                 entry.name.clone()
             };
             let response = ui
-                .selectable_label(false, label)
+                .selectable_label(focused_path.as_ref() == Some(&entry.path), label)
                 .on_hover_text(entry.path.display().to_string());
+            if focused_path.as_ref() == Some(&entry.path) && *focus_pending {
+                response.request_focus();
+                *focus_pending = false;
+            }
+            if response.has_focus() {
+                *has_focus = true;
+            }
             if response.clicked() {
+                *focused_path = Some(entry.path.clone());
                 actions.push(TreeAction::OpenFile(entry.path.clone()));
             }
             response
                 .context_menu(|ui| context_menu(ui, &entry.path, false, entry.symlink, actions));
         }
     }
+}
+
+struct VisibleProjectEntry {
+    path: PathBuf,
+    name: String,
+    collapsing_id: Option<egui::Id>,
 }

@@ -25,6 +25,15 @@ struct Problem {
     origin: ProblemOrigin,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ProblemCursor {
+    path: PathBuf,
+    line: u32,
+    column: u32,
+    source: &'static str,
+    message: String,
+}
+
 fn sort_key(problem: &Problem) -> (u8, Option<&PathBuf>, u32, u32, &str) {
     (
         problem.rank,
@@ -35,7 +44,25 @@ fn sort_key(problem: &Problem) -> (u8, Option<&PathBuf>, u32, u32, &str) {
     )
 }
 
-pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
+fn navigation_sort_key(problem: &Problem) -> (&PathBuf, u32, u32, &str, &str) {
+    (
+        problem.path.as_ref().expect("navigable problem path"),
+        problem.line,
+        problem.column,
+        problem.source,
+        &problem.message,
+    )
+}
+
+fn location_key(problem: &Problem) -> (&PathBuf, u32, u32) {
+    (
+        problem.path.as_ref().expect("navigable problem path"),
+        problem.line,
+        problem.column,
+    )
+}
+
+fn collect_problems(state: &AppState) -> Vec<Problem> {
     let mut problems = Vec::new();
     for (path, diagnostics) in &state.language.diagnostics {
         for diagnostic in diagnostics
@@ -85,6 +112,96 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
             origin: ProblemOrigin::Build,
         });
     }
+    problems
+}
+
+pub fn navigate(state: &mut AppState, next: bool) {
+    let mut problems = collect_problems(state);
+    problems.retain(|problem| problem.path.is_some());
+    problems.sort_by(|left, right| navigation_sort_key(left).cmp(&navigation_sort_key(right)));
+    problems.dedup_by(|left, right| navigation_sort_key(left) == navigation_sort_key(right));
+    if problems.is_empty() {
+        state.problem_navigation = None;
+        state.status = "No navigable problems reported.".into();
+        return;
+    }
+
+    let current = state
+        .active_tab
+        .and_then(|index| state.editor_tabs.get(index))
+        .map(|tab| {
+            let position = tab.document.lsp_position();
+            (
+                tab.path.clone(),
+                position.line.saturating_add(1),
+                position.character.saturating_add(1),
+            )
+        });
+    let selected = state.problem_navigation.as_ref().filter(|selected| {
+        current.as_ref().is_some_and(|(path, line, column)| {
+            path == &selected.path && *line == selected.line && *column == selected.column
+        })
+    });
+    let anchor = selected.and_then(|selected| {
+        problems.iter().position(|problem| {
+            problem.path.as_ref() == Some(&selected.path)
+                && problem.line == selected.line
+                && problem.column == selected.column
+                && problem.source == selected.source
+                && problem.message == selected.message
+        })
+    });
+    let target = anchor.map_or_else(
+        || {
+            let current = current.as_ref();
+            if next {
+                current
+                    .and_then(|current| {
+                        problems.iter().position(|problem| {
+                            location_key(problem) >= (&current.0, current.1, current.2)
+                        })
+                    })
+                    .unwrap_or(0)
+            } else {
+                current
+                    .and_then(|current| {
+                        problems.iter().rposition(|problem| {
+                            location_key(problem) < (&current.0, current.1, current.2)
+                        })
+                    })
+                    .unwrap_or(problems.len() - 1)
+            }
+        },
+        |index| {
+            if next {
+                (index + 1) % problems.len()
+            } else {
+                (index + problems.len() - 1) % problems.len()
+            }
+        },
+    );
+    let problem = &problems[target];
+    let path = problem
+        .path
+        .as_ref()
+        .expect("navigable problem path")
+        .clone();
+    state.problem_navigation = Some(ProblemCursor {
+        path: path.clone(),
+        line: problem.line,
+        column: problem.column,
+        source: problem.source,
+        message: problem.message.clone(),
+    });
+    let event = match problem.origin {
+        ProblemOrigin::Java(position) => AppEvent::OpenFileAtPosition(path, position),
+        ProblemOrigin::Build => AppEvent::OpenFileAtLine(path, problem.line as usize),
+    };
+    state.enqueue(event);
+}
+
+pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
+    let mut problems = collect_problems(state);
     problems.sort_by(|left, right| sort_key(left).cmp(&sort_key(right)));
 
     let errors = problems.iter().filter(|problem| problem.rank == 0).count();
