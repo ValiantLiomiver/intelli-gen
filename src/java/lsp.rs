@@ -167,6 +167,7 @@ pub fn document_test_methods(
         .collect()
 }
 
+// shortcut: recognizes direct JUnit/TestNG annotations and JUnit 3 naming; resolve composed annotations when framework metadata is available.
 fn is_java_test_method_lines(
     lines: &[&str],
     junit3_test_class: bool,
