@@ -242,19 +242,37 @@ pub(crate) fn is_java_test_method(source: &str, method_line: u32, method_name: &
     if lines.get(end).is_some_and(|line| is_test_annotation(line)) {
         return true;
     }
-    for line in lines.iter().take(end).rev().take(16) {
+    let mut inside_block_comment = false;
+    for line in lines.iter().take(end).rev().take(32) {
         let line = line.trim();
-        if line.is_empty()
-            || line.starts_with("//")
-            || line.starts_with("/*")
-            || line.starts_with('*')
+        if inside_block_comment {
+            if line.contains("/*") {
+                inside_block_comment = false;
+            }
+            continue;
+        }
+        if let Some((before_comment, comment)) = line.split_once("/*")
+            && let Some((_, after_comment)) = comment.split_once("*/")
         {
+            if is_test_annotation(before_comment.trim()) || is_test_annotation(after_comment.trim())
+            {
+                return true;
+            }
+            continue;
+        }
+        if line.contains("*/") {
+            inside_block_comment = true;
+            continue;
+        }
+        if line.is_empty() || line.starts_with("//") {
             continue;
         }
         if line.starts_with('@') {
             if is_test_annotation(line) {
                 return true;
             }
+        } else if line.starts_with("/*") {
+            inside_block_comment = true;
         } else {
             break;
         }
