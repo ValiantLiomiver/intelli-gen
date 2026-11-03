@@ -34,6 +34,7 @@ pub struct UserSettings {
     /// Explicit external java-debug plugin JAR. No component is downloaded.
     pub java_debug_bundle: Option<PathBuf>,
     pub project_jdks: Vec<ProjectJdkSettings>,
+    pub project_bookmarks: Vec<ProjectBookmarks>,
     /// Used only when a project has no wrapper; values are executable paths, never shell commands.
     pub maven_executable: Option<PathBuf>,
     pub gradle_executable: Option<PathBuf>,
@@ -50,6 +51,19 @@ pub struct ProjectJdkSettings {
     pub selection: ProjectJdkSelection,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ProjectBookmarks {
+    pub root: PathBuf,
+    pub entries: Vec<LineBookmark>,
+}
+
+// shortcut: line based; map edits to content if bookmark drift matters.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LineBookmark {
+    pub path: PathBuf,
+    pub line: u32,
+}
+
 impl Default for UserSettings {
     fn default() -> Self {
         Self {
@@ -64,6 +78,7 @@ impl Default for UserSettings {
             jdt_ls_executable: None,
             java_debug_bundle: None,
             project_jdks: Vec::new(),
+            project_bookmarks: Vec::new(),
             maven_executable: None,
             gradle_executable: None,
             gradle_offline: false,
@@ -151,6 +166,50 @@ impl UserSettings {
                 root,
                 selection: ProjectJdkSelection { default_jdk_id },
             });
+        }
+    }
+
+    pub fn project_bookmarks(&self, root: &std::path::Path) -> &[LineBookmark] {
+        self.project_bookmarks
+            .iter()
+            .find(|project| project.root == root)
+            .map_or(&[], |project| project.entries.as_slice())
+    }
+
+    pub fn toggle_line_bookmark(&mut self, root: PathBuf, path: PathBuf, line: u32) -> bool {
+        let index = self
+            .project_bookmarks
+            .iter()
+            .position(|project| project.root == root);
+        let bookmark = LineBookmark { path, line };
+        if let Some(index) = index {
+            let project = &mut self.project_bookmarks[index];
+            if let Some(existing) = project.entries.iter().position(|entry| entry == &bookmark) {
+                project.entries.remove(existing);
+                if project.entries.is_empty() {
+                    self.project_bookmarks.remove(index);
+                }
+                return false;
+            }
+            project.entries.push(bookmark);
+        } else {
+            self.project_bookmarks.push(ProjectBookmarks {
+                root,
+                entries: vec![bookmark],
+            });
+        }
+        true
+    }
+
+    pub fn rename_bookmark_path(&mut self, old: &std::path::Path, new: PathBuf) {
+        for bookmark in self
+            .project_bookmarks
+            .iter_mut()
+            .flat_map(|project| &mut project.entries)
+        {
+            if bookmark.path == old {
+                bookmark.path.clone_from(&new);
+            }
         }
     }
 

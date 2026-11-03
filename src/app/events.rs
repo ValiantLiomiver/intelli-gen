@@ -35,6 +35,12 @@ pub enum AppEvent {
     NavigateBack,
     NavigateForward,
     NavigateLastEditLocation,
+    ToggleBookmarkAtCaret,
+    ShowBookmarks,
+    RemoveBookmark {
+        path: PathBuf,
+        line: u32,
+    },
     NavigateProblem {
         next: bool,
     },

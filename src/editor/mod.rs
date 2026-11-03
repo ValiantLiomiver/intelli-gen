@@ -338,6 +338,7 @@ pub fn editor_gutter(
     output: &eframe::egui::text_edit::TextEditOutput,
     source: &std::path::Path,
     first_line: u32,
+    bookmarks: Option<&[u32]>,
     breakpoints: Option<&[u32]>,
     logpoints: Option<&[u32]>,
     disabled_breakpoints: Option<&[u32]>,
@@ -424,6 +425,15 @@ pub fn editor_gutter(
                 "▶",
                 egui::FontId::monospace(12.0),
                 egui::Color32::YELLOW,
+            );
+        }
+        if bookmarks.is_some_and(|lines| lines.contains(&line)) {
+            ui.painter().text(
+                egui::pos2(center.x + 38.0, center.y),
+                egui::Align2::CENTER_CENTER,
+                "◆",
+                egui::FontId::proportional(10.0),
+                egui::Color32::LIGHT_BLUE,
             );
         }
         ui.painter().text(
@@ -673,6 +683,7 @@ mod gutter_ui_tests {
                             &editor,
                             std::path::Path::new("Main.java"),
                             1,
+                            None,
                             Some(if disabled || empty { &[] } else { &[1] }),
                             Some(if logpoint && !disabled { &[1] } else { &[] }),
                             Some(if disabled { &[1] } else { &[] }),

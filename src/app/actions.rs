@@ -340,6 +340,12 @@ pub fn keyboard_shortcuts(ctx: &egui::Context, state: &mut AppState) {
     }) {
         state.enqueue(AppEvent::NavigateLastEditLocation);
     }
+    if ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::F3)) {
+        state.enqueue(AppEvent::ToggleBookmarkAtCaret);
+    }
+    if ctx.input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, egui::Key::F3)) {
+        state.enqueue(AppEvent::ShowBookmarks);
+    }
     if ctx.input_mut(|input| input.consume_key(egui::Modifiers::ALT, egui::Key::F8)) {
         state.enqueue(AppEvent::EvaluateExpressionOpen);
     }
@@ -1322,6 +1328,43 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
             AppEvent::NavigateLastEditLocation => {
                 if let Some(location) = state.last_edit_location.clone() {
                     navigate_to_position(state, location.path, location.position);
+                }
+            }
+            AppEvent::ToggleBookmarkAtCaret => {
+                let Some((root, path, line)) = state.project.as_ref().and_then(|project| {
+                    state
+                        .active_tab
+                        .and_then(|index| state.editor_tabs.get(index))
+                        .filter(|tab| tab.path.starts_with(&project.root))
+                        .map(|tab| {
+                            (
+                                project.root.clone(),
+                                tab.path.clone(),
+                                tab.document.lsp_position().line.saturating_add(1),
+                            )
+                        })
+                }) else {
+                    state.status = "Open a project file to add a bookmark".into();
+                    continue;
+                };
+                let added = state.settings.toggle_line_bookmark(root, path, line);
+                save_settings(state);
+                state.status = if added {
+                    "Bookmark added".into()
+                } else {
+                    "Bookmark removed".into()
+                };
+            }
+            AppEvent::ShowBookmarks => state.bookmarks_open = true,
+            AppEvent::RemoveBookmark { path, line } => {
+                if let Some(root) = state
+                    .project
+                    .as_ref()
+                    .filter(|project| path.starts_with(&project.root))
+                    .map(|project| project.root.clone())
+                {
+                    state.settings.toggle_line_bookmark(root, path, line);
+                    save_settings(state);
                 }
             }
             AppEvent::NavigateProblem { next } => {
@@ -3661,6 +3704,7 @@ fn finish_workspace_replace(
 }
 
 fn editor_completed(state: &mut AppState, completion: EditorCompletion) {
+    let mut bookmarks_changed = false;
     match completion {
         EditorCompletion::LoadedMany { request, result } => {
             if state.pending_workspace_replacements.contains_key(&request) {
@@ -3733,6 +3777,10 @@ fn editor_completed(state: &mut AppState, completion: EditorCompletion) {
                         state
                             .debugger
                             .rename_breakpoint_source(&path, saved_path.clone());
+                        state
+                            .settings
+                            .rename_bookmark_path(&path, saved_path.clone());
+                        bookmarks_changed = true;
                         tab.path = saved_path.clone();
                         tab.document.path = saved_path.clone();
                         tab.pending_rename_to = None;
@@ -3821,6 +3869,9 @@ fn editor_completed(state: &mut AppState, completion: EditorCompletion) {
                 Err(error) => state.last_error = Some(error),
             }
         }
+    }
+    if bookmarks_changed {
+        save_settings(state);
     }
 }
 

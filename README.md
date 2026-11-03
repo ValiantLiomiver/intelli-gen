@@ -50,6 +50,7 @@ The command-line link accepts the same optional project or file path: `dist/inte
 | Open Problems tool window | `⌘6` |
 | Navigate back / forward | `⌘[` / `⌘]` (`Ctrl+Alt+←` / `Ctrl+Alt+→` aliases) |
 | Last edit location | `⇧⌘⌫` |
+| Toggle line bookmark / show bookmarks | `F3` / `⌘F3` |
 | Jump to last tool window / hide all tool windows | `F12` / `⌘⇧F12` |
 | Reformat Java file | `⌥⌘L` |
 | Organize Java imports | `⌃⌥O` |
@@ -78,6 +79,8 @@ The Run Console accepts line input for interactive Java processes. The Build pan
 The first release targets macOS and Java projects using Maven or Gradle. Use **File → New Java Project…** to create a minimal Maven or Gradle starter locally; it creates no wrapper and downloads no tools. The starter includes a run configuration for `Main`; select an installed JDK before launching. **Run** builds the project first and asks before saving open project files with unsaved changes; a failed build does not launch the program. Start, stop, or manage configurations from the **Run** menu. Use a project-tree directory's context menu to create a Java class; an optional package name creates matching subdirectories beneath the selected directory. Set Java indentation to 1–8 spaces or tabs in **Settings**; the editor and Java formatter use the same preference. Parent, root, and nested `.editorconfig` files override these choices by file pattern up to the nearest `root=true`. Files up to 16 MiB are editable; files above 256 KiB use a bounded page editor that keeps the complete document available for save and find/replace. **Find in Project** also supports preview-first replacement: review and select matching files before applying edits to editor buffers, then save those files to keep the changes. Run configurations can select a Maven/Gradle module or detect one from the main class; the JPMS module name remains a separate launch option. The app also includes an integrated terminal, local Git operations, and a Java debugger. Java language services depend on installed or packaged JDT LS and Java Debug Server tooling; editing and builds remain available if optional Java tooling is unavailable.
 
 With a Java test open under a module's conventional `src/test/java` directory, use **Run → Run Current Test Class** to run that class through the project's Maven or Gradle test task.
+
+Use **Navigate → Show Bookmarks** (`⌘F3`) to revisit or remove project line bookmarks; **F3** toggles a bookmark at the caret. Bookmarks are saved with Intelli-gen settings.
 
 **Navigate → Test / production source** (`⌘⇧T`) switches between matching files in the conventional `src/main/java` and `src/test/java` trees when the counterpart exists.
 
@@ -119,6 +122,13 @@ with SHA-256 `b9c8e1b2186d302bca9b0b7fe7b7070c2b18a7521d39e4a2f1d48968ef7ecce8`.
 Gradle extraction evidence
 `ev_4a4a5832b6e2241e69b3c07c4bf7de1892c285fb86ddb7f03b65f45220ec4aef`
 records verified containment and no integrity contradictions.
+
+REA inventory of IntelliJ's `intellij.java.bookmarks.jar` is evidence
+`ev_3b2f91dfc3a8a903954ccfb3cdd1b4e881efb70bdd0064ed07938d1913cc14ed`
+(SHA-256 `b8b1131204022062a9ef5ae1a1212c9cc221b848902838c6b95f0937f590ff1f`).
+This confirms the shipped bookmark module only; the bookmark shortcuts and
+workflow are corroborated by the official [macOS keymap](https://www.jetbrains.com/help/idea/reference-keymap-mac-default.html)
+and [bookmark guide](https://www.jetbrains.com/guide/java/tutorials/presenting/bookmarks/).
 
 The extracted `META-INF/plugin.xml` registers `Gradle.ExecuteTask`,
 `Gradle.ToggleOfflineAction`, and `Gradle.RefreshDependencies`, including toolbar

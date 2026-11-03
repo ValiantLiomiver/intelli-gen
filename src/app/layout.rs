@@ -184,6 +184,10 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
                     state.enqueue(AppEvent::NavigateLastEditLocation);
                     ui.close();
                 }
+                if ui.add_enabled(state.project.is_some(), egui::Button::new(crate::i18n::ui_text(ui, "Show Bookmarks    ⌘F3"))).clicked() {
+                    state.enqueue(AppEvent::ShowBookmarks);
+                    ui.close();
+                }
                 let test_source_available = state
                     .active_tab
                     .and_then(|index| state.editor_tabs.get(index))
@@ -811,6 +815,55 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
     }
     for action in state.find_replace.render(ui.ctx()) {
         state.enqueue(AppEvent::Find(action));
+    }
+    if state.bookmarks_open {
+        let entries = state
+            .project
+            .as_ref()
+            .map(|project| state.settings.project_bookmarks(&project.root).to_vec())
+            .unwrap_or_default();
+        let mut bookmarks_open = state.bookmarks_open;
+        let mut bookmark_actions = Vec::new();
+        egui::Window::new(crate::i18n::ui_text(ui, "Bookmarks"))
+            .open(&mut bookmarks_open)
+            .show(ui.ctx(), |ui| {
+                if entries.is_empty() {
+                    ui.label(crate::i18n::ui_text(ui, "No bookmarks in this project"));
+                }
+                for bookmark in &entries {
+                    ui.horizontal(|ui| {
+                        let name = bookmark
+                            .path
+                            .file_name()
+                            .unwrap_or(bookmark.path.as_os_str())
+                            .to_string_lossy();
+                        if ui
+                            .button(format!("{name}:{}", bookmark.line))
+                            .on_hover_text(bookmark.path.display().to_string())
+                            .clicked()
+                        {
+                            bookmark_actions.push(AppEvent::OpenFileAtLine(
+                                bookmark.path.clone(),
+                                bookmark.line as usize,
+                            ));
+                        }
+                        if ui
+                            .small_button(crate::i18n::ui_text(ui, "×"))
+                            .on_hover_text(crate::i18n::ui_text(ui, "Remove bookmark"))
+                            .clicked()
+                        {
+                            bookmark_actions.push(AppEvent::RemoveBookmark {
+                                path: bookmark.path.clone(),
+                                line: bookmark.line,
+                            });
+                        }
+                    });
+                }
+            });
+        state.bookmarks_open = bookmarks_open;
+        for action in bookmark_actions {
+            state.enqueue(action);
+        }
     }
     if let Some(dialog) = state.new_java_class.as_mut() {
         let mut create = false;

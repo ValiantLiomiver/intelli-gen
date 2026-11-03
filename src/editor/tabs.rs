@@ -792,6 +792,7 @@ impl EditorTab {
         &mut self,
         ui: &mut egui::Ui,
         allow_edits: bool,
+        bookmarks: &[u32],
         breakpoints: &[u32],
         logpoints: &[u32],
         disabled_breakpoints: &[u32],
@@ -812,6 +813,7 @@ impl EditorTab {
                 self.render_paged_editor(
                     ui,
                     allow_edits && !self.close_after_save,
+                    bookmarks,
                     breakpoints,
                     logpoints,
                     disabled_breakpoints,
@@ -944,6 +946,7 @@ impl EditorTab {
                         &output,
                         &self.path,
                         1,
+                        Some(bookmarks),
                         java.then_some(breakpoints),
                         java.then_some(logpoints),
                         java.then_some(disabled_breakpoints),
@@ -1097,6 +1100,7 @@ impl EditorTab {
         &mut self,
         ui: &mut egui::Ui,
         allow_edits: bool,
+        bookmarks: &[u32],
         breakpoints: &[u32],
         logpoints: &[u32],
         disabled_breakpoints: &[u32],
@@ -1264,6 +1268,7 @@ impl EditorTab {
                         &output,
                         &self.path,
                         first_line,
+                        Some(bookmarks),
                         Some(breakpoints),
                         Some(logpoints),
                         Some(disabled_breakpoints),
@@ -1394,6 +1399,20 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
         .as_ref()
         .and_then(|path| state.language.diagnostics.get(path))
         .map_or(&[][..], Vec::as_slice);
+    let bookmark_lines: Vec<_> = state
+        .project
+        .as_ref()
+        .zip(active_path.as_ref())
+        .map(|(project, path)| {
+            state
+                .settings
+                .project_bookmarks(&project.root)
+                .iter()
+                .filter(|bookmark| &bookmark.path == path)
+                .map(|bookmark| bookmark.line)
+                .collect()
+        })
+        .unwrap_or_default();
     let mut editor_command = None;
     let mut breakpoint_action = None;
     let mut completion_popup_action = None;
@@ -1439,6 +1458,7 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
         let (toggled, completion_position) = tab.render_editor(
             ui,
             !state.quit_approved,
+            &bookmark_lines,
             &lines,
             &logpoint_lines,
             &disabled_lines,
