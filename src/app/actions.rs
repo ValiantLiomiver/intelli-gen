@@ -215,10 +215,29 @@ pub fn current_test_method_at_line_action(
 
 pub(crate) fn is_java_test_method(source: &str, method_line: u32, method_name: &str) -> bool {
     // shortcut: recognizes direct JUnit/TestNG annotations and JUnit 3 naming; resolve composed annotations when framework metadata is available.
-    if method_name.starts_with("test")
-        && (source.contains("extends TestCase")
-            || source.contains("extends junit.framework.TestCase"))
-    {
+    let junit3_test_class = source.lines().any(|line| {
+        let line = line.trim_start();
+        let class_header = line.starts_with("class ")
+            || line.starts_with('@')
+            || [
+                "public ",
+                "protected ",
+                "private ",
+                "abstract ",
+                "final ",
+                "sealed ",
+                "non-sealed ",
+                "static ",
+            ]
+            .iter()
+            .any(|prefix| line.starts_with(prefix));
+        class_header
+            && !line.starts_with("//")
+            && !line.starts_with("/*")
+            && (line.contains("extends TestCase")
+                || line.contains("extends junit.framework.TestCase"))
+    });
+    if method_name.starts_with("test") && junit3_test_class {
         return true;
     }
     fn is_test_annotation(line: &str) -> bool {
