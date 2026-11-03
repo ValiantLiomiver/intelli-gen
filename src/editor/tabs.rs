@@ -812,7 +812,7 @@ impl EditorTab {
         >,
         current_line: Option<u32>,
         diagnostics: &[crate::java::lsp::LanguageDiagnostic],
-        can_run_test_class: bool,
+        test_class_line: Option<u32>,
         test_methods: &[(u32, String)],
         indent_size: usize,
         insert_spaces: bool,
@@ -832,7 +832,7 @@ impl EditorTab {
                     breakpoint_status,
                     current_line,
                     diagnostics,
-                    can_run_test_class,
+                    test_class_line,
                     test_methods,
                     indent_size,
                     insert_spaces,
@@ -967,7 +967,7 @@ impl EditorTab {
                         java.then_some(breakpoint_status),
                         java.then_some(current_line).flatten(),
                         diagnostics,
-                        can_run_test_class,
+                        test_class_line,
                         test_methods,
                     );
                     if let Some(line) = navigation {
@@ -1126,7 +1126,7 @@ impl EditorTab {
         >,
         current_line: Option<u32>,
         diagnostics: &[crate::java::lsp::LanguageDiagnostic],
-        can_run_test_class: bool,
+        test_class_line: Option<u32>,
         test_methods: &[(u32, String)],
         indent_size: usize,
         insert_spaces: bool,
@@ -1293,7 +1293,7 @@ impl EditorTab {
                         Some(breakpoint_status),
                         current_line,
                         diagnostics,
-                        can_run_test_class,
+                        test_class_line,
                         test_methods,
                     );
                     output
@@ -1545,6 +1545,22 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
                 .and_then(|project| project.model.as_ref())
                 .and_then(|model| crate::app::actions::current_test_class_action(&tab.path, model))
         };
+        let test_class_line = test_class_action.as_ref().and_then(|action| {
+            let crate::app::events::BuildAction::RunTest { class_name, .. } = action else {
+                return None;
+            };
+            let class_name = class_name.rsplit('.').next()?;
+            state
+                .language
+                .document_symbols
+                .iter()
+                .find(|symbol| {
+                    symbol.location.path == tab.path
+                        && symbol.kind == 5
+                        && symbol.name == class_name
+                })
+                .map(|symbol| symbol.location.range.start.line + 1)
+        });
         let test_methods: Vec<_> = if test_class_action.is_some() {
             state
                 .language
@@ -1576,7 +1592,7 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
             breakpoint_status,
             current_line,
             diagnostics,
-            test_class_action.is_some(),
+            test_class_line,
             &test_methods,
             indent_size,
             insert_spaces,

@@ -352,7 +352,7 @@ pub fn editor_gutter(
     >,
     current_line: Option<u32>,
     diagnostics: &[crate::java::lsp::LanguageDiagnostic],
-    can_run_test_class: bool,
+    test_class_line: Option<u32>,
     test_methods: &[(u32, String)],
 ) -> Option<GutterBreakpointAction> {
     use eframe::egui;
@@ -380,6 +380,7 @@ pub fn editor_gutter(
             .iter()
             .find(|(method_line, _)| *method_line == line)
             .map(|(_, name)| name);
+        let is_test_class_line = test_class_line == Some(line);
         let status = (has_breakpoint || is_logpoint)
             .then(|| breakpoint_status?.get(&(source.to_path_buf(), line)))
             .flatten();
@@ -498,7 +499,7 @@ pub fn editor_gutter(
             egui::Popup::menu(&response)
                 .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
                 .show(|ui| {
-                    if can_run_test_class
+                    if is_test_class_line
                         && ui
                             .button(crate::i18n::ui_text(ui, "Run Current Test Class"))
                             .clicked()
@@ -506,7 +507,7 @@ pub fn editor_gutter(
                         action = Some(GutterBreakpointAction::RunCurrentTestClass);
                         ui.close();
                     }
-                    if can_run_test_class {
+                    if is_test_class_line {
                         ui.separator();
                     }
                     if let Some(method) = test_method
@@ -720,7 +721,7 @@ mod gutter_ui_tests {
                             None,
                             None,
                             &[],
-                            false,
+                            None,
                             &[],
                         );
                     });
