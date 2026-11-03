@@ -331,6 +331,7 @@ pub enum GutterBreakpointAction {
     Toggle(u32),
     SetEnabled { line: u32, enabled: bool },
     SetLogpoint { line: u32, message: String },
+    RunCurrentTestClass,
 }
 
 pub fn editor_gutter(
@@ -350,6 +351,7 @@ pub fn editor_gutter(
     >,
     current_line: Option<u32>,
     diagnostics: &[crate::java::lsp::LanguageDiagnostic],
+    can_run_test_class: bool,
 ) -> Option<GutterBreakpointAction> {
     use eframe::egui;
     let mut action = None;
@@ -490,6 +492,17 @@ pub fn editor_gutter(
             egui::Popup::menu(&response)
                 .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
                 .show(|ui| {
+                    if can_run_test_class
+                        && ui
+                            .button(crate::i18n::ui_text(ui, "Run Current Test Class"))
+                            .clicked()
+                    {
+                        action = Some(GutterBreakpointAction::RunCurrentTestClass);
+                        ui.close();
+                    }
+                    if can_run_test_class {
+                        ui.separator();
+                    }
                     if is_disabled {
                         if ui
                             .button(crate::i18n::ui_text(ui, "Enable breakpoint"))
@@ -690,6 +703,7 @@ mod gutter_ui_tests {
                             None,
                             None,
                             &[],
+                            false,
                         );
                     });
                 });

@@ -802,6 +802,7 @@ impl EditorTab {
         >,
         current_line: Option<u32>,
         diagnostics: &[crate::java::lsp::LanguageDiagnostic],
+        can_run_test_class: bool,
         indent_size: usize,
         insert_spaces: bool,
     ) -> (Option<super::GutterBreakpointAction>, Option<egui::Pos2>) {
@@ -820,6 +821,7 @@ impl EditorTab {
                     breakpoint_status,
                     current_line,
                     diagnostics,
+                    can_run_test_class,
                     indent_size,
                     insert_spaces,
                 ),
@@ -953,6 +955,7 @@ impl EditorTab {
                         java.then_some(breakpoint_status),
                         java.then_some(current_line).flatten(),
                         diagnostics,
+                        can_run_test_class,
                     );
                     if let Some(line) = navigation {
                         let height =
@@ -1110,6 +1113,7 @@ impl EditorTab {
         >,
         current_line: Option<u32>,
         diagnostics: &[crate::java::lsp::LanguageDiagnostic],
+        can_run_test_class: bool,
         indent_size: usize,
         insert_spaces: bool,
     ) -> Option<super::GutterBreakpointAction> {
@@ -1275,6 +1279,7 @@ impl EditorTab {
                         Some(breakpoint_status),
                         current_line,
                         diagnostics,
+                        can_run_test_class,
                     );
                     output
                 })
@@ -1415,6 +1420,7 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
         .unwrap_or_default();
     let mut editor_command = None;
     let mut breakpoint_action = None;
+    let mut run_test_class_action = None;
     let mut completion_popup_action = None;
     let mut hover_popup_dismissed = false;
     let mut last_edit_location = None;
@@ -1502,6 +1508,15 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
                     })
             })
             .flatten();
+        let test_class_action = if state.build.running() {
+            None
+        } else {
+            state
+                .project
+                .as_ref()
+                .and_then(|project| project.model.as_ref())
+                .and_then(|model| crate::app::actions::current_test_class_action(&tab.path, model))
+        };
         let (toggled, completion_position) = tab.render_editor(
             ui,
             !state.quit_approved,
@@ -1512,6 +1527,7 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
             breakpoint_status,
             current_line,
             diagnostics,
+            test_class_action.is_some(),
             indent_size,
             insert_spaces,
         );
@@ -1624,39 +1640,44 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
             state.debugger.breakpoints.modified.remove(&path);
         }
         if let Some(action) = toggled {
-            breakpoint_action = Some(match action {
-                super::GutterBreakpointAction::Toggle(line) => {
-                    crate::app::events::DebuggerAction::ToggleBreakpoint {
-                        source: path,
-                        line,
-                        modified,
+            if matches!(&action, super::GutterBreakpointAction::RunCurrentTestClass) {
+                run_test_class_action = test_class_action;
+            } else {
+                breakpoint_action = Some(match action {
+                    super::GutterBreakpointAction::Toggle(line) => {
+                        crate::app::events::DebuggerAction::ToggleBreakpoint {
+                            source: path,
+                            line,
+                            modified,
+                        }
                     }
-                }
-                super::GutterBreakpointAction::SetEnabled { line, enabled } => {
-                    let point = state
-                        .debugger
-                        .breakpoints
-                        .sources
-                        .get(&path)
-                        .and_then(|points| points.iter().find(|point| point.line == line));
-                    crate::app::events::DebuggerAction::UpdateBreakpoint {
-                        source: path,
-                        line,
-                        condition: point.and_then(|point| point.condition.clone()),
-                        log_message: point.and_then(|point| point.log_message.clone()),
-                        enabled,
-                        modified,
+                    super::GutterBreakpointAction::SetEnabled { line, enabled } => {
+                        let point = state
+                            .debugger
+                            .breakpoints
+                            .sources
+                            .get(&path)
+                            .and_then(|points| points.iter().find(|point| point.line == line));
+                        crate::app::events::DebuggerAction::UpdateBreakpoint {
+                            source: path,
+                            line,
+                            condition: point.and_then(|point| point.condition.clone()),
+                            log_message: point.and_then(|point| point.log_message.clone()),
+                            enabled,
+                            modified,
+                        }
                     }
-                }
-                super::GutterBreakpointAction::SetLogpoint { line, message } => {
-                    crate::app::events::DebuggerAction::SetLogpoint {
-                        source: path,
-                        line,
-                        message,
-                        modified,
+                    super::GutterBreakpointAction::SetLogpoint { line, message } => {
+                        crate::app::events::DebuggerAction::SetLogpoint {
+                            source: path,
+                            line,
+                            message,
+                            modified,
+                        }
                     }
-                }
-            });
+                    super::GutterBreakpointAction::RunCurrentTestClass => unreachable!(),
+                });
+            }
         }
     }
     if let Some(location) = last_edit_location {
@@ -1682,6 +1703,9 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
     }
     if let Some(action) = breakpoint_action {
         state.enqueue(AppEvent::Debugger(action));
+    }
+    if let Some(action) = run_test_class_action {
+        state.enqueue(AppEvent::Build(action));
     }
 }
 

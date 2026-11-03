@@ -21,8 +21,9 @@ flow for rerunning failed classes.
 
 ## Scope and constraints
 
-- Add **Run Current Test Class** to the Run menu when the active Java file is
-  beneath a module's conventional `src/test/java` root.
+- Add **Run Current Test Class** to the Run menu and editor gutter context menu
+  when the active Java file is beneath a module's conventional `src/test/java`
+  root.
 - Derive its fully qualified name from the relative path and reuse
   `BuildAction::RunTest` with the `test` task.
 - Disable the action while another build is running; the existing build handler

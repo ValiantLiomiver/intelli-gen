@@ -84,7 +84,7 @@ The Run Console accepts line input for interactive Java processes. The Build pan
 
 The first release targets macOS and Java projects using Maven or Gradle. Use **File → New Java Project…** to create a minimal Maven or Gradle starter locally; it creates no wrapper and downloads no tools. The starter includes a run configuration for `Main`; select an installed JDK before launching. **Run** builds the project first and asks before saving open project files with unsaved changes; a failed build does not launch the program. Start, stop, or manage configurations from the **Run** menu. Use a project-tree directory's context menu to create a Java class; an optional package name creates matching subdirectories beneath the selected directory. Set Java indentation to 1–8 spaces or tabs in **Settings**; the editor and Java formatter use the same preference. Parent, root, and nested `.editorconfig` files override these choices by file pattern up to the nearest `root=true`. Files up to 16 MiB are editable; files above 256 KiB use a bounded page editor that keeps the complete document available for save and find/replace. **Find in Project** also supports preview-first replacement: review and select matching files before applying edits to editor buffers, then save those files to keep the changes. Run configurations can select a Maven/Gradle module or detect one from the main class; the JPMS module name remains a separate launch option. The app also includes an integrated terminal, local Git operations, and a Java debugger. Java language services depend on installed or packaged JDT LS and Java Debug Server tooling; editing and builds remain available if optional Java tooling is unavailable.
 
-With a Java test open under a module's conventional `src/test/java` directory, use **Run → Run Current Test Class** to run that class through the project's Maven or Gradle test task.
+With a Java test open under a module's conventional `src/test/java` directory, use **Run → Run Current Test Class** or choose **Run Current Test Class** from the editor gutter menu to run it through the project's Maven or Gradle test task.
 
 Use **Navigate → Show Bookmarks** (`⌘F3`) to revisit or remove project line bookmarks; **F3** toggles a bookmark at the caret. Bookmarks are saved with Intelli-gen settings.
 Bookmarks below an inserted or removed line move with the edit; replacing a selection across multiple lines may require repositioning affected bookmarks.
@@ -109,6 +109,13 @@ REA also inventoried the installed `intellij.platform.projectView.jar`
 SHA-256 `3228a8dbe1db28ff8dce684d38ceaa9e66109cde0f8348b30ea3d2d353d5937e`).
 This confirms the Project View module is shipped. JetBrains documents arrow-key
 navigation for its tree views in the [Project tool window guide](https://www.jetbrains.com/help/idea/project-tool-window.html);
+the package inventory itself does not establish that runtime behavior.
+
+REA inventoried IntelliJ's `intellij.java.execution.jar` (Evidence
+`ev_c97068a5ea5c5d058757347c42db60745655b13349168fc2c8ffe52ec8555393`,
+SHA-256 `333c8562d13b4243703d8a972a679c7f11046402b3279a636572c4bde6f38560`).
+This confirms the Java execution module is shipped. JetBrains documents running
+Java tests from editor gutters in [Performing tests](https://www.jetbrains.com/help/idea/performing-tests.html);
 the package inventory itself does not establish that runtime behavior.
 
 The focused Java logpoint and Gradle module observations below were first

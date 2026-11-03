@@ -4,7 +4,7 @@
 
 **Goal:** Run the active conventional Java test class through the existing Maven/Gradle test pipeline.
 
-**Architecture:** Resolve the active file path against the project model's deepest module root, derive the class name under `src/test/java`, and dispatch the existing filtered `BuildAction::RunTest`. Add one localized Run-menu item; do not create a run configuration or another process service.
+**Architecture:** Resolve the active file path against the project model's deepest module root, derive the class name under `src/test/java`, and dispatch the existing filtered `BuildAction::RunTest` from the Run menu or gutter context menu; do not create a run configuration or another process service.
 
 **Tech Stack:** Rust 2024, eframe/egui, existing Maven/Gradle `BuildService`, `en.ini` and `it.ini` resources.
 
@@ -40,8 +40,8 @@
 - Add `actions::current_test_class_action(path: &Path, model: &ProjectModel) -> Option<BuildAction>`.
 - The returned event uses `RunTest { class_name, module_root, test_task: "test", integration: false }`.
 
-- [ ] Resolve the deepest module containing `path`, require `src/test/java`, derive and validate the fully qualified class name.
-- [ ] Add **Run Current Test Class** to Run; enable it only for the supported active test file while no build is running, then dispatch the existing action.
-- [ ] Add English/Italian labels and disabled hints, and document the menu action in README.
-- [ ] Verify with `cargo fmt --check`, `git diff --check`, and `cargo check --quiet`.
-- [ ] Commit the feature on `main`.
+- [x] Resolve the deepest module containing `path`, require `src/test/java`, derive and validate the fully qualified class name.
+- [x] Add **Run Current Test Class** to Run and the editor gutter context menu; enable it only for the supported active test file while no build is running, then dispatch the existing action.
+- [x] Add English/Italian labels and disabled hints, and document the menu action in README.
+- [x] Verify with `cargo fmt --check`, `git diff --check`, and `cargo check --quiet`.
+- [x] Commit the feature on `main`.
