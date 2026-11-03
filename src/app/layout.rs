@@ -328,6 +328,29 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
                     state.enqueue(AppEvent::Debugger(super::events::DebuggerAction::Start));
                     ui.close();
                 }
+                let test_action = state
+                    .active_tab
+                    .and_then(|index| state.editor_tabs.get(index))
+                    .and_then(|tab| {
+                        state
+                            .project
+                            .as_ref()?
+                            .model
+                            .as_ref()
+                            .and_then(|model| actions::current_test_class_action(&tab.path, model))
+                    });
+                let test_hint = if state.build.running() {
+                    "Wait for the current build to finish"
+                } else {
+                    "Open a Java test file in src/test/java"
+                };
+                if ui.add_enabled(test_action.is_some() && !state.build.running(), egui::Button::new(crate::i18n::ui_text(ui, "Run Current Test Class")))
+                    .on_disabled_hover_text(crate::i18n::ui_text(ui, test_hint)).clicked() {
+                    if let Some(action) = test_action {
+                        state.enqueue(AppEvent::Build(action));
+                    }
+                    ui.close();
+                }
                 let has_java_tab = state.active_tab
                     .and_then(|index| state.editor_tabs.get(index))
                     .is_some_and(|tab| tab.path.extension().is_some_and(|extension| extension == "java"));

@@ -2,7 +2,7 @@ use eframe::egui;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use super::events::{AppEvent, MavenAction};
+use super::events::{AppEvent, BuildAction, MavenAction};
 use super::{AppState, EditorTab};
 use crate::editor::EditorCompletion;
 use crate::project::{
@@ -125,6 +125,45 @@ pub fn test_source_target(path: &Path) -> Option<PathBuf> {
         source_root = parent;
     }
     None
+}
+
+// shortcut: recognizes the conventional src/test/java layout; add custom source sets when the project model can identify them.
+pub fn current_test_class_action(
+    path: &Path,
+    model: &crate::project::ProjectModel,
+) -> Option<BuildAction> {
+    if model.kind == crate::project::ProjectKind::Unknown
+        || path.extension().is_none_or(|extension| extension != "java")
+    {
+        return None;
+    }
+    let module_root = model
+        .modules
+        .iter()
+        .map(|module| &module.root)
+        .chain(std::iter::once(&model.root))
+        .filter(|root| path.starts_with(root))
+        .max_by_key(|root| root.components().count())?;
+    let class_path = path
+        .strip_prefix(module_root)
+        .ok()?
+        .strip_prefix(Path::new("src/test/java"))
+        .ok()?;
+    let class_name = class_path
+        .with_extension("")
+        .components()
+        .map(|part| part.as_os_str().to_str())
+        .collect::<Option<Vec<_>>>()?
+        .join(".");
+    if !crate::java::build::valid_java_class_name(&class_name) {
+        return None;
+    }
+    Some(BuildAction::RunTest {
+        class_name,
+        module_root: module_root.clone(),
+        test_task: "test".into(),
+        integration: false,
+    })
 }
 
 fn current_navigation_location(state: &AppState) -> Option<super::NavigationLocation> {
