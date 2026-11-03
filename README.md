@@ -75,7 +75,8 @@ The command-line link accepts the same optional project or file path: `dist/inte
 
 With the Project sidebar focused, use `↑` / `↓` to move through visible entries,
 `←` / `→` to collapse or expand folders, `Enter` to open files, or type a name
-prefix to jump to a matching visible entry.
+prefix to search project files and reveal the best match in the tree. Backspace
+edits the query; Escape clears it.
 
 ## Project scope
 

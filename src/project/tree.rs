@@ -16,8 +16,11 @@ pub struct ProjectTree {
     entries: Vec<TreeEntry>,
     focused_path: Option<PathBuf>,
     focus_pending: bool,
+    tree_focused: bool,
     typeahead_query: String,
     typeahead_at: Option<Instant>,
+    typeahead_visible_match: bool,
+    reveal_path: Option<PathBuf>,
     root_error: Option<String>,
     root_loading_request: Option<u64>,
     root_validation_request: Option<u64>,
@@ -65,8 +68,11 @@ impl ProjectTree {
             root,
             focused_path: None,
             focus_pending: false,
+            tree_focused: false,
             typeahead_query: String::new(),
             typeahead_at: None,
+            typeahead_visible_match: false,
+            reveal_path: None,
             root_error: None,
             root_loading_request: None,
             root_validation_request: None,
@@ -211,7 +217,16 @@ impl ProjectTree {
             .collect()
     }
 
-    pub fn render(&mut self, ui: &mut egui::Ui, focus_requested: &mut bool) -> Vec<TreeAction> {
+    pub fn typeahead_query(&self) -> Option<&str> {
+        (self.tree_focused && !self.typeahead_query.is_empty()).then_some(&self.typeahead_query)
+    }
+
+    pub fn render(
+        &mut self,
+        ui: &mut egui::Ui,
+        focus_requested: &mut bool,
+        search_result: Option<(&str, &Path)>,
+    ) -> Vec<TreeAction> {
         let mut actions = Vec::new();
         if Instant::now() >= self.next_root_validation && self.root_validation_request.is_none() {
             let request = NEXT_TREE_REQUEST.fetch_add(1, Ordering::Relaxed);
@@ -222,6 +237,7 @@ impl ProjectTree {
             ui.weak(crate::i18n::ui_text(ui, "Empty directory"));
         }
         if let Some(error) = &self.root_error {
+            self.tree_focused = false;
             ui.colored_label(
                 ui.visuals().error_fg_color,
                 crate::i18n::message(ui.ctx(), error),
@@ -250,6 +266,37 @@ impl ProjectTree {
             &mut visible,
             &mut has_focus,
         );
+        if let Some((query, path)) = search_result
+            && query == self.typeahead_query
+            && !self.typeahead_visible_match
+            && path.starts_with(&self.root)
+        {
+            self.reveal_path = Some(path.to_path_buf());
+        }
+        if let Some(target) = self.reveal_path.clone() {
+            if visible.iter().any(|entry| entry.path == target) {
+                if self.focused_path.as_ref() != Some(&target) {
+                    self.focused_path = Some(target);
+                    self.focus_pending = true;
+                    ui.ctx().request_repaint();
+                }
+                self.reveal_path = None;
+            } else if let Some(id) = visible.iter().find_map(|entry| {
+                let id = entry.collapsing_id?;
+                (target.starts_with(&entry.path) && target != entry.path).then_some(id)
+            }) {
+                let mut state = egui::collapsing_header::CollapsingState::load_with_default_open(
+                    ui.ctx(),
+                    id,
+                    false,
+                );
+                if !state.is_open() {
+                    state.set_open(true);
+                    state.store(ui.ctx());
+                    ui.ctx().request_repaint();
+                }
+            }
+        }
         if self
             .focused_path
             .as_ref()
@@ -285,29 +332,57 @@ impl ProjectTree {
                     })
                     .collect::<String>()
             });
-            if !typed.is_empty() && !visible.is_empty() {
-                // shortcut: searches visible entries with a one-second prefix; add indexed tree search when collapsed paths must match.
-                let continuing = self
-                    .typeahead_at
-                    .is_some_and(|last| last.elapsed() <= Duration::from_secs(1));
-                if !continuing {
-                    self.typeahead_query.clear();
+            let continuing = self
+                .typeahead_at
+                .is_some_and(|last| last.elapsed() <= Duration::from_secs(1));
+            let backspace = ui.input_mut(|input| {
+                !self.typeahead_query.is_empty()
+                    && input.consume_key(egui::Modifiers::NONE, egui::Key::Backspace)
+            });
+            let escape = ui.input_mut(|input| {
+                !self.typeahead_query.is_empty()
+                    && input.consume_key(egui::Modifiers::NONE, egui::Key::Escape)
+            });
+            let mut search_changed = false;
+            if escape {
+                self.typeahead_query.clear();
+                self.typeahead_at = None;
+                self.typeahead_visible_match = false;
+                self.reveal_path = None;
+            } else {
+                if backspace {
+                    search_changed = self.typeahead_query.pop().is_some();
                 }
-                self.typeahead_query.push_str(&typed);
-                self.typeahead_at = Some(Instant::now());
+                if !typed.is_empty() {
+                    if !continuing {
+                        self.typeahead_query.clear();
+                    }
+                    self.typeahead_query.push_str(&typed);
+                    search_changed = true;
+                }
+            }
+            if search_changed {
+                // shortcut: reuses the 100,000-file Quick Open index; raise its cap for larger workspaces.
+                self.typeahead_at = (!self.typeahead_query.is_empty()).then(Instant::now);
+                self.reveal_path = None;
                 let query = self.typeahead_query.to_lowercase();
-                let start = if continuing {
-                    index.unwrap_or(0)
+                if !query.is_empty() && !visible.is_empty() {
+                    let start = if backspace || continuing {
+                        index.unwrap_or(0)
+                    } else {
+                        index.map_or(0, |index| (index + 1) % visible.len())
+                    };
+                    let next = (0..visible.len())
+                        .map(|offset| (start + offset) % visible.len())
+                        .find(|index| visible[*index].name.to_lowercase().starts_with(&query));
+                    self.typeahead_visible_match = next.is_some();
+                    if let Some(next) = next {
+                        self.focused_path = Some(visible[next].path.clone());
+                        self.focus_pending = true;
+                        ui.ctx().request_repaint();
+                    }
                 } else {
-                    index.map_or(0, |index| (index + 1) % visible.len())
-                };
-                if let Some(next) = (0..visible.len())
-                    .map(|offset| (start + offset) % visible.len())
-                    .find(|index| visible[*index].name.to_lowercase().starts_with(&query))
-                {
-                    self.focused_path = Some(visible[next].path.clone());
-                    self.focus_pending = true;
-                    ui.ctx().request_repaint();
+                    self.typeahead_visible_match = false;
                 }
             }
             let move_to = if ui
@@ -397,6 +472,7 @@ impl ProjectTree {
                 }
             }
         }
+        self.tree_focused = has_focus;
         actions
     }
 }

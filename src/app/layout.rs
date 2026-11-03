@@ -616,8 +616,22 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
                                 );
                             }
                             if let Some(tree) = &mut state.project_tree {
-                                let actions =
-                                    tree.render(ui, &mut state.project_panel_focus_requested);
+                                let tree_query = tree.typeahead_query().map(str::to_owned);
+                                let tree_search = tree_query.and_then(|query| {
+                                    state.quick_open.ensure_indexed();
+                                    state.quick_open.update_matches(&query);
+                                    state
+                                        .quick_open
+                                        .first_match_path(&query)
+                                        .map(|path| (query, path.to_path_buf()))
+                                });
+                                let actions = tree.render(
+                                    ui,
+                                    &mut state.project_panel_focus_requested,
+                                    tree_search
+                                        .as_ref()
+                                        .map(|(query, path)| (query.as_str(), path.as_path())),
+                                );
                                 for action in actions {
                                     state.enqueue(match action {
                                         TreeAction::OpenFile(path) => AppEvent::OpenFile(path),
