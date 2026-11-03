@@ -1398,6 +1398,7 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
     let mut breakpoint_action = None;
     let mut completion_popup_action = None;
     let mut hover_popup_dismissed = false;
+    let mut last_edit_location = None;
     let (indent_size, insert_spaces) = state
         .active_tab
         .and_then(|index| state.editor_tabs.get(index))
@@ -1431,6 +1432,10 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
             .filter(|frame| frame.source.as_ref() == Some(&tab.path))
             .map(|frame| frame.line);
         let revision = tab.document.revision;
+        let edit_origin = crate::app::NavigationLocation {
+            path: tab.path.clone(),
+            position: tab.document.lsp_position(),
+        };
         let (toggled, completion_position) = tab.render_editor(
             ui,
             !state.quit_approved,
@@ -1443,6 +1448,9 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
             indent_size,
             insert_spaces,
         );
+        if tab.document.revision != revision {
+            last_edit_location = Some(edit_origin);
+        }
         let path = tab.path.clone();
         if let Some(position) = completion_position {
             let caret = tab.document.lsp_position();
@@ -1559,6 +1567,9 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
                 }
             });
         }
+    }
+    if let Some(location) = last_edit_location {
+        state.last_edit_location = Some(location);
     }
     if hover_popup_dismissed {
         state.language.hover = None;

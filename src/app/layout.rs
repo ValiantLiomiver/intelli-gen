@@ -180,6 +180,10 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
                     state.enqueue(AppEvent::NavigateProblem { next: false });
                     ui.close();
                 }
+                if ui.add_enabled(state.last_edit_location.is_some(), egui::Button::new(crate::i18n::ui_text(ui, "Last Edit Location    ⇧⌘⌫"))).clicked() {
+                    state.enqueue(AppEvent::NavigateLastEditLocation);
+                    ui.close();
+                }
                 let test_source_available = state
                     .active_tab
                     .and_then(|index| state.editor_tabs.get(index))

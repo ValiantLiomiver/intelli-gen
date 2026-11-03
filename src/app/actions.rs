@@ -332,6 +332,14 @@ pub fn keyboard_shortcuts(ctx: &egui::Context, state: &mut AppState) {
     if ctx.input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, egui::Key::Num6)) {
         state.enqueue(AppEvent::ShowPanel(super::ActivePanel::Problems));
     }
+    if ctx.input_mut(|input| {
+        input.consume_key(
+            egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
+            egui::Key::Backspace,
+        )
+    }) {
+        state.enqueue(AppEvent::NavigateLastEditLocation);
+    }
     if ctx.input_mut(|input| input.consume_key(egui::Modifiers::ALT, egui::Key::F8)) {
         state.enqueue(AppEvent::EvaluateExpressionOpen);
     }
@@ -837,13 +845,10 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                 let root = opened.root;
                 let project = opened.project;
                 state.project_editor_config = opened.editor_config;
-                if state
-                    .project
-                    .as_ref()
-                    .is_some_and(|current| current.root != root)
-                {
+                if state.project.as_ref().map(|current| &current.root) != Some(&root) {
                     state.navigation_back.clear();
                     state.navigation_forward.clear();
+                    state.last_edit_location = None;
                 }
                 state.quick_open.set_project(Some(root.clone()));
                 if state.project.as_ref().map(|project| &project.root) != Some(&root) {
@@ -1314,6 +1319,11 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
             }
             AppEvent::NavigateBack => move_navigation_history(state, true),
             AppEvent::NavigateForward => move_navigation_history(state, false),
+            AppEvent::NavigateLastEditLocation => {
+                if let Some(location) = state.last_edit_location.clone() {
+                    navigate_to_position(state, location.path, location.position);
+                }
+            }
             AppEvent::NavigateProblem { next } => {
                 if !state.quit_requested {
                     super::problems::navigate(state, next);
@@ -3727,6 +3737,11 @@ fn editor_completed(state: &mut AppState, completion: EditorCompletion) {
                         tab.document.path = saved_path.clone();
                         tab.pending_rename_to = None;
                         current_path = saved_path.clone();
+                        if let Some(location) = &mut state.last_edit_location
+                            && location.path == path
+                        {
+                            location.path = saved_path.clone();
+                        }
                         if state.pending_close.as_deref() == Some(path.as_path()) {
                             state.pending_close = Some(saved_path.clone());
                         }

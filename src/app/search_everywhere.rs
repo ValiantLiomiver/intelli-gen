@@ -212,6 +212,10 @@ impl SearchEverywhere {
             ),
             ("View Breakpoints…    ⌘⇧F8", AppEvent::ShowBreakpoints),
             (
+                "Last Edit Location    ⇧⌘⌫",
+                AppEvent::NavigateLastEditLocation,
+            ),
+            (
                 "Find in File…    ⌘F",
                 AppEvent::Find(crate::editor::find_replace::FindAction::Open { replace: false }),
             ),
@@ -349,6 +353,7 @@ fn action_search_aliases(label: &str) -> &'static [&'static str] {
         "Previous Problem    ⇧F2" => &["previous_problem", "problema_precedente"],
         "Problems    ⌘6" => &["problems", "problemi", "error_list", "elenco_errori"],
         "Evaluate Expression…    ⌥F8" => &["evaluate_expression", "valuta_espressione"],
+        "Last Edit Location    ⇧⌘⌫" => &["last_edit_location", "ultima_modifica"],
         "Find usages    ⌥F7" => &["references", "riferimenti"],
         "Quick fixes    ⌥↩" => &["intentions", "correzioni_rapide"],
         "Organize imports    ⌃⌥O" => &["optimize_imports", "ottimizza_importazioni"],
