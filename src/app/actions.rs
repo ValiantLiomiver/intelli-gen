@@ -190,6 +190,26 @@ pub fn current_test_method_action(
     Some(action)
 }
 
+pub fn current_test_method_at_line_action(
+    path: &Path,
+    model: &crate::project::ProjectModel,
+    line: u32,
+    symbols: &[crate::java::lsp::OutlineSymbol],
+) -> Option<BuildAction> {
+    let mut action = current_test_class_action(path, model)?;
+    let symbol = symbols.iter().find(|symbol| {
+        symbol.location.path == path
+            && symbol.kind == 6
+            && symbol.location.range.start.line + 1 == line
+            && crate::java::build::valid_java_class_name(&symbol.name)
+            && !symbol.name.contains('.')
+    })?;
+    if let BuildAction::RunTest { method_name, .. } = &mut action {
+        *method_name = Some(symbol.name.clone());
+    }
+    Some(action)
+}
+
 fn run_context_event(state: &AppState) -> AppEvent {
     let test_action = if state.build.running() {
         None

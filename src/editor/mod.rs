@@ -332,6 +332,7 @@ pub enum GutterBreakpointAction {
     SetEnabled { line: u32, enabled: bool },
     SetLogpoint { line: u32, message: String },
     RunCurrentTestClass,
+    RunCurrentTestMethod { line: u32, name: String },
 }
 
 pub fn editor_gutter(
@@ -352,6 +353,7 @@ pub fn editor_gutter(
     current_line: Option<u32>,
     diagnostics: &[crate::java::lsp::LanguageDiagnostic],
     can_run_test_class: bool,
+    test_methods: &[(u32, String)],
 ) -> Option<GutterBreakpointAction> {
     use eframe::egui;
     let mut action = None;
@@ -374,6 +376,10 @@ pub fn editor_gutter(
         let has_breakpoint = breakpoints.is_some_and(|lines| lines.contains(&line));
         let is_logpoint = logpoints.is_some_and(|lines| lines.contains(&line));
         let is_disabled = disabled_breakpoints.is_some_and(|lines| lines.contains(&line));
+        let test_method = test_methods
+            .iter()
+            .find(|(method_line, _)| *method_line == line)
+            .map(|(_, name)| name);
         let status = (has_breakpoint || is_logpoint)
             .then(|| breakpoint_status?.get(&(source.to_path_buf(), line)))
             .flatten();
@@ -502,6 +508,17 @@ pub fn editor_gutter(
                     }
                     if can_run_test_class {
                         ui.separator();
+                    }
+                    if let Some(method) = test_method
+                        && ui
+                            .button(crate::i18n::ui_text(ui, "Run Current Test Method"))
+                            .clicked()
+                    {
+                        action = Some(GutterBreakpointAction::RunCurrentTestMethod {
+                            line,
+                            name: method.clone(),
+                        });
+                        ui.close();
                     }
                     if is_disabled {
                         if ui
@@ -704,6 +721,7 @@ mod gutter_ui_tests {
                             None,
                             &[],
                             false,
+                            &[],
                         );
                     });
                 });

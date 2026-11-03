@@ -813,6 +813,7 @@ impl EditorTab {
         current_line: Option<u32>,
         diagnostics: &[crate::java::lsp::LanguageDiagnostic],
         can_run_test_class: bool,
+        test_methods: &[(u32, String)],
         indent_size: usize,
         insert_spaces: bool,
     ) -> (Option<super::GutterBreakpointAction>, Option<egui::Pos2>) {
@@ -832,6 +833,7 @@ impl EditorTab {
                     current_line,
                     diagnostics,
                     can_run_test_class,
+                    test_methods,
                     indent_size,
                     insert_spaces,
                 ),
@@ -966,6 +968,7 @@ impl EditorTab {
                         java.then_some(current_line).flatten(),
                         diagnostics,
                         can_run_test_class,
+                        test_methods,
                     );
                     if let Some(line) = navigation {
                         let height =
@@ -1124,6 +1127,7 @@ impl EditorTab {
         current_line: Option<u32>,
         diagnostics: &[crate::java::lsp::LanguageDiagnostic],
         can_run_test_class: bool,
+        test_methods: &[(u32, String)],
         indent_size: usize,
         insert_spaces: bool,
     ) -> Option<super::GutterBreakpointAction> {
@@ -1290,6 +1294,7 @@ impl EditorTab {
                         current_line,
                         diagnostics,
                         can_run_test_class,
+                        test_methods,
                     );
                     output
                 })
@@ -1443,6 +1448,7 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
     let mut editor_command = None;
     let mut breakpoint_action = None;
     let mut run_test_class_action = None;
+    let mut run_test_method_action = None;
     let mut completion_popup_action = None;
     let mut hover_popup_dismissed = false;
     let mut last_edit_location = None;
@@ -1539,6 +1545,22 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
                 .and_then(|project| project.model.as_ref())
                 .and_then(|model| crate::app::actions::current_test_class_action(&tab.path, model))
         };
+        let test_methods: Vec<_> = if test_class_action.is_some() {
+            state
+                .language
+                .document_symbols
+                .iter()
+                .filter(|symbol| {
+                    symbol.location.path == tab.path
+                        && symbol.kind == 6
+                        && crate::java::build::valid_java_class_name(&symbol.name)
+                        && !symbol.name.contains('.')
+                })
+                .map(|symbol| (symbol.location.range.start.line + 1, symbol.name.clone()))
+                .collect()
+        } else {
+            Vec::new()
+        };
         let (toggled, completion_position) = tab.render_editor(
             ui,
             !state.quit_approved,
@@ -1550,6 +1572,7 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
             current_line,
             diagnostics,
             test_class_action.is_some(),
+            &test_methods,
             indent_size,
             insert_spaces,
         );
@@ -1664,6 +1687,24 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
         if let Some(action) = toggled {
             if matches!(&action, super::GutterBreakpointAction::RunCurrentTestClass) {
                 run_test_class_action = test_class_action;
+            } else if let super::GutterBreakpointAction::RunCurrentTestMethod { line, name } =
+                action
+            {
+                run_test_method_action = state
+                    .project
+                    .as_ref()
+                    .and_then(|project| project.model.as_ref())
+                    .and_then(|model| {
+                        crate::app::actions::current_test_method_at_line_action(
+                            &path,
+                            model,
+                            line,
+                            &state.language.document_symbols,
+                        )
+                    })
+                    .filter(|action| {
+                        matches!(action, crate::app::events::BuildAction::RunTest { method_name: Some(method), .. } if method == &name)
+                    });
             } else {
                 breakpoint_action = Some(match action {
                     super::GutterBreakpointAction::Toggle(line) => {
@@ -1697,7 +1738,8 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
                             modified,
                         }
                     }
-                    super::GutterBreakpointAction::RunCurrentTestClass => unreachable!(),
+                    super::GutterBreakpointAction::RunCurrentTestClass
+                    | super::GutterBreakpointAction::RunCurrentTestMethod { .. } => unreachable!(),
                 });
             }
         }
@@ -1727,6 +1769,9 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
         state.enqueue(AppEvent::Debugger(action));
     }
     if let Some(action) = run_test_class_action {
+        state.enqueue(AppEvent::Build(action));
+    }
+    if let Some(action) = run_test_method_action {
         state.enqueue(AppEvent::Build(action));
     }
 }
