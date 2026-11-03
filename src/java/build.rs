@@ -181,10 +181,23 @@ impl BuildService {
         let program = build_program(&request.project, executable)?;
         let mut args = Vec::new();
         let mut module = None;
-        if let Some(class_name) = request.test_filter.as_deref() {
-            if request.task != BuildTask::Test || !valid_java_class_name(class_name) {
+        if let Some(test_filter) = request.test_filter.as_deref() {
+            let (class_name, method_name) = test_filter
+                .split_once('#')
+                .map_or((test_filter, None), |(class_name, method_name)| {
+                    (class_name, Some(method_name))
+                });
+            if request.task != BuildTask::Test
+                || !valid_java_class_name(class_name)
+                || method_name.is_some_and(|method| !valid_java_identifier(method))
+            {
                 return Err(BuildError("Choose a valid Java test class to run".into()));
             }
+            let maven_filter = test_filter;
+            let gradle_filter = method_name.map_or_else(
+                || class_name.to_owned(),
+                |method| format!("{class_name}.{method}"),
+            );
             match request.project.kind {
                 ProjectKind::Maven => {
                     let integration = request.test_task.as_deref() == Some("verify");
@@ -214,11 +227,11 @@ impl BuildService {
                         args.push(OsString::from("-am"));
                     }
                     if integration {
-                        args.push(OsString::from(format!("-Dit.test={class_name}")));
+                        args.push(OsString::from(format!("-Dit.test={maven_filter}")));
                         args.push(OsString::from("-Dfailsafe.failIfNoSpecifiedTests=false"));
                         args.push(OsString::from("verify"));
                     } else {
-                        args.push(OsString::from(format!("-Dtest={class_name}")));
+                        args.push(OsString::from(format!("-Dtest={maven_filter}")));
                         args.push(OsString::from("-Dsurefire.failIfNoSpecifiedTests=false"));
                         args.push(OsString::from("test"));
                     }
@@ -238,7 +251,7 @@ impl BuildService {
                     args.extend(["--console=plain", "--no-daemon"].map(OsString::from));
                     args.push(OsString::from(task));
                     args.push(OsString::from("--tests"));
-                    args.push(OsString::from(class_name));
+                    args.push(OsString::from(gradle_filter));
                 }
                 ProjectKind::Unknown => {
                     return Err(BuildError("Open a Maven or Gradle build first".into()));
@@ -630,6 +643,14 @@ pub(crate) fn valid_java_class_name(class_name: &str) -> bool {
                 .is_some_and(|ch| ch.is_alphabetic() || matches!(ch, '_' | '$'))
                 && chars.all(|ch| ch.is_alphanumeric() || matches!(ch, '_' | '$'))
         })
+}
+
+fn valid_java_identifier(name: &str) -> bool {
+    let mut chars = name.chars();
+    chars
+        .next()
+        .is_some_and(|ch| ch.is_alphabetic() || matches!(ch, '_' | '$'))
+        && chars.all(|ch| ch.is_alphanumeric() || matches!(ch, '_' | '$'))
 }
 
 fn build_program(project: &ProjectModel, executable: Option<&Path>) -> Result<PathBuf, BuildError> {
@@ -1552,6 +1573,24 @@ pub fn render(ui: &mut egui::Ui, state: &mut crate::app::AppState) {
                             {
                                 run_test = Some(crate::app::events::BuildAction::RunTest {
                                     class_name: failure.class_name.clone(),
+                                    method_name: None,
+                                    module_root: failure.module_root.clone(),
+                                    test_task: failure.test_task.clone(),
+                                    integration: failure.integration,
+                                });
+                            }
+                            // shortcut: only plain method names can be rerun from reports; add framework-aware selectors with richer report metadata.
+                            if valid_java_identifier(&failure.test_name)
+                                && ui
+                                    .add_enabled(
+                                        available && !state.build.running(),
+                                        egui::Button::new(crate::i18n::ui_text(ui, "Run method")),
+                                    )
+                                    .clicked()
+                            {
+                                run_test = Some(crate::app::events::BuildAction::RunTest {
+                                    class_name: failure.class_name.clone(),
+                                    method_name: Some(failure.test_name.clone()),
                                     module_root: failure.module_root.clone(),
                                     test_task: failure.test_task.clone(),
                                     integration: failure.integration,

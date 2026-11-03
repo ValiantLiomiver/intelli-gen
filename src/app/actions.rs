@@ -160,6 +160,7 @@ pub fn current_test_class_action(
     }
     Some(BuildAction::RunTest {
         class_name,
+        method_name: None,
         module_root: module_root.clone(),
         test_task: "test".into(),
         integration: false,
@@ -2311,6 +2312,7 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                         BuildAction::Clean => (BuildTask::Clean, None, None, None),
                         BuildAction::RunTest {
                             class_name,
+                            method_name,
                             module_root,
                             test_task,
                             integration,
@@ -2336,7 +2338,9 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                                     } else {
                                         "test".into()
                                     }),
-                                    Some(class_name),
+                                    Some(method_name.map_or(class_name.clone(), |method| {
+                                        format!("{class_name}#{method}")
+                                    })),
                                 )
                             } else if model.kind == crate::project::ProjectKind::Gradle {
                                 let task_path = if module_root == model.root {
@@ -2346,7 +2350,14 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                                         .ok_or("The test module is no longer part of this Gradle project")?;
                                     format!("{}:{test_task}", module.name)
                                 };
-                                (BuildTask::Test, None, Some(task_path), Some(class_name))
+                                (
+                                    BuildTask::Test,
+                                    None,
+                                    Some(task_path),
+                                    Some(method_name.map_or(class_name.clone(), |method| {
+                                        format!("{class_name}#{method}")
+                                    })),
+                                )
                             } else {
                                 return Err("Open a Maven or Gradle project to rerun a test".into());
                             }

@@ -128,6 +128,7 @@ pub enum BuildAction {
     Test,
     RunTest {
         class_name: String,
+        method_name: Option<String>,
         module_root: PathBuf,
         test_task: String,
         integration: bool,
