@@ -167,6 +167,27 @@ pub fn current_test_class_action(
     })
 }
 
+fn run_context_event(state: &AppState) -> AppEvent {
+    let test_action = if state.build.running() {
+        None
+    } else {
+        state
+            .active_tab
+            .and_then(|index| state.editor_tabs.get(index))
+            .zip(
+                state
+                    .project
+                    .as_ref()
+                    .and_then(|project| project.model.as_ref()),
+            )
+            .and_then(|(tab, model)| current_test_class_action(&tab.path, model))
+    };
+    test_action.map_or_else(
+        || AppEvent::Run(super::events::RunAction::Start),
+        AppEvent::Build,
+    )
+}
+
 fn current_navigation_location(state: &AppState) -> Option<super::NavigationLocation> {
     let tab = state
         .active_tab
@@ -405,7 +426,7 @@ pub fn keyboard_shortcuts(ctx: &egui::Context, state: &mut AppState) {
         ));
     }
     if ctx.input_mut(|input| input.consume_key(egui::Modifiers::CTRL, egui::Key::R)) {
-        state.enqueue(AppEvent::Run(super::events::RunAction::Start));
+        state.enqueue(AppEvent::RunContext);
     }
     if ctx.input_mut(|input| input.consume_key(egui::Modifiers::CTRL, egui::Key::D)) {
         state.enqueue(AppEvent::Debugger(super::events::DebuggerAction::Start));
@@ -1337,6 +1358,7 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                     tab.navigate_to_line_column(line, column);
                 }
             }
+            AppEvent::RunContext => state.enqueue(run_context_event(state)),
             AppEvent::OpenFileAtPosition(path, position) => {
                 navigate_to_position(state, path, position);
             }

@@ -330,20 +330,6 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
                 }
             });
             ui.menu_button(translator.text("Run"), |ui| {
-                let can_launch = state.project.as_ref()
-                    .and_then(|project| project.model.as_ref())
-                    .is_some_and(|model| model.kind != ProjectKind::Unknown)
-                    && state.run.selected().is_some()
-                    && !state.run.loading
-                    && !state.run.saving;
-                if ui.add_enabled(can_launch && !state.run.has_workers() && state.pending_run.is_none(), egui::Button::new(translator.text("Run Selected Configuration"))).clicked() {
-                    state.enqueue(AppEvent::Run(super::events::RunAction::Start));
-                    ui.close();
-                }
-                if ui.add_enabled(can_launch && !state.debugger.has_workers(), egui::Button::new(translator.text("Debug Selected Configuration"))).clicked() {
-                    state.enqueue(AppEvent::Debugger(super::events::DebuggerAction::Start));
-                    ui.close();
-                }
                 let test_action = state
                     .active_tab
                     .and_then(|index| state.editor_tabs.get(index))
@@ -355,6 +341,22 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
                             .as_ref()
                             .and_then(|model| actions::current_test_class_action(&tab.path, model))
                     });
+                let can_launch_configuration = state.project.as_ref()
+                    .and_then(|project| project.model.as_ref())
+                    .is_some_and(|model| model.kind != ProjectKind::Unknown)
+                    && state.run.selected().is_some()
+                    && !state.run.loading
+                    && !state.run.saving;
+                let can_run_context = (test_action.is_some() && !state.build.running())
+                    || can_launch_configuration;
+                if ui.add_enabled(can_run_context && !state.run.has_workers() && state.pending_run.is_none(), egui::Button::new(translator.text("Run Context Configuration"))).clicked() {
+                    state.enqueue(AppEvent::RunContext);
+                    ui.close();
+                }
+                if ui.add_enabled(can_launch_configuration && !state.debugger.has_workers(), egui::Button::new(translator.text("Debug Selected Configuration"))).clicked() {
+                    state.enqueue(AppEvent::Debugger(super::events::DebuggerAction::Start));
+                    ui.close();
+                }
                 let test_hint = if state.build.running() {
                     "Wait for the current build to finish"
                 } else {

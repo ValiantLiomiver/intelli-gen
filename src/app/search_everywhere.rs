@@ -272,10 +272,7 @@ impl SearchEverywhere {
             ("Build", AppEvent::Build(super::events::BuildAction::Build)),
             ("Test", AppEvent::Build(super::events::BuildAction::Test)),
             ("Clean", AppEvent::Build(super::events::BuildAction::Clean)),
-            (
-                "Run Selected Configuration    ⌃R",
-                AppEvent::Run(super::events::RunAction::Start),
-            ),
+            ("Run Context Configuration    ⌃R", AppEvent::RunContext),
             (
                 "Debug Selected Configuration    ⌃D",
                 AppEvent::Debugger(super::events::DebuggerAction::Start),
@@ -373,6 +370,9 @@ fn action_search_aliases(label: &str) -> &'static [&'static str] {
         "Reformat code    ⌥⌘L" => &["format_code", "formatta_codice"],
         "Build" => &["compile_project", "compila_progetto"],
         "Test" => &["run_tests", "esegui_test"],
+        "Run Context Configuration    ⌃R" => {
+            &["run_context", "run_current_test", "esegui_test_corrente"]
+        }
         "Save All                 ⇧⌘S" => &["save_all_files", "salva_tutti_i_file"],
         "Terminal" => &["command_line", "riga_di_comando"],
         _ => &[],

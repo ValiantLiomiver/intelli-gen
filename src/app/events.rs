@@ -59,6 +59,7 @@ pub enum AppEvent {
     FileStructureOpen,
     GoToLineOpen,
     GoToLine(usize, usize),
+    RunContext,
     SearchWorkspaceSymbols(String),
     Find(crate::editor::find_replace::FindAction),
     Search(SearchAction),
