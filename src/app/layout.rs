@@ -172,6 +172,22 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
                     ));
                     ui.close();
                 }
+                if ui.button(crate::i18n::ui_text(ui, "Next Problem    F2")).clicked() {
+                    state.enqueue(AppEvent::NavigateProblem { next: true });
+                    ui.close();
+                }
+                if ui.button(crate::i18n::ui_text(ui, "Previous Problem    ⇧F2")).clicked() {
+                    state.enqueue(AppEvent::NavigateProblem { next: false });
+                    ui.close();
+                }
+                if ui.add_enabled(state.last_edit_location.is_some(), egui::Button::new(crate::i18n::ui_text(ui, "Last Edit Location    ⇧⌘⌫"))).clicked() {
+                    state.enqueue(AppEvent::NavigateLastEditLocation);
+                    ui.close();
+                }
+                if ui.add_enabled(state.project.is_some(), egui::Button::new(crate::i18n::ui_text(ui, "Show Bookmarks    ⌘F3"))).clicked() {
+                    state.enqueue(AppEvent::ShowBookmarks);
+                    ui.close();
+                }
                 let test_source_available = state
                     .active_tab
                     .and_then(|index| state.editor_tabs.get(index))
@@ -314,18 +330,63 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
                 }
             });
             ui.menu_button(translator.text("Run"), |ui| {
-                let can_launch = state.project.as_ref()
+                let test_action = state
+                    .active_tab
+                    .and_then(|index| state.editor_tabs.get(index))
+                    .and_then(|tab| {
+                        state
+                            .project
+                            .as_ref()?
+                            .model
+                            .as_ref()
+                            .and_then(|model| actions::current_test_class_action(&tab.path, model))
+                    });
+                let test_method_action = state
+                    .active_tab
+                    .and_then(|index| state.editor_tabs.get(index))
+                    .and_then(|tab| {
+                        state.project.as_ref()?.model.as_ref().and_then(|model| {
+                            actions::current_test_method_action(
+                                &tab.path,
+                                model,
+                                tab.document.lsp_position(),
+                                &state.language.document_symbols,
+                                &state.language.document_test_methods,
+                            )
+                        })
+                    });
+                let can_launch_configuration = state.project.as_ref()
                     .and_then(|project| project.model.as_ref())
                     .is_some_and(|model| model.kind != ProjectKind::Unknown)
                     && state.run.selected().is_some()
                     && !state.run.loading
                     && !state.run.saving;
-                if ui.add_enabled(can_launch && !state.run.has_workers() && state.pending_run.is_none(), egui::Button::new(translator.text("Run Selected Configuration"))).clicked() {
-                    state.enqueue(AppEvent::Run(super::events::RunAction::Start));
+                let can_run_context = (test_action.is_some() && !state.build.running())
+                    || can_launch_configuration;
+                if ui.add_enabled(can_run_context && !state.run.has_workers() && state.pending_run.is_none(), egui::Button::new(translator.text("Run Context Configuration"))).clicked() {
+                    state.enqueue(AppEvent::RunContext);
                     ui.close();
                 }
-                if ui.add_enabled(can_launch && !state.debugger.has_workers(), egui::Button::new(translator.text("Debug Selected Configuration"))).clicked() {
+                if ui.add_enabled(can_launch_configuration && !state.debugger.has_workers(), egui::Button::new(translator.text("Debug Selected Configuration"))).clicked() {
                     state.enqueue(AppEvent::Debugger(super::events::DebuggerAction::Start));
+                    ui.close();
+                }
+                let test_hint = if state.build.running() {
+                    "Wait for the current build to finish"
+                } else {
+                    "Open a Java test file in src/test/java"
+                };
+                if ui.add_enabled(test_action.is_some() && !state.build.running(), egui::Button::new(crate::i18n::ui_text(ui, "Run Current Test Class")))
+                    .on_disabled_hover_text(crate::i18n::ui_text(ui, test_hint)).clicked() {
+                    if let Some(action) = test_action {
+                        state.enqueue(AppEvent::Build(action));
+                    }
+                    ui.close();
+                }
+                if ui.add_enabled(test_method_action.is_some() && !state.build.running(), egui::Button::new(crate::i18n::ui_text(ui, "Run Current Test Method"))).clicked() {
+                    if let Some(action) = test_method_action {
+                        state.enqueue(AppEvent::Build(action));
+                    }
                     ui.close();
                 }
                 let has_java_tab = state.active_tab
@@ -354,6 +415,12 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
                 }
             });
             ui.menu_button(translator.text("View"), |ui| {
+                if !state.settings.show_project_panel
+                    && ui.button(crate::i18n::ui_text(ui, "Show Project sidebar    ⌘1")).clicked()
+                {
+                    state.enqueue(AppEvent::ShowProjectPanel);
+                    ui.close();
+                }
                 let changed = ui
                     .checkbox(&mut state.settings.show_project_panel, translator.text("Project sidebar"))
                     .changed()
@@ -369,6 +436,10 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
                 if state.gradle_task_root.is_some()
                     && ui.button(translator.text(if state.gradle_collapsed { "Show Gradle sidebar" } else { "Hide Gradle sidebar" })).clicked() {
                     state.enqueue(AppEvent::Gradle(super::events::GradleAction::ToggleCollapsed));
+                }
+                if ui.button(crate::i18n::ui_text(ui, "Problems    ⌘6")).clicked() {
+                    state.enqueue(AppEvent::ShowPanel(ActivePanel::Problems));
+                    ui.close();
                 }
                 if ui
                     .checkbox(&mut state.settings.dark_mode, translator.text("Dark appearance"))
@@ -430,22 +501,33 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
     });
 
     egui::Panel::bottom("status_bar").show(ui, |ui| {
-        if let Some(tab) = state
+        let cursor_status = state
             .active_tab
             .and_then(|index| state.editor_tabs.get(index))
-        {
+            .map(|tab| {
+                (
+                    tab.document.cursor_line.to_string(),
+                    tab.document.cursor_column.to_string(),
+                    tab.path.clone(),
+                    tab.pending_rename_to.clone(),
+                )
+            });
+        if let Some((line, column, path, pending_rename_to)) = cursor_status {
             ui.horizontal(|ui| {
-                ui.label(crate::i18n::ui_format(
-                    ui,
-                    "Ln {line}, Col {column}",
-                    &[
-                        ("line", &tab.document.cursor_line.to_string()),
-                        ("column", &tab.document.cursor_column.to_string()),
-                    ],
-                ));
+                if ui
+                    .button(crate::i18n::ui_format(
+                        ui,
+                        "Ln {line}, Col {column}",
+                        &[("line", &line), ("column", &column)],
+                    ))
+                    .on_hover_text(crate::i18n::ui_text(ui, "Go to Line…    ⌘L"))
+                    .clicked()
+                {
+                    state.enqueue(AppEvent::GoToLineOpen);
+                }
                 ui.separator();
-                ui.label(tab.path.display().to_string());
-                if let Some(destination) = &tab.pending_rename_to {
+                ui.label(path.display().to_string());
+                if let Some(destination) = &pending_rename_to {
                     ui.separator();
                     ui.colored_label(
                         ui.visuals().warn_fg_color,
@@ -567,7 +649,22 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
                                 );
                             }
                             if let Some(tree) = &mut state.project_tree {
-                                let actions = tree.render(ui);
+                                let tree_query = tree.typeahead_query().map(str::to_owned);
+                                let tree_search = tree_query.and_then(|query| {
+                                    state.quick_open.ensure_indexed();
+                                    state.quick_open.update_matches(&query);
+                                    state
+                                        .quick_open
+                                        .first_match_path(&query)
+                                        .map(|path| (query, path.to_path_buf()))
+                                });
+                                let actions = tree.render(
+                                    ui,
+                                    &mut state.project_panel_focus_requested,
+                                    tree_search
+                                        .as_ref()
+                                        .map(|(query, path)| (query.as_str(), path.as_path())),
+                                );
                                 for action in actions {
                                     state.enqueue(match action {
                                         TreeAction::OpenFile(path) => AppEvent::OpenFile(path),
@@ -589,10 +686,13 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
                             }
                         } else {
                             ui.label(crate::i18n::ui_text(ui, "No project open"));
-                            if ui
-                                .button(crate::i18n::ui_text(ui, "Choose project directory…"))
-                                .clicked()
-                            {
+                            let choose_project =
+                                ui.button(crate::i18n::ui_text(ui, "Choose project directory…"));
+                            if state.project_panel_focus_requested {
+                                choose_project.request_focus();
+                                state.project_panel_focus_requested = false;
+                            }
+                            if choose_project.clicked() {
                                 actions::open_project_dialog(state);
                             }
                         }
@@ -762,16 +862,60 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
             location.range.start,
         ));
     }
-    if let Some(line) = state.go_to_line.render(ui.ctx()) {
-        if let Some(tab) = state
-            .active_tab
-            .and_then(|index| state.editor_tabs.get(index))
-        {
-            state.enqueue(AppEvent::OpenFileAtLine(tab.path.clone(), line));
-        }
+    if let Some((line, column)) = state.go_to_line.render(ui.ctx()) {
+        state.enqueue(AppEvent::GoToLine(line, column.unwrap_or(1)));
     }
     for action in state.find_replace.render(ui.ctx()) {
         state.enqueue(AppEvent::Find(action));
+    }
+    if state.bookmarks_open {
+        let entries = state
+            .project
+            .as_ref()
+            .map(|project| state.settings.project_bookmarks(&project.root).to_vec())
+            .unwrap_or_default();
+        let mut bookmarks_open = state.bookmarks_open;
+        let mut bookmark_actions = Vec::new();
+        egui::Window::new(crate::i18n::ui_text(ui, "Bookmarks"))
+            .open(&mut bookmarks_open)
+            .show(ui.ctx(), |ui| {
+                if entries.is_empty() {
+                    ui.label(crate::i18n::ui_text(ui, "No bookmarks in this project"));
+                }
+                for bookmark in &entries {
+                    ui.horizontal(|ui| {
+                        let name = bookmark
+                            .path
+                            .file_name()
+                            .unwrap_or(bookmark.path.as_os_str())
+                            .to_string_lossy();
+                        if ui
+                            .button(format!("{name}:{}", bookmark.line))
+                            .on_hover_text(bookmark.path.display().to_string())
+                            .clicked()
+                        {
+                            bookmark_actions.push(AppEvent::OpenFileAtLine(
+                                bookmark.path.clone(),
+                                bookmark.line as usize,
+                            ));
+                        }
+                        if ui
+                            .small_button(crate::i18n::ui_text(ui, "×"))
+                            .on_hover_text(crate::i18n::ui_text(ui, "Remove bookmark"))
+                            .clicked()
+                        {
+                            bookmark_actions.push(AppEvent::RemoveBookmark {
+                                path: bookmark.path.clone(),
+                                line: bookmark.line,
+                            });
+                        }
+                    });
+                }
+            });
+        state.bookmarks_open = bookmarks_open;
+        for action in bookmark_actions {
+            state.enqueue(action);
+        }
     }
     if let Some(dialog) = state.new_java_class.as_mut() {
         let mut create = false;

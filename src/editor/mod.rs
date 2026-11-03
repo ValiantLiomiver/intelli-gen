@@ -331,6 +331,8 @@ pub enum GutterBreakpointAction {
     Toggle(u32),
     SetEnabled { line: u32, enabled: bool },
     SetLogpoint { line: u32, message: String },
+    RunCurrentTestClass,
+    RunCurrentTestMethod { line: u32, name: String },
 }
 
 pub fn editor_gutter(
@@ -338,6 +340,7 @@ pub fn editor_gutter(
     output: &eframe::egui::text_edit::TextEditOutput,
     source: &std::path::Path,
     first_line: u32,
+    bookmarks: Option<&[u32]>,
     breakpoints: Option<&[u32]>,
     logpoints: Option<&[u32]>,
     disabled_breakpoints: Option<&[u32]>,
@@ -349,6 +352,8 @@ pub fn editor_gutter(
     >,
     current_line: Option<u32>,
     diagnostics: &[crate::java::lsp::LanguageDiagnostic],
+    test_class_line: Option<u32>,
+    test_methods: &[(u32, String)],
 ) -> Option<GutterBreakpointAction> {
     use eframe::egui;
     let mut action = None;
@@ -371,6 +376,11 @@ pub fn editor_gutter(
         let has_breakpoint = breakpoints.is_some_and(|lines| lines.contains(&line));
         let is_logpoint = logpoints.is_some_and(|lines| lines.contains(&line));
         let is_disabled = disabled_breakpoints.is_some_and(|lines| lines.contains(&line));
+        let test_method = test_methods
+            .iter()
+            .find(|(method_line, _)| *method_line == line)
+            .map(|(_, name)| name);
+        let is_test_class_line = test_class_line == Some(line);
         let status = (has_breakpoint || is_logpoint)
             .then(|| breakpoint_status?.get(&(source.to_path_buf(), line)))
             .flatten();
@@ -424,6 +434,15 @@ pub fn editor_gutter(
                 "▶",
                 egui::FontId::monospace(12.0),
                 egui::Color32::YELLOW,
+            );
+        }
+        if bookmarks.is_some_and(|lines| lines.contains(&line)) {
+            ui.painter().text(
+                egui::pos2(center.x + 38.0, center.y),
+                egui::Align2::CENTER_CENTER,
+                "◆",
+                egui::FontId::proportional(10.0),
+                egui::Color32::LIGHT_BLUE,
             );
         }
         ui.painter().text(
@@ -480,6 +499,28 @@ pub fn editor_gutter(
             egui::Popup::menu(&response)
                 .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
                 .show(|ui| {
+                    if is_test_class_line
+                        && ui
+                            .button(crate::i18n::ui_text(ui, "Run Current Test Class"))
+                            .clicked()
+                    {
+                        action = Some(GutterBreakpointAction::RunCurrentTestClass);
+                        ui.close();
+                    }
+                    if is_test_class_line {
+                        ui.separator();
+                    }
+                    if let Some(method) = test_method
+                        && ui
+                            .button(crate::i18n::ui_text(ui, "Run Current Test Method"))
+                            .clicked()
+                    {
+                        action = Some(GutterBreakpointAction::RunCurrentTestMethod {
+                            line,
+                            name: method.clone(),
+                        });
+                        ui.close();
+                    }
                     if is_disabled {
                         if ui
                             .button(crate::i18n::ui_text(ui, "Enable breakpoint"))
@@ -673,10 +714,13 @@ mod gutter_ui_tests {
                             &editor,
                             std::path::Path::new("Main.java"),
                             1,
+                            None,
                             Some(if disabled || empty { &[] } else { &[1] }),
                             Some(if logpoint && !disabled { &[1] } else { &[] }),
                             Some(if disabled { &[1] } else { &[] }),
                             None,
+                            None,
+                            &[],
                             None,
                             &[],
                         );

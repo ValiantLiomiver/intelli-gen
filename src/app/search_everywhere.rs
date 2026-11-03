@@ -185,7 +185,24 @@ impl SearchEverywhere {
                 AppEvent::SearchEverywhereOpen(SearchTab::Actions),
             ),
             ("Go to Line…    ⌘L", AppEvent::GoToLineOpen),
+            ("Show Project sidebar    ⌘1", AppEvent::ShowProjectPanel),
+            (
+                "Next Problem    F2",
+                AppEvent::NavigateProblem { next: true },
+            ),
+            (
+                "Previous Problem    ⇧F2",
+                AppEvent::NavigateProblem { next: false },
+            ),
             ("File Structure…    ⌘F12", AppEvent::FileStructureOpen),
+            (
+                "Evaluate Expression…    ⌥F8",
+                AppEvent::EvaluateExpressionOpen,
+            ),
+            (
+                "Problems    ⌘6",
+                AppEvent::ShowPanel(super::ActivePanel::Problems),
+            ),
             (
                 "Test / production source    ⌘⇧T",
                 AppEvent::ToggleTestSource,
@@ -195,6 +212,15 @@ impl SearchEverywhere {
                 AppEvent::ToggleBreakpointAtCaret,
             ),
             ("View Breakpoints…    ⌘⇧F8", AppEvent::ShowBreakpoints),
+            (
+                "Toggle line bookmark    F3",
+                AppEvent::ToggleBookmarkAtCaret,
+            ),
+            ("Show Bookmarks    ⌘F3", AppEvent::ShowBookmarks),
+            (
+                "Last Edit Location    ⇧⌘⌫",
+                AppEvent::NavigateLastEditLocation,
+            ),
             (
                 "Find in File…    ⌘F",
                 AppEvent::Find(crate::editor::find_replace::FindAction::Open { replace: false }),
@@ -246,10 +272,7 @@ impl SearchEverywhere {
             ("Build", AppEvent::Build(super::events::BuildAction::Build)),
             ("Test", AppEvent::Build(super::events::BuildAction::Test)),
             ("Clean", AppEvent::Build(super::events::BuildAction::Clean)),
-            (
-                "Run Selected Configuration    ⌃R",
-                AppEvent::Run(super::events::RunAction::Start),
-            ),
+            ("Run Context Configuration    ⌃R", AppEvent::RunContext),
             (
                 "Debug Selected Configuration    ⌃D",
                 AppEvent::Debugger(super::events::DebuggerAction::Start),
@@ -329,12 +352,27 @@ fn action_search_aliases(label: &str) -> &'static [&'static str] {
         "Test / production source    ⌘⇧T" => &["test_subject", "vai_al_test"],
         "Toggle line breakpoint    ⌘F8" => &["toggle_breakpoint", "punto_interruzione"],
         "View Breakpoints…    ⌘⇧F8" => &["view_breakpoints", "visualizza_breakpoint"],
+        "Next Problem    F2" => &["next_problem", "problema_successivo"],
+        "Previous Problem    ⇧F2" => &["previous_problem", "problema_precedente"],
+        "Problems    ⌘6" => &["problems", "problemi", "error_list", "elenco_errori"],
+        "Evaluate Expression…    ⌥F8" => &["evaluate_expression", "valuta_espressione"],
+        "Last Edit Location    ⇧⌘⌫" => &["last_edit_location", "ultima_modifica"],
+        "Toggle line bookmark    F3" => {
+            &["toggle_bookmark", "aggiungi_segnalibro", "segnalibro_riga"]
+        }
+        "Show Bookmarks    ⌘F3" => &["show_bookmarks", "mostra_segnalibri"],
+        "Show Project sidebar    ⌘1" => {
+            &["show_project_window", "project_sidebar", "mostra_progetto"]
+        }
         "Find usages    ⌥F7" => &["references", "riferimenti"],
         "Quick fixes    ⌥↩" => &["intentions", "correzioni_rapide"],
         "Organize imports    ⌃⌥O" => &["optimize_imports", "ottimizza_importazioni"],
         "Reformat code    ⌥⌘L" => &["format_code", "formatta_codice"],
         "Build" => &["compile_project", "compila_progetto"],
         "Test" => &["run_tests", "esegui_test"],
+        "Run Context Configuration    ⌃R" => {
+            &["run_context", "run_current_test", "esegui_test_corrente"]
+        }
         "Save All                 ⇧⌘S" => &["save_all_files", "salva_tutti_i_file"],
         "Terminal" => &["command_line", "riga_di_comando"],
         _ => &[],

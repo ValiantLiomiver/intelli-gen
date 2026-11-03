@@ -721,6 +721,19 @@ impl Document {
             + self.cursor_column.saturating_sub(1)
     }
 
+    pub fn character_index_at_line_column(&self, line: usize, column: usize) -> usize {
+        let mut offset = 0;
+        for (index, text) in self.text.split_inclusive('\n').enumerate() {
+            if index + 1 == line.max(1) {
+                let content = text.strip_suffix('\n').unwrap_or(text);
+                let content = content.strip_suffix('\r').unwrap_or(content);
+                return offset + column.saturating_sub(1).min(content.chars().count());
+            }
+            offset += text.chars().count();
+        }
+        self.text.chars().count()
+    }
+
     pub fn word_at_cursor(&self) -> Option<String> {
         let cursor = self.lsp_byte_offset(self.lsp_position())?;
         let line_start = self.text[..cursor]

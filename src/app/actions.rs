@@ -2,7 +2,7 @@ use eframe::egui;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use super::events::{AppEvent, MavenAction};
+use super::events::{AppEvent, BuildAction, MavenAction};
 use super::{AppState, EditorTab};
 use crate::editor::EditorCompletion;
 use crate::project::{
@@ -127,6 +127,126 @@ pub fn test_source_target(path: &Path) -> Option<PathBuf> {
     None
 }
 
+// shortcut: recognizes the conventional src/test/java layout; add custom source sets when the project model can identify them.
+pub fn current_test_class_action(
+    path: &Path,
+    model: &crate::project::ProjectModel,
+) -> Option<BuildAction> {
+    if model.kind == crate::project::ProjectKind::Unknown
+        || path.extension().is_none_or(|extension| extension != "java")
+    {
+        return None;
+    }
+    let module_root = model
+        .modules
+        .iter()
+        .map(|module| &module.root)
+        .chain(std::iter::once(&model.root))
+        .filter(|root| path.starts_with(root))
+        .max_by_key(|root| root.components().count())?;
+    let class_path = path
+        .strip_prefix(module_root)
+        .ok()?
+        .strip_prefix(Path::new("src/test/java"))
+        .ok()?;
+    let class_name = class_path
+        .with_extension("")
+        .components()
+        .map(|part| part.as_os_str().to_str())
+        .collect::<Option<Vec<_>>>()?
+        .join(".");
+    if !crate::java::build::valid_java_class_name(&class_name) {
+        return None;
+    }
+    Some(BuildAction::RunTest {
+        class_name,
+        method_name: None,
+        module_root: module_root.clone(),
+        test_task: "test".into(),
+        integration: false,
+    })
+}
+
+pub fn current_test_method_action(
+    path: &Path,
+    model: &crate::project::ProjectModel,
+    position: crate::java::lsp::Position,
+    symbols: &[crate::java::lsp::OutlineSymbol],
+    test_methods: &[(u32, String)],
+) -> Option<BuildAction> {
+    let mut action = current_test_class_action(path, model)?;
+    let symbol = symbols.iter().find(|symbol| {
+        let range = symbol.location.range;
+        symbol.location.path == path
+            && symbol.kind == 6
+            && crate::java::build::valid_java_class_name(&symbol.name)
+            && !symbol.name.contains('.')
+            && test_methods
+                .iter()
+                .any(|(line, name)| *line == range.start.line + 1 && name == &symbol.name)
+            && (range.start.line, range.start.character) <= (position.line, position.character)
+            && (position.line, position.character) < (range.end.line, range.end.character)
+    })?;
+    if let BuildAction::RunTest { method_name, .. } = &mut action {
+        *method_name = Some(symbol.name.clone());
+    }
+    Some(action)
+}
+
+pub fn current_test_method_at_line_action(
+    path: &Path,
+    model: &crate::project::ProjectModel,
+    line: u32,
+    symbols: &[crate::java::lsp::OutlineSymbol],
+    test_methods: &[(u32, String)],
+) -> Option<BuildAction> {
+    let mut action = current_test_class_action(path, model)?;
+    let symbol = symbols.iter().find(|symbol| {
+        symbol.location.path == path
+            && symbol.kind == 6
+            && symbol.location.range.start.line + 1 == line
+            && crate::java::build::valid_java_class_name(&symbol.name)
+            && !symbol.name.contains('.')
+            && test_methods
+                .iter()
+                .any(|(method_line, name)| *method_line == line && name == &symbol.name)
+    })?;
+    if let BuildAction::RunTest { method_name, .. } = &mut action {
+        *method_name = Some(symbol.name.clone());
+    }
+    Some(action)
+}
+
+fn run_context_event(state: &AppState) -> AppEvent {
+    let test_action = if state.build.running() {
+        None
+    } else {
+        state
+            .active_tab
+            .and_then(|index| state.editor_tabs.get(index))
+            .zip(
+                state
+                    .project
+                    .as_ref()
+                    .and_then(|project| project.model.as_ref()),
+            )
+            .and_then(|(tab, model)| {
+                current_test_method_action(
+                    &tab.path,
+                    model,
+                    tab.document.lsp_position(),
+                    &state.language.document_symbols,
+                    &state.language.document_test_methods,
+                )
+                .or_else(|| current_test_class_action(&tab.path, model))
+            })
+    };
+    test_action.map_or_else(
+        || AppEvent::Run(super::events::RunAction::Start),
+        AppEvent::Build,
+    )
+}
+
 fn current_navigation_location(state: &AppState) -> Option<super::NavigationLocation> {
     let tab = state
         .active_tab
@@ -236,6 +356,25 @@ pub fn open_file_dialog(state: &mut AppState) {
     }
 }
 
+fn debugger_control_event(
+    state: &AppState,
+    request: fn(i64) -> crate::debugger::stack::InspectRequest,
+) -> Option<AppEvent> {
+    let debugger = &state.debugger;
+    let controller = debugger.controller()?;
+    if controller.epoch != debugger.inspector.epoch
+        || !matches!(debugger.state, crate::debugger::DebugState::Stopped)
+        || debugger.inspector.control_pending
+    {
+        return None;
+    }
+    Some(AppEvent::Debugger(super::events::DebuggerAction::Inspect {
+        epoch: controller.epoch,
+        selection: debugger.inspector.selection,
+        request: request(debugger.inspector.selected_thread?),
+    }))
+}
+
 pub fn keyboard_shortcuts(ctx: &egui::Context, state: &mut AppState) {
     if state.quit_approved {
         return;
@@ -271,6 +410,62 @@ pub fn keyboard_shortcuts(ctx: &egui::Context, state: &mut AppState) {
     }) {
         state.enqueue(AppEvent::ShowBreakpoints);
     }
+    if ctx.input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, egui::Key::Num1)) {
+        state.enqueue(AppEvent::ShowProjectPanel);
+    }
+    if ctx.input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, egui::Key::Num6)) {
+        state.enqueue(AppEvent::ShowPanel(super::ActivePanel::Problems));
+    }
+    if ctx.input_mut(|input| {
+        input.consume_key(
+            egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
+            egui::Key::Backspace,
+        )
+    }) {
+        state.enqueue(AppEvent::NavigateLastEditLocation);
+    }
+    if ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::F3)) {
+        state.enqueue(AppEvent::ToggleBookmarkAtCaret);
+    }
+    if ctx.input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, egui::Key::F3)) {
+        state.enqueue(AppEvent::ShowBookmarks);
+    }
+    if ctx.input_mut(|input| input.consume_key(egui::Modifiers::ALT, egui::Key::F8)) {
+        state.enqueue(AppEvent::EvaluateExpressionOpen);
+    }
+    if ctx.input_mut(|input| input.consume_key(egui::Modifiers::SHIFT, egui::Key::F2)) {
+        state.enqueue(AppEvent::NavigateProblem { next: false });
+    } else if ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::F2)) {
+        state.enqueue(AppEvent::NavigateProblem { next: true });
+    }
+    for (modifiers, key, request) in [
+        (
+            egui::Modifiers::COMMAND | egui::Modifiers::ALT,
+            egui::Key::R,
+            crate::debugger::stack::InspectRequest::Continue as fn(i64) -> _,
+        ),
+        (
+            egui::Modifiers::NONE,
+            egui::Key::F7,
+            crate::debugger::stack::InspectRequest::StepInto,
+        ),
+        (
+            egui::Modifiers::NONE,
+            egui::Key::F8,
+            crate::debugger::stack::InspectRequest::StepOver,
+        ),
+        (
+            egui::Modifiers::SHIFT,
+            egui::Key::F8,
+            crate::debugger::stack::InspectRequest::StepOut,
+        ),
+    ] {
+        if ctx.input_mut(|input| input.consume_key(modifiers, key))
+            && let Some(event) = debugger_control_event(state, request)
+        {
+            state.enqueue(event);
+        }
+    }
     if state.find_replace.visible
         && ctx.input_mut(|input| {
             input.consume_key(
@@ -290,7 +485,7 @@ pub fn keyboard_shortcuts(ctx: &egui::Context, state: &mut AppState) {
         ));
     }
     if ctx.input_mut(|input| input.consume_key(egui::Modifiers::CTRL, egui::Key::R)) {
-        state.enqueue(AppEvent::Run(super::events::RunAction::Start));
+        state.enqueue(AppEvent::RunContext);
     }
     if ctx.input_mut(|input| input.consume_key(egui::Modifiers::CTRL, egui::Key::D)) {
         state.enqueue(AppEvent::Debugger(super::events::DebuggerAction::Start));
@@ -740,13 +935,10 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                 let root = opened.root;
                 let project = opened.project;
                 state.project_editor_config = opened.editor_config;
-                if state
-                    .project
-                    .as_ref()
-                    .is_some_and(|current| current.root != root)
-                {
+                if state.project.as_ref().map(|current| &current.root) != Some(&root) {
                     state.navigation_back.clear();
                     state.navigation_forward.clear();
+                    state.last_edit_location = None;
                 }
                 state.quick_open.set_project(Some(root.clone()));
                 if state.project.as_ref().map(|project| &project.root) != Some(&root) {
@@ -1184,8 +1376,13 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
             }
             AppEvent::GoToLineOpen => {
                 if !state.quit_requested {
-                    if state.active_tab.is_some() {
-                        state.go_to_line.open();
+                    if let Some(tab) = state
+                        .active_tab
+                        .and_then(|index| state.editor_tabs.get(index))
+                    {
+                        state
+                            .go_to_line
+                            .open(tab.document.cursor_line, tab.document.cursor_column);
                     } else {
                         state.status = "Open a file before navigating to a line".into();
                     }
@@ -1212,11 +1409,74 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                     },
                 );
             }
+            AppEvent::GoToLine(line, column) => {
+                if let Some(tab) = state
+                    .active_tab
+                    .and_then(|index| state.editor_tabs.get_mut(index))
+                {
+                    tab.navigate_to_line_column(line, column);
+                }
+            }
+            AppEvent::RunContext => state.enqueue(run_context_event(state)),
             AppEvent::OpenFileAtPosition(path, position) => {
                 navigate_to_position(state, path, position);
             }
             AppEvent::NavigateBack => move_navigation_history(state, true),
             AppEvent::NavigateForward => move_navigation_history(state, false),
+            AppEvent::NavigateLastEditLocation => {
+                if let Some(location) = state.last_edit_location.clone() {
+                    navigate_to_position(state, location.path, location.position);
+                }
+            }
+            AppEvent::ShowProjectPanel => {
+                state.project_panel_focus_requested = true;
+                if !state.settings.show_project_panel {
+                    state.settings.show_project_panel = true;
+                    save_settings(state);
+                }
+            }
+            AppEvent::ToggleBookmarkAtCaret => {
+                let Some((root, path, line)) = state.project.as_ref().and_then(|project| {
+                    state
+                        .active_tab
+                        .and_then(|index| state.editor_tabs.get(index))
+                        .filter(|tab| tab.path.starts_with(&project.root))
+                        .map(|tab| {
+                            (
+                                project.root.clone(),
+                                tab.path.clone(),
+                                tab.document.lsp_position().line.saturating_add(1),
+                            )
+                        })
+                }) else {
+                    state.status = "Open a project file to add a bookmark".into();
+                    continue;
+                };
+                let added = state.settings.toggle_line_bookmark(root, path, line);
+                save_settings(state);
+                state.status = if added {
+                    "Bookmark added".into()
+                } else {
+                    "Bookmark removed".into()
+                };
+            }
+            AppEvent::ShowBookmarks => state.bookmarks_open = true,
+            AppEvent::RemoveBookmark { path, line } => {
+                if let Some(root) = state
+                    .project
+                    .as_ref()
+                    .filter(|project| path.starts_with(&project.root))
+                    .map(|project| project.root.clone())
+                {
+                    state.settings.toggle_line_bookmark(root, path, line);
+                    save_settings(state);
+                }
+            }
+            AppEvent::NavigateProblem { next } => {
+                if !state.quit_requested {
+                    super::problems::navigate(state, next);
+                }
+            }
             AppEvent::ToggleTestSource => {
                 if let Some(path) = state
                     .active_tab
@@ -1624,6 +1884,22 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                 if !state.settings.show_tool_window {
                     state.settings.show_tool_window = true;
                     save_settings(state);
+                }
+            }
+            AppEvent::EvaluateExpressionOpen => {
+                let debugger = &state.debugger;
+                let ready = debugger.controller().is_some_and(|controller| {
+                    controller.epoch == debugger.inspector.epoch
+                        && matches!(debugger.state, crate::debugger::DebugState::Stopped)
+                        && debugger.inspector.selected_frame.is_some()
+                        && !debugger.inspector.control_pending
+                });
+                if ready {
+                    state.debugger.inspector.focus_expression_requested = true;
+                    state.enqueue(AppEvent::ShowPanel(super::ActivePanel::Debugger));
+                } else {
+                    state.status =
+                        "Stop the debugger at a breakpoint before evaluating an expression".into();
                 }
             }
             AppEvent::SettingsChanged => {
@@ -2130,6 +2406,7 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                         BuildAction::Clean => (BuildTask::Clean, None, None, None),
                         BuildAction::RunTest {
                             class_name,
+                            method_name,
                             module_root,
                             test_task,
                             integration,
@@ -2155,7 +2432,9 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                                     } else {
                                         "test".into()
                                     }),
-                                    Some(class_name),
+                                    Some(method_name.map_or(class_name.clone(), |method| {
+                                        format!("{class_name}#{method}")
+                                    })),
                                 )
                             } else if model.kind == crate::project::ProjectKind::Gradle {
                                 let task_path = if module_root == model.root {
@@ -2165,7 +2444,14 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                                         .ok_or("The test module is no longer part of this Gradle project")?;
                                     format!("{}:{test_task}", module.name)
                                 };
-                                (BuildTask::Test, None, Some(task_path), Some(class_name))
+                                (
+                                    BuildTask::Test,
+                                    None,
+                                    Some(task_path),
+                                    Some(method_name.map_or(class_name.clone(), |method| {
+                                        format!("{class_name}#{method}")
+                                    })),
+                                )
                             } else {
                                 return Err("Open a Maven or Gradle project to rerun a test".into());
                             }
@@ -3533,6 +3819,7 @@ fn finish_workspace_replace(
 }
 
 fn editor_completed(state: &mut AppState, completion: EditorCompletion) {
+    let mut bookmarks_changed = false;
     match completion {
         EditorCompletion::LoadedMany { request, result } => {
             if state.pending_workspace_replacements.contains_key(&request) {
@@ -3605,10 +3892,19 @@ fn editor_completed(state: &mut AppState, completion: EditorCompletion) {
                         state
                             .debugger
                             .rename_breakpoint_source(&path, saved_path.clone());
+                        state
+                            .settings
+                            .rename_bookmark_path(&path, saved_path.clone());
+                        bookmarks_changed = true;
                         tab.path = saved_path.clone();
                         tab.document.path = saved_path.clone();
                         tab.pending_rename_to = None;
                         current_path = saved_path.clone();
+                        if let Some(location) = &mut state.last_edit_location
+                            && location.path == path
+                        {
+                            location.path = saved_path.clone();
+                        }
                         if state.pending_close.as_deref() == Some(path.as_path()) {
                             state.pending_close = Some(saved_path.clone());
                         }
@@ -3689,6 +3985,9 @@ fn editor_completed(state: &mut AppState, completion: EditorCompletion) {
             }
         }
     }
+    if bookmarks_changed {
+        save_settings(state);
+    }
 }
 
 fn advance_quit(state: &mut AppState) {
@@ -3707,7 +4006,7 @@ fn advance_quit(state: &mut AppState) {
     }
 }
 
-fn save_settings(state: &mut AppState) {
+pub(crate) fn save_settings(state: &mut AppState) {
     if state.settings_writable {
         match state.settings_saver.start(state.settings.clone()) {
             Ok(generation) => {

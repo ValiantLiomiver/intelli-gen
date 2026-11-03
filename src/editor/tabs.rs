@@ -514,6 +514,16 @@ impl EditorTab {
         self.pending_line = Some(line.max(1));
     }
 
+    pub fn navigate_to_line_column(&mut self, line: usize, column: usize) {
+        let line = line.max(1).min(self.document.text.split('\n').count());
+        let index = self.document.character_index_at_line_column(line, column);
+        self.active_snippet_tab_stop = None;
+        self.snippet_tab_stops.clear();
+        self.pending_selection = None;
+        self.pending_line = Some(line);
+        self.pending_character_index = Some(index);
+    }
+
     pub fn navigate_to_character_index(&mut self, index: usize) {
         self.active_snippet_tab_stop = None;
         self.snippet_tab_stops.clear();
@@ -792,6 +802,7 @@ impl EditorTab {
         &mut self,
         ui: &mut egui::Ui,
         allow_edits: bool,
+        bookmarks: &[u32],
         breakpoints: &[u32],
         logpoints: &[u32],
         disabled_breakpoints: &[u32],
@@ -801,6 +812,8 @@ impl EditorTab {
         >,
         current_line: Option<u32>,
         diagnostics: &[crate::java::lsp::LanguageDiagnostic],
+        test_class_line: Option<u32>,
+        test_methods: &[(u32, String)],
         indent_size: usize,
         insert_spaces: bool,
     ) -> (Option<super::GutterBreakpointAction>, Option<egui::Pos2>) {
@@ -812,12 +825,15 @@ impl EditorTab {
                 self.render_paged_editor(
                     ui,
                     allow_edits && !self.close_after_save,
+                    bookmarks,
                     breakpoints,
                     logpoints,
                     disabled_breakpoints,
                     breakpoint_status,
                     current_line,
                     diagnostics,
+                    test_class_line,
+                    test_methods,
                     indent_size,
                     insert_spaces,
                 ),
@@ -944,12 +960,15 @@ impl EditorTab {
                         &output,
                         &self.path,
                         1,
+                        Some(bookmarks),
                         java.then_some(breakpoints),
                         java.then_some(logpoints),
                         java.then_some(disabled_breakpoints),
                         java.then_some(breakpoint_status),
                         java.then_some(current_line).flatten(),
                         diagnostics,
+                        test_class_line,
+                        test_methods,
                     );
                     if let Some(line) = navigation {
                         let height =
@@ -1097,6 +1116,7 @@ impl EditorTab {
         &mut self,
         ui: &mut egui::Ui,
         allow_edits: bool,
+        bookmarks: &[u32],
         breakpoints: &[u32],
         logpoints: &[u32],
         disabled_breakpoints: &[u32],
@@ -1106,6 +1126,8 @@ impl EditorTab {
         >,
         current_line: Option<u32>,
         diagnostics: &[crate::java::lsp::LanguageDiagnostic],
+        test_class_line: Option<u32>,
+        test_methods: &[(u32, String)],
         indent_size: usize,
         insert_spaces: bool,
     ) -> Option<super::GutterBreakpointAction> {
@@ -1264,12 +1286,15 @@ impl EditorTab {
                         &output,
                         &self.path,
                         first_line,
+                        Some(bookmarks),
                         Some(breakpoints),
                         Some(logpoints),
                         Some(disabled_breakpoints),
                         Some(breakpoint_status),
                         current_line,
                         diagnostics,
+                        test_class_line,
+                        test_methods,
                     );
                     output
                 })
@@ -1390,14 +1415,44 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
         .active_tab
         .and_then(|index| state.editor_tabs.get(index))
         .map(|tab| tab.path.clone());
+    if let Some(tab) = state
+        .active_tab
+        .and_then(|index| state.editor_tabs.get(index))
+        && state
+            .project
+            .as_ref()
+            .and_then(|project| project.model.as_ref())
+            .and_then(|model| crate::app::actions::current_test_class_action(&tab.path, model))
+            .is_some()
+    {
+        state.language.ensure_document_symbols(&tab.document);
+    }
     let diagnostics = active_path
         .as_ref()
         .and_then(|path| state.language.diagnostics.get(path))
         .map_or(&[][..], Vec::as_slice);
+    let bookmark_lines: Vec<_> = state
+        .project
+        .as_ref()
+        .zip(active_path.as_ref())
+        .map(|(project, path)| {
+            state
+                .settings
+                .project_bookmarks(&project.root)
+                .iter()
+                .filter(|bookmark| &bookmark.path == path)
+                .map(|bookmark| bookmark.line)
+                .collect()
+        })
+        .unwrap_or_default();
     let mut editor_command = None;
     let mut breakpoint_action = None;
+    let mut run_test_class_action = None;
+    let mut run_test_method_action = None;
     let mut completion_popup_action = None;
     let mut hover_popup_dismissed = false;
+    let mut last_edit_location = None;
+    let mut bookmarks_adjusted = false;
     let (indent_size, insert_spaces) = state
         .active_tab
         .and_then(|index| state.editor_tabs.get(index))
@@ -1431,18 +1486,130 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
             .filter(|frame| frame.source.as_ref() == Some(&tab.path))
             .map(|frame| frame.line);
         let revision = tab.document.revision;
+        let old_line_count = tab.document.text.matches('\n').count() + 1;
+        let edit_origin = crate::app::NavigationLocation {
+            path: tab.path.clone(),
+            position: tab.document.lsp_position(),
+        };
+        let editor_id = if tab.document.text.len() > PAGED_EDITOR_BYTES {
+            egui::Id::new(("paged_source_editor", &tab.path))
+        } else {
+            egui::Id::new(("source_editor", &tab.path))
+        };
+        let edit_input = ui
+            .ctx()
+            .memory(|memory| memory.focused() == Some(editor_id))
+            && ui.input(|input| {
+                input.events.iter().any(|event| match event {
+                    egui::Event::Text(_) | egui::Event::Cut | egui::Event::Paste(_) => true,
+                    egui::Event::Key {
+                        key, pressed: true, ..
+                    } => matches!(
+                        key,
+                        egui::Key::Backspace
+                            | egui::Key::Delete
+                            | egui::Key::Enter
+                            | egui::Key::Tab
+                    ),
+                    _ => false,
+                })
+            });
+        let selection_lines = edit_input
+            .then(|| {
+                egui::text_edit::TextEditState::load(ui.ctx(), editor_id)
+                    .and_then(|editor| editor.cursor.char_range())
+                    .filter(|range| !range.is_empty())
+                    .map(|range| {
+                        let selected = range.as_sorted_char_range();
+                        let line_at = |index: usize| {
+                            tab.document
+                                .text
+                                .chars()
+                                .take(index)
+                                .filter(|character| *character == '\n')
+                                .count() as u32
+                                + 1
+                        };
+                        let start: usize = selected.start.into();
+                        let end: usize = selected.end.into();
+                        (line_at(start), line_at(end.saturating_sub(1)))
+                    })
+            })
+            .flatten();
+        let test_class_action = if state.build.running() {
+            None
+        } else {
+            state
+                .project
+                .as_ref()
+                .and_then(|project| project.model.as_ref())
+                .and_then(|model| crate::app::actions::current_test_class_action(&tab.path, model))
+        };
+        let test_class_line = test_class_action.as_ref().and_then(|action| {
+            let crate::app::events::BuildAction::RunTest { class_name, .. } = action else {
+                return None;
+            };
+            let class_name = class_name.rsplit('.').next()?;
+            state
+                .language
+                .document_symbols
+                .iter()
+                .find(|symbol| {
+                    symbol.location.path == tab.path
+                        && symbol.kind == 5
+                        && symbol.name == class_name
+                })
+                .map(|symbol| symbol.location.range.start.line + 1)
+        });
+        let test_methods = if test_class_action.is_some()
+            && state.language.document_symbols_path.as_ref() == Some(&tab.path)
+        {
+            state.language.document_test_methods.as_slice()
+        } else {
+            &[]
+        };
         let (toggled, completion_position) = tab.render_editor(
             ui,
             !state.quit_approved,
+            &bookmark_lines,
             &lines,
             &logpoint_lines,
             &disabled_lines,
             breakpoint_status,
             current_line,
             diagnostics,
+            test_class_line,
+            &test_methods,
             indent_size,
             insert_spaces,
         );
+        if tab.document.revision != revision {
+            let new_line_count = tab.document.text.matches('\n').count() + 1;
+            let line_delta = new_line_count as i64 - old_line_count as i64;
+            let (start_line, end_line) = if let Some(lines) = selection_lines {
+                lines
+            } else {
+                let line = edit_origin.position.line.saturating_add(1);
+                if line_delta < 0 && edit_origin.position.character == 0 && line > 1 {
+                    (line - 1, line)
+                } else {
+                    (line, line)
+                }
+            };
+            let shift_start =
+                selection_lines.is_none() && line_delta > 0 && edit_origin.position.character == 0;
+            last_edit_location = Some(edit_origin);
+            if let Some(project) = &state.project {
+                bookmarks_adjusted = state.settings.remap_bookmarks_after_edit(
+                    &project.root,
+                    &tab.path,
+                    start_line,
+                    end_line,
+                    line_delta,
+                    shift_start,
+                );
+            }
+        }
         let path = tab.path.clone();
         if let Some(position) = completion_position {
             let caret = tab.document.lsp_position();
@@ -1525,40 +1692,71 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
             state.debugger.breakpoints.modified.remove(&path);
         }
         if let Some(action) = toggled {
-            breakpoint_action = Some(match action {
-                super::GutterBreakpointAction::Toggle(line) => {
-                    crate::app::events::DebuggerAction::ToggleBreakpoint {
-                        source: path,
-                        line,
-                        modified,
+            if matches!(&action, super::GutterBreakpointAction::RunCurrentTestClass) {
+                run_test_class_action = test_class_action;
+            } else if let super::GutterBreakpointAction::RunCurrentTestMethod { line, name } =
+                action
+            {
+                run_test_method_action = state
+                    .project
+                    .as_ref()
+                    .and_then(|project| project.model.as_ref())
+                    .and_then(|model| {
+                        crate::app::actions::current_test_method_at_line_action(
+                            &path,
+                            model,
+                            line,
+                            &state.language.document_symbols,
+                            &state.language.document_test_methods,
+                        )
+                    })
+                    .filter(|action| {
+                        matches!(action, crate::app::events::BuildAction::RunTest { method_name: Some(method), .. } if method == &name)
+                    });
+            } else {
+                breakpoint_action = Some(match action {
+                    super::GutterBreakpointAction::Toggle(line) => {
+                        crate::app::events::DebuggerAction::ToggleBreakpoint {
+                            source: path,
+                            line,
+                            modified,
+                        }
                     }
-                }
-                super::GutterBreakpointAction::SetEnabled { line, enabled } => {
-                    let point = state
-                        .debugger
-                        .breakpoints
-                        .sources
-                        .get(&path)
-                        .and_then(|points| points.iter().find(|point| point.line == line));
-                    crate::app::events::DebuggerAction::UpdateBreakpoint {
-                        source: path,
-                        line,
-                        condition: point.and_then(|point| point.condition.clone()),
-                        log_message: point.and_then(|point| point.log_message.clone()),
-                        enabled,
-                        modified,
+                    super::GutterBreakpointAction::SetEnabled { line, enabled } => {
+                        let point = state
+                            .debugger
+                            .breakpoints
+                            .sources
+                            .get(&path)
+                            .and_then(|points| points.iter().find(|point| point.line == line));
+                        crate::app::events::DebuggerAction::UpdateBreakpoint {
+                            source: path,
+                            line,
+                            condition: point.and_then(|point| point.condition.clone()),
+                            log_message: point.and_then(|point| point.log_message.clone()),
+                            enabled,
+                            modified,
+                        }
                     }
-                }
-                super::GutterBreakpointAction::SetLogpoint { line, message } => {
-                    crate::app::events::DebuggerAction::SetLogpoint {
-                        source: path,
-                        line,
-                        message,
-                        modified,
+                    super::GutterBreakpointAction::SetLogpoint { line, message } => {
+                        crate::app::events::DebuggerAction::SetLogpoint {
+                            source: path,
+                            line,
+                            message,
+                            modified,
+                        }
                     }
-                }
-            });
+                    super::GutterBreakpointAction::RunCurrentTestClass
+                    | super::GutterBreakpointAction::RunCurrentTestMethod { .. } => unreachable!(),
+                });
+            }
         }
+    }
+    if let Some(location) = last_edit_location {
+        state.last_edit_location = Some(location);
+    }
+    if bookmarks_adjusted {
+        crate::app::actions::save_settings(state);
     }
     if hover_popup_dismissed {
         state.language.hover = None;
@@ -1577,6 +1775,12 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
     }
     if let Some(action) = breakpoint_action {
         state.enqueue(AppEvent::Debugger(action));
+    }
+    if let Some(action) = run_test_class_action {
+        state.enqueue(AppEvent::Build(action));
+    }
+    if let Some(action) = run_test_method_action {
+        state.enqueue(AppEvent::Build(action));
     }
 }
 
