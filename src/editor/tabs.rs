@@ -1553,6 +1553,10 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
                 .filter(|symbol| {
                     symbol.location.path == tab.path
                         && symbol.kind == 6
+                        && crate::app::actions::is_java_test_method(
+                            &tab.document.text,
+                            symbol.location.range.start.line,
+                        )
                         && crate::java::build::valid_java_class_name(&symbol.name)
                         && !symbol.name.contains('.')
                 })
@@ -1700,6 +1704,7 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
                             model,
                             line,
                             &state.language.document_symbols,
+                            &tab.document.text,
                         )
                     })
                     .filter(|action| {

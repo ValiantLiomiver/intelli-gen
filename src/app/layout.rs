@@ -351,6 +351,7 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
                                 model,
                                 tab.document.lsp_position(),
                                 &state.language.document_symbols,
+                                &tab.document.text,
                             )
                         })
                     });

@@ -172,8 +172,8 @@ pub fn current_test_method_action(
     model: &crate::project::ProjectModel,
     position: crate::java::lsp::Position,
     symbols: &[crate::java::lsp::OutlineSymbol],
+    source: &str,
 ) -> Option<BuildAction> {
-    // shortcut: may offer helper methods in test sources; add framework-aware test discovery to filter them.
     let mut action = current_test_class_action(path, model)?;
     let symbol = symbols.iter().find(|symbol| {
         let range = symbol.location.range;
@@ -181,6 +181,7 @@ pub fn current_test_method_action(
             && symbol.kind == 6
             && crate::java::build::valid_java_class_name(&symbol.name)
             && !symbol.name.contains('.')
+            && is_java_test_method(source, range.start.line)
             && (range.start.line, range.start.character) <= (position.line, position.character)
             && (position.line, position.character) < (range.end.line, range.end.character)
     })?;
@@ -195,12 +196,14 @@ pub fn current_test_method_at_line_action(
     model: &crate::project::ProjectModel,
     line: u32,
     symbols: &[crate::java::lsp::OutlineSymbol],
+    source: &str,
 ) -> Option<BuildAction> {
     let mut action = current_test_class_action(path, model)?;
     let symbol = symbols.iter().find(|symbol| {
         symbol.location.path == path
             && symbol.kind == 6
             && symbol.location.range.start.line + 1 == line
+            && is_java_test_method(source, symbol.location.range.start.line)
             && crate::java::build::valid_java_class_name(&symbol.name)
             && !symbol.name.contains('.')
     })?;
@@ -208,6 +211,49 @@ pub fn current_test_method_at_line_action(
         *method_name = Some(symbol.name.clone());
     }
     Some(action)
+}
+
+pub(crate) fn is_java_test_method(source: &str, method_line: u32) -> bool {
+    // shortcut: recognizes direct JUnit/TestNG annotations; resolve composed annotations when framework metadata is available.
+    fn is_test_annotation(line: &str) -> bool {
+        let Some(annotation) = line.trim_start().strip_prefix('@') else {
+            return false;
+        };
+        matches!(
+            annotation
+                .split(|character: char| character == '(' || character.is_whitespace())
+                .next()
+                .unwrap_or_default()
+                .rsplit('.')
+                .next()
+                .unwrap_or_default(),
+            "Test" | "ParameterizedTest" | "RepeatedTest" | "TestFactory" | "TestTemplate"
+        )
+    }
+
+    let lines: Vec<_> = source.lines().collect();
+    let end = method_line as usize;
+    if lines.get(end).is_some_and(|line| is_test_annotation(line)) {
+        return true;
+    }
+    for line in lines.iter().take(end).rev().take(16) {
+        let line = line.trim();
+        if line.is_empty()
+            || line.starts_with("//")
+            || line.starts_with("/*")
+            || line.starts_with('*')
+        {
+            continue;
+        }
+        if line.starts_with('@') {
+            if is_test_annotation(line) {
+                return true;
+            }
+        } else {
+            break;
+        }
+    }
+    false
 }
 
 fn run_context_event(state: &AppState) -> AppEvent {
@@ -229,6 +275,7 @@ fn run_context_event(state: &AppState) -> AppEvent {
                     model,
                     tab.document.lsp_position(),
                     &state.language.document_symbols,
+                    &tab.document.text,
                 )
                 .or_else(|| current_test_class_action(&tab.path, model))
             })
