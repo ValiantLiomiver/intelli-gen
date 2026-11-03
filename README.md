@@ -36,7 +36,7 @@ The command-line link accepts the same optional project or file path: `dist/inte
 | Action | Shortcut |
 | --- | --- |
 | Open project / file | File → Open Project… / Open File… |
-| Show Project sidebar | `⌘1` |
+| Show Project sidebar and navigate its tree | `⌘1`, then `↑` / `↓`, `←` / `→`, `Enter` |
 | Go to class | `⌘O` |
 | Go to file | `⇧⌘O` |
 | Search Everywhere | `Double Shift`; also Navigate → Search Everywhere… |
@@ -73,6 +73,9 @@ The command-line link accepts the same optional project or file path: `dist/inte
 | Evaluate debugger expression | `⌥F8` |
 | Save / save all | `⌘S` / `⇧⌘S` |
 
+With the Project sidebar focused, use `↑` / `↓` to move through visible entries,
+`←` / `→` to collapse or expand folders, and `Enter` to open files.
+
 ## Project scope
 
 The Run Console accepts line input for interactive Java processes. The Build panel summarizes Maven Surefire and Gradle test totals and lists failures from fresh Surefire, Failsafe, and Gradle XML reports; select a failure to open its conventional Java test source and stack-trace line when available, or use **Run class** to rerun that class. The **Problems** tool window combines available Java language-server diagnostics with the latest build diagnostics; selecting a result opens its source location.
@@ -98,6 +101,13 @@ completed inventory substep is Evidence
 `ev_c50e47dfca8462105506064cad1c8225b59d23e7a38e664582da97305281ddc6`.
 Its `product-info.json` declares 86 modules and 164 bundled plugins. This is
 package-structure evidence only; no runtime behavior is inferred from it.
+
+REA also inventoried the installed `intellij.platform.projectView.jar`
+(Evidence `ev_bbbbad1a5f12027ca29087b9d874e62ee05ac0d9a5155933b753e4f85572531c`,
+SHA-256 `3228a8dbe1db28ff8dce684d38ceaa9e66109cde0f8348b30ea3d2d353d5937e`).
+This confirms the Project View module is shipped. JetBrains documents arrow-key
+navigation for its tree views in the [Project tool window guide](https://www.jetbrains.com/help/idea/project-tool-window.html);
+the package inventory itself does not establish that runtime behavior.
 
 The focused Java logpoint and Gradle module observations below were first
 recorded on build `IU-263.7307.44`. The current installed logpoint JAR has the
