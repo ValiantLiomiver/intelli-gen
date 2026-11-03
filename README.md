@@ -36,6 +36,7 @@ The command-line link accepts the same optional project or file path: `dist/inte
 | Action | Shortcut |
 | --- | --- |
 | Open project / file | File → Open Project… / Open File… |
+| Show Project sidebar | `⌘1` |
 | Go to class | `⌘O` |
 | Go to file | `⇧⌘O` |
 | Search Everywhere | `Double Shift`; also Navigate → Search Everywhere… |

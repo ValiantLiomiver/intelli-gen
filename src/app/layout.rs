@@ -393,6 +393,12 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
                 }
             });
             ui.menu_button(translator.text("View"), |ui| {
+                if !state.settings.show_project_panel
+                    && ui.button(crate::i18n::ui_text(ui, "Show Project sidebar    ⌘1")).clicked()
+                {
+                    state.enqueue(AppEvent::ShowProjectPanel);
+                    ui.close();
+                }
                 let changed = ui
                     .checkbox(&mut state.settings.show_project_panel, translator.text("Project sidebar"))
                     .changed()

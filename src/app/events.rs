@@ -35,6 +35,7 @@ pub enum AppEvent {
     NavigateBack,
     NavigateForward,
     NavigateLastEditLocation,
+    ShowProjectPanel,
     ToggleBookmarkAtCaret,
     ShowBookmarks,
     RemoveBookmark {

@@ -329,6 +329,9 @@ pub fn keyboard_shortcuts(ctx: &egui::Context, state: &mut AppState) {
     }) {
         state.enqueue(AppEvent::ShowBreakpoints);
     }
+    if ctx.input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, egui::Key::Num1)) {
+        state.enqueue(AppEvent::ShowProjectPanel);
+    }
     if ctx.input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, egui::Key::Num6)) {
         state.enqueue(AppEvent::ShowPanel(super::ActivePanel::Problems));
     }
@@ -1328,6 +1331,12 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
             AppEvent::NavigateLastEditLocation => {
                 if let Some(location) = state.last_edit_location.clone() {
                     navigate_to_position(state, location.path, location.position);
+                }
+            }
+            AppEvent::ShowProjectPanel => {
+                if !state.settings.show_project_panel {
+                    state.settings.show_project_panel = true;
+                    save_settings(state);
                 }
             }
             AppEvent::ToggleBookmarkAtCaret => {

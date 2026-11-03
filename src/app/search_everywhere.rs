@@ -185,6 +185,7 @@ impl SearchEverywhere {
                 AppEvent::SearchEverywhereOpen(SearchTab::Actions),
             ),
             ("Go to Line…    ⌘L", AppEvent::GoToLineOpen),
+            ("Show Project sidebar    ⌘1", AppEvent::ShowProjectPanel),
             (
                 "Next Problem    F2",
                 AppEvent::NavigateProblem { next: true },
@@ -363,6 +364,9 @@ fn action_search_aliases(label: &str) -> &'static [&'static str] {
             &["toggle_bookmark", "aggiungi_segnalibro", "segnalibro_riga"]
         }
         "Show Bookmarks    ⌘F3" => &["show_bookmarks", "mostra_segnalibri"],
+        "Show Project sidebar    ⌘1" => {
+            &["show_project_window", "project_sidebar", "mostra_progetto"]
+        }
         "Find usages    ⌥F7" => &["references", "riferimenti"],
         "Quick fixes    ⌥↩" => &["intentions", "correzioni_rapide"],
         "Organize imports    ⌃⌥O" => &["optimize_imports", "ottimizza_importazioni"],
