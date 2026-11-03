@@ -1556,6 +1556,7 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
                         && crate::app::actions::is_java_test_method(
                             &tab.document.text,
                             symbol.location.range.start.line,
+                            &symbol.name,
                         )
                         && crate::java::build::valid_java_class_name(&symbol.name)
                         && !symbol.name.contains('.')

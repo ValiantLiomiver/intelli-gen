@@ -181,7 +181,7 @@ pub fn current_test_method_action(
             && symbol.kind == 6
             && crate::java::build::valid_java_class_name(&symbol.name)
             && !symbol.name.contains('.')
-            && is_java_test_method(source, range.start.line)
+            && is_java_test_method(source, range.start.line, &symbol.name)
             && (range.start.line, range.start.character) <= (position.line, position.character)
             && (position.line, position.character) < (range.end.line, range.end.character)
     })?;
@@ -203,7 +203,7 @@ pub fn current_test_method_at_line_action(
         symbol.location.path == path
             && symbol.kind == 6
             && symbol.location.range.start.line + 1 == line
-            && is_java_test_method(source, symbol.location.range.start.line)
+            && is_java_test_method(source, symbol.location.range.start.line, &symbol.name)
             && crate::java::build::valid_java_class_name(&symbol.name)
             && !symbol.name.contains('.')
     })?;
@@ -213,8 +213,14 @@ pub fn current_test_method_at_line_action(
     Some(action)
 }
 
-pub(crate) fn is_java_test_method(source: &str, method_line: u32) -> bool {
-    // shortcut: recognizes direct JUnit/TestNG annotations; resolve composed annotations when framework metadata is available.
+pub(crate) fn is_java_test_method(source: &str, method_line: u32, method_name: &str) -> bool {
+    // shortcut: recognizes direct JUnit/TestNG annotations and JUnit 3 naming; resolve composed annotations when framework metadata is available.
+    if method_name.starts_with("test")
+        && (source.contains("extends TestCase")
+            || source.contains("extends junit.framework.TestCase"))
+    {
+        return true;
+    }
     fn is_test_annotation(line: &str) -> bool {
         let Some(annotation) = line.trim_start().strip_prefix('@') else {
             return false;
