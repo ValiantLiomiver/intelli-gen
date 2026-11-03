@@ -616,7 +616,8 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
                                 );
                             }
                             if let Some(tree) = &mut state.project_tree {
-                                let actions = tree.render(ui);
+                                let actions =
+                                    tree.render(ui, &mut state.project_panel_focus_requested);
                                 for action in actions {
                                     state.enqueue(match action {
                                         TreeAction::OpenFile(path) => AppEvent::OpenFile(path),
@@ -638,10 +639,13 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
                             }
                         } else {
                             ui.label(crate::i18n::ui_text(ui, "No project open"));
-                            if ui
-                                .button(crate::i18n::ui_text(ui, "Choose project directory…"))
-                                .clicked()
-                            {
+                            let choose_project =
+                                ui.button(crate::i18n::ui_text(ui, "Choose project directory…"));
+                            if state.project_panel_focus_requested {
+                                choose_project.request_focus();
+                                state.project_panel_focus_requested = false;
+                            }
+                            if choose_project.clicked() {
                                 actions::open_project_dialog(state);
                             }
                         }

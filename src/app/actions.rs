@@ -1334,6 +1334,7 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                 }
             }
             AppEvent::ShowProjectPanel => {
+                state.project_panel_focus_requested = true;
                 if !state.settings.show_project_panel {
                     state.settings.show_project_panel = true;
                     save_settings(state);

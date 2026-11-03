@@ -203,7 +203,7 @@ impl ProjectTree {
             .collect()
     }
 
-    pub fn render(&mut self, ui: &mut egui::Ui) -> Vec<TreeAction> {
+    pub fn render(&mut self, ui: &mut egui::Ui, focus_requested: &mut bool) -> Vec<TreeAction> {
         let mut actions = Vec::new();
         if Instant::now() >= self.next_root_validation && self.root_validation_request.is_none() {
             let request = NEXT_TREE_REQUEST.fetch_add(1, Ordering::Relaxed);
@@ -220,7 +220,13 @@ impl ProjectTree {
             );
             return actions;
         }
-        render_entries(ui, &self.root, &mut self.entries, &mut actions);
+        render_entries(
+            ui,
+            &self.root,
+            &mut self.entries,
+            &mut actions,
+            focus_requested,
+        );
         actions
     }
 }
@@ -465,6 +471,7 @@ fn render_entries(
     workspace: &Path,
     entries: &mut [TreeEntry],
     actions: &mut Vec<TreeAction>,
+    focus_requested: &mut bool,
 ) {
     for entry in entries {
         if entry.directory {
@@ -498,9 +505,13 @@ fn render_entries(
                         if children.is_empty() {
                             ui.weak(crate::i18n::ui_text(ui, "Empty directory"));
                         }
-                        render_entries(ui, workspace, children, actions);
+                        render_entries(ui, workspace, children, actions, focus_requested);
                     }
                 });
+            if *focus_requested {
+                response.header_response.request_focus();
+                *focus_requested = false;
+            }
             response.header_response.context_menu(|ui| {
                 context_menu(ui, &entry.path, true, entry.symlink, actions);
             });
@@ -520,6 +531,10 @@ fn render_entries(
             let response = ui
                 .selectable_label(false, label)
                 .on_hover_text(entry.path.display().to_string());
+            if *focus_requested {
+                response.request_focus();
+                *focus_requested = false;
+            }
             if response.clicked() {
                 actions.push(TreeAction::OpenFile(entry.path.clone()));
             }
