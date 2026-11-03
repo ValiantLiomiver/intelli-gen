@@ -479,22 +479,33 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
     });
 
     egui::Panel::bottom("status_bar").show(ui, |ui| {
-        if let Some(tab) = state
+        let cursor_status = state
             .active_tab
             .and_then(|index| state.editor_tabs.get(index))
-        {
+            .map(|tab| {
+                (
+                    tab.document.cursor_line.to_string(),
+                    tab.document.cursor_column.to_string(),
+                    tab.path.clone(),
+                    tab.pending_rename_to.clone(),
+                )
+            });
+        if let Some((line, column, path, pending_rename_to)) = cursor_status {
             ui.horizontal(|ui| {
-                ui.label(crate::i18n::ui_format(
-                    ui,
-                    "Ln {line}, Col {column}",
-                    &[
-                        ("line", &tab.document.cursor_line.to_string()),
-                        ("column", &tab.document.cursor_column.to_string()),
-                    ],
-                ));
+                if ui
+                    .button(crate::i18n::ui_format(
+                        ui,
+                        "Ln {line}, Col {column}",
+                        &[("line", &line), ("column", &column)],
+                    ))
+                    .on_hover_text(crate::i18n::ui_text(ui, "Go to Line…    ⌘L"))
+                    .clicked()
+                {
+                    state.enqueue(AppEvent::GoToLineOpen);
+                }
                 ui.separator();
-                ui.label(tab.path.display().to_string());
-                if let Some(destination) = &tab.pending_rename_to {
+                ui.label(path.display().to_string());
+                if let Some(destination) = &pending_rename_to {
                     ui.separator();
                     ui.colored_label(
                         ui.visuals().warn_fg_color,
@@ -829,13 +840,8 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
             location.range.start,
         ));
     }
-    if let Some(line) = state.go_to_line.render(ui.ctx()) {
-        if let Some(tab) = state
-            .active_tab
-            .and_then(|index| state.editor_tabs.get(index))
-        {
-            state.enqueue(AppEvent::OpenFileAtLine(tab.path.clone(), line));
-        }
+    if let Some((line, column)) = state.go_to_line.render(ui.ctx()) {
+        state.enqueue(AppEvent::GoToLine(line, column.unwrap_or(1)));
     }
     for action in state.find_replace.render(ui.ctx()) {
         state.enqueue(AppEvent::Find(action));

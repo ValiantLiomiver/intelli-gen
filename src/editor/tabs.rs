@@ -514,6 +514,16 @@ impl EditorTab {
         self.pending_line = Some(line.max(1));
     }
 
+    pub fn navigate_to_line_column(&mut self, line: usize, column: usize) {
+        let line = line.max(1).min(self.document.text.split('\n').count());
+        let index = self.document.character_index_at_line_column(line, column);
+        self.active_snippet_tab_stop = None;
+        self.snippet_tab_stops.clear();
+        self.pending_selection = None;
+        self.pending_line = Some(line);
+        self.pending_character_index = Some(index);
+    }
+
     pub fn navigate_to_character_index(&mut self, index: usize) {
         self.active_snippet_tab_stop = None;
         self.snippet_tab_stops.clear();

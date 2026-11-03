@@ -58,6 +58,7 @@ pub enum AppEvent {
     SearchEverywhereOpen(super::search_everywhere::SearchTab),
     FileStructureOpen,
     GoToLineOpen,
+    GoToLine(usize, usize),
     SearchWorkspaceSymbols(String),
     Find(crate::editor::find_replace::FindAction),
     Search(SearchAction),

@@ -8,13 +8,13 @@ pub struct GoToLine {
 }
 
 impl GoToLine {
-    pub fn open(&mut self) {
+    pub fn open(&mut self, line: usize, column: usize) {
         self.visible = true;
-        self.input.clear();
+        self.input = format!("{line}:{column}");
         self.focus = true;
     }
 
-    pub fn render(&mut self, ctx: &egui::Context) -> Option<usize> {
+    pub fn render(&mut self, ctx: &egui::Context) -> Option<(usize, Option<usize>)> {
         if !self.visible {
             return None;
         }
@@ -30,7 +30,7 @@ impl GoToLine {
             .show(ctx, |ui| {
                 let response = ui.add(
                     egui::TextEdit::singleline(&mut self.input)
-                        .hint_text(crate::i18n::ui_text(ui, "Line number"))
+                        .hint_text(crate::i18n::ui_text(ui, "[Line] [:column]"))
                         .desired_width(f32::INFINITY),
                 );
                 if self.focus {
@@ -43,13 +43,11 @@ impl GoToLine {
                         input.key_pressed(egui::Key::Escape),
                     )
                 });
-                if let Ok(line) = self.input.trim().parse::<usize>() {
+                if let Some(position) = parse_position(&self.input) {
                     if ui.button(crate::i18n::ui_text(ui, "Go")).clicked() || enter {
-                        chosen = Some(line.max(1));
+                        chosen = Some(position);
                         close = true;
                     }
-                } else if enter {
-                    close = true;
                 }
                 if escape {
                     close = true;
@@ -58,4 +56,21 @@ impl GoToLine {
         self.visible = open && !close;
         chosen
     }
+}
+
+fn parse_position(input: &str) -> Option<(usize, Option<usize>)> {
+    let mut parts = input.trim().split(':');
+    let line = parts.next()?.trim().parse::<usize>().ok()?;
+    let column = parts.next().map(str::trim);
+    if line == 0 || parts.next().is_some() {
+        return None;
+    }
+    let column = match column {
+        Some("") | None => None,
+        Some(column) => {
+            let column = column.parse::<usize>().ok()?;
+            Some((column > 0).then_some(column)?)
+        }
+    };
+    Some((line, column))
 }

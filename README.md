@@ -46,7 +46,7 @@ The command-line link accepts the same optional project or file path: `dist/inte
 | Find / replace in file | `⌘F` / `⌘R` |
 | Next / previous match in file | `⌘G` / `⌘⇧G` |
 | Find in project | `⇧⌘F` |
-| Go to line | `⌘L` |
+| Go to line or line and column | `⌘L` or click the current line/column in the status bar; enter `line` or `line:column` |
 | Next / previous Java or build problem | `F2` / `⇧F2` |
 | Open Problems tool window | `⌘6` |
 | Navigate back / forward | `⌘[` / `⌘]` (`Ctrl+Alt+←` / `Ctrl+Alt+→` aliases) |

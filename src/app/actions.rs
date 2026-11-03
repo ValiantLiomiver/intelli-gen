@@ -1296,8 +1296,13 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
             }
             AppEvent::GoToLineOpen => {
                 if !state.quit_requested {
-                    if state.active_tab.is_some() {
-                        state.go_to_line.open();
+                    if let Some(tab) = state
+                        .active_tab
+                        .and_then(|index| state.editor_tabs.get(index))
+                    {
+                        state
+                            .go_to_line
+                            .open(tab.document.cursor_line, tab.document.cursor_column);
                     } else {
                         state.status = "Open a file before navigating to a line".into();
                     }
@@ -1323,6 +1328,14 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                         character: 0,
                     },
                 );
+            }
+            AppEvent::GoToLine(line, column) => {
+                if let Some(tab) = state
+                    .active_tab
+                    .and_then(|index| state.editor_tabs.get_mut(index))
+                {
+                    tab.navigate_to_line_column(line, column);
+                }
             }
             AppEvent::OpenFileAtPosition(path, position) => {
                 navigate_to_position(state, path, position);
