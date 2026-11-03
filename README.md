@@ -74,7 +74,8 @@ The command-line link accepts the same optional project or file path: `dist/inte
 | Save / save all | `⌘S` / `⇧⌘S` |
 
 With the Project sidebar focused, use `↑` / `↓` to move through visible entries,
-`←` / `→` to collapse or expand folders, and `Enter` to open files.
+`←` / `→` to collapse or expand folders, `Enter` to open files, or type a name
+prefix to jump to a matching visible entry.
 
 ## Project scope
 

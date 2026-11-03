@@ -16,6 +16,8 @@ pub struct ProjectTree {
     entries: Vec<TreeEntry>,
     focused_path: Option<PathBuf>,
     focus_pending: bool,
+    typeahead_query: String,
+    typeahead_at: Option<Instant>,
     root_error: Option<String>,
     root_loading_request: Option<u64>,
     root_validation_request: Option<u64>,
@@ -63,6 +65,8 @@ impl ProjectTree {
             root,
             focused_path: None,
             focus_pending: false,
+            typeahead_query: String::new(),
+            typeahead_at: None,
             root_error: None,
             root_loading_request: None,
             root_validation_request: None,
@@ -268,6 +272,44 @@ impl ProjectTree {
                 .focused_path
                 .as_ref()
                 .and_then(|path| visible.iter().position(|entry| &entry.path == path));
+            let typed = ui.input(|input| {
+                if input.modifiers.command || input.modifiers.ctrl || input.modifiers.alt {
+                    return String::new();
+                }
+                input
+                    .events
+                    .iter()
+                    .filter_map(|event| match event {
+                        egui::Event::Text(text) => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<String>()
+            });
+            if !typed.is_empty() && !visible.is_empty() {
+                // shortcut: searches visible entries with a one-second prefix; add indexed tree search when collapsed paths must match.
+                let continuing = self
+                    .typeahead_at
+                    .is_some_and(|last| last.elapsed() <= Duration::from_secs(1));
+                if !continuing {
+                    self.typeahead_query.clear();
+                }
+                self.typeahead_query.push_str(&typed);
+                self.typeahead_at = Some(Instant::now());
+                let query = self.typeahead_query.to_lowercase();
+                let start = if continuing {
+                    index.unwrap_or(0)
+                } else {
+                    index.map_or(0, |index| (index + 1) % visible.len())
+                };
+                if let Some(next) = (0..visible.len())
+                    .map(|offset| (start + offset) % visible.len())
+                    .find(|index| visible[*index].name.to_lowercase().starts_with(&query))
+                {
+                    self.focused_path = Some(visible[next].path.clone());
+                    self.focus_pending = true;
+                    ui.ctx().request_repaint();
+                }
+            }
             let move_to = if ui
                 .input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown))
             {
@@ -608,6 +650,7 @@ fn render_entries(
         if entry.directory || entry.error.is_none() {
             visible.push(VisibleProjectEntry {
                 path: entry.path.clone(),
+                name: entry.name.clone(),
                 collapsing_id: entry.directory.then(|| ui.make_persistent_id(&entry.path)),
             });
         }
@@ -713,5 +756,6 @@ fn render_entries(
 
 struct VisibleProjectEntry {
     path: PathBuf,
+    name: String,
     collapsing_id: Option<egui::Id>,
 }
