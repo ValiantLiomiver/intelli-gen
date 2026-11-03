@@ -672,17 +672,24 @@ pub fn render(ui: &mut eframe::egui::Ui, state: &mut crate::app::AppState) {
                 });
             }
             ui.horizontal(|ui| {
+                let focus_expression = std::mem::take(
+                    &mut state.debugger.inspector.focus_expression_requested,
+                );
                 let response = ui.add_enabled(
                     stopped && state.debugger.inspector.selected_frame.is_some(),
                     egui::TextEdit::singleline(&mut state.debugger.inspector.expression)
+                        .id_salt("debugger_expression")
                         .hint_text(crate::i18n::ui_text(ui, "Evaluate Java expression in selected frame")),
                 );
+                if focus_expression {
+                    response.request_focus();
+                }
                 let evaluate = ui
                     .add_enabled(
                         stopped
                             && state.debugger.inspector.selected_frame.is_some()
                             && !state.debugger.inspector.expression.trim().is_empty(),
-                        egui::Button::new(crate::i18n::ui_text(ui, "Evaluate")),
+                        egui::Button::new(crate::i18n::ui_text(ui, "Evaluate    ⌥F8")),
                     )
                     .clicked()
                     || (response.lost_focus()

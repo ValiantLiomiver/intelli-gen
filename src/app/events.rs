@@ -76,6 +76,7 @@ pub enum AppEvent {
     RestartLanguage,
     ShowPanel(ActivePanel),
     ShowBreakpoints,
+    EvaluateExpressionOpen,
     SettingsChanged,
     SettingsSaved {
         generation: u64,

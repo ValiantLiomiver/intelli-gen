@@ -332,6 +332,9 @@ pub fn keyboard_shortcuts(ctx: &egui::Context, state: &mut AppState) {
     if ctx.input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, egui::Key::Num6)) {
         state.enqueue(AppEvent::ShowPanel(super::ActivePanel::Problems));
     }
+    if ctx.input_mut(|input| input.consume_key(egui::Modifiers::ALT, egui::Key::F8)) {
+        state.enqueue(AppEvent::EvaluateExpressionOpen);
+    }
     if ctx.input_mut(|input| input.consume_key(egui::Modifiers::SHIFT, egui::Key::F2)) {
         state.enqueue(AppEvent::NavigateProblem { next: false });
     } else if ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::F2)) {
@@ -1723,6 +1726,22 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                 if !state.settings.show_tool_window {
                     state.settings.show_tool_window = true;
                     save_settings(state);
+                }
+            }
+            AppEvent::EvaluateExpressionOpen => {
+                let debugger = &state.debugger;
+                let ready = debugger.controller().is_some_and(|controller| {
+                    controller.epoch == debugger.inspector.epoch
+                        && matches!(debugger.state, crate::debugger::DebugState::Stopped)
+                        && debugger.inspector.selected_frame.is_some()
+                        && !debugger.inspector.control_pending
+                });
+                if ready {
+                    state.debugger.inspector.focus_expression_requested = true;
+                    state.enqueue(AppEvent::ShowPanel(super::ActivePanel::Debugger));
+                } else {
+                    state.status =
+                        "Stop the debugger at a breakpoint before evaluating an expression".into();
                 }
             }
             AppEvent::SettingsChanged => {

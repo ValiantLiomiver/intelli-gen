@@ -195,6 +195,10 @@ impl SearchEverywhere {
             ),
             ("File Structure…    ⌘F12", AppEvent::FileStructureOpen),
             (
+                "Evaluate Expression…    ⌥F8",
+                AppEvent::EvaluateExpressionOpen,
+            ),
+            (
                 "Problems    ⌘6",
                 AppEvent::ShowPanel(super::ActivePanel::Problems),
             ),
@@ -344,6 +348,7 @@ fn action_search_aliases(label: &str) -> &'static [&'static str] {
         "Next Problem    F2" => &["next_problem", "problema_successivo"],
         "Previous Problem    ⇧F2" => &["previous_problem", "problema_precedente"],
         "Problems    ⌘6" => &["problems", "problemi", "error_list", "elenco_errori"],
+        "Evaluate Expression…    ⌥F8" => &["evaluate_expression", "valuta_espressione"],
         "Find usages    ⌥F7" => &["references", "riferimenti"],
         "Quick fixes    ⌥↩" => &["intentions", "correzioni_rapide"],
         "Organize imports    ⌃⌥O" => &["optimize_imports", "ottimizza_importazioni"],
