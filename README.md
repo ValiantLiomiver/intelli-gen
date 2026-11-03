@@ -68,7 +68,7 @@ The command-line link accepts the same optional project or file path: `dist/inte
 | Go to implementation | `⌥⌘B` |
 | Toggle line breakpoint | `⌘F8` |
 | View breakpoints | `⌘⇧F8` |
-| Run current test class (otherwise selected configuration) / debug selected configuration | `⌃R` / `⌃D` |
+| Run current test method/class (otherwise selected configuration) / debug selected configuration | `⌃R` / `⌃D` |
 | Debug: continue / step into / over / out | `⌘⌥R` / `F7` / `F8` / `⇧F8` |
 | Evaluate debugger expression | `⌥F8` |
 | Save / save all | `⌘S` / `⇧⌘S` |
