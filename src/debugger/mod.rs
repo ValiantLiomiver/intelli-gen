@@ -330,23 +330,23 @@ pub fn render(ui: &mut eframe::egui::Ui, state: &mut crate::app::AppState) {
         }
         for (label, request, enabled) in [
             (
-                "Continue",
+                "Continue    ⌘⌥R",
                 Request::Continue(thread.unwrap_or(0)),
                 stopped && thread.is_some(),
             ),
             ("Pause", Request::Pause, running),
             (
-                "Step over",
+                "Step over    F8",
                 Request::StepOver(thread.unwrap_or(0)),
                 stopped && thread.is_some(),
             ),
             (
-                "Step into",
+                "Step into    F7",
                 Request::StepInto(thread.unwrap_or(0)),
                 stopped && thread.is_some(),
             ),
             (
-                "Step out",
+                "Step out    ⇧F8",
                 Request::StepOut(thread.unwrap_or(0)),
                 stopped && thread.is_some(),
             ),

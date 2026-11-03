@@ -275,6 +275,25 @@ pub fn open_file_dialog(state: &mut AppState) {
     }
 }
 
+fn debugger_control_event(
+    state: &AppState,
+    request: fn(i64) -> crate::debugger::stack::InspectRequest,
+) -> Option<AppEvent> {
+    let debugger = &state.debugger;
+    let controller = debugger.controller()?;
+    if controller.epoch != debugger.inspector.epoch
+        || !matches!(debugger.state, crate::debugger::DebugState::Stopped)
+        || debugger.inspector.control_pending
+    {
+        return None;
+    }
+    Some(AppEvent::Debugger(super::events::DebuggerAction::Inspect {
+        epoch: controller.epoch,
+        selection: debugger.inspector.selection,
+        request: request(debugger.inspector.selected_thread?),
+    }))
+}
+
 pub fn keyboard_shortcuts(ctx: &egui::Context, state: &mut AppState) {
     if state.quit_approved {
         return;
@@ -317,6 +336,34 @@ pub fn keyboard_shortcuts(ctx: &egui::Context, state: &mut AppState) {
         state.enqueue(AppEvent::NavigateProblem { next: false });
     } else if ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::F2)) {
         state.enqueue(AppEvent::NavigateProblem { next: true });
+    }
+    for (modifiers, key, request) in [
+        (
+            egui::Modifiers::COMMAND | egui::Modifiers::ALT,
+            egui::Key::R,
+            crate::debugger::stack::InspectRequest::Continue as fn(i64) -> _,
+        ),
+        (
+            egui::Modifiers::NONE,
+            egui::Key::F7,
+            crate::debugger::stack::InspectRequest::StepInto,
+        ),
+        (
+            egui::Modifiers::NONE,
+            egui::Key::F8,
+            crate::debugger::stack::InspectRequest::StepOver,
+        ),
+        (
+            egui::Modifiers::SHIFT,
+            egui::Key::F8,
+            crate::debugger::stack::InspectRequest::StepOut,
+        ),
+    ] {
+        if ctx.input_mut(|input| input.consume_key(modifiers, key))
+            && let Some(event) = debugger_control_event(state, request)
+        {
+            state.enqueue(event);
+        }
     }
     if state.find_replace.visible
         && ctx.input_mut(|input| {

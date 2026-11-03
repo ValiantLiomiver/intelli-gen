@@ -66,6 +66,7 @@ The command-line link accepts the same optional project or file path: `dist/inte
 | Toggle line breakpoint | `⌘F8` |
 | View breakpoints | `⌘⇧F8` |
 | Run / debug selected configuration | `⌃R` / `⌃D` |
+| Debug: continue / step into / over / out | `⌘⌥R` / `F7` / `F8` / `⇧F8` |
 | Save / save all | `⌘S` / `⇧⌘S` |
 
 ## Project scope
