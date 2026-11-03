@@ -81,6 +81,7 @@ The first release targets macOS and Java projects using Maven or Gradle. Use **F
 With a Java test open under a module's conventional `src/test/java` directory, use **Run → Run Current Test Class** to run that class through the project's Maven or Gradle test task.
 
 Use **Navigate → Show Bookmarks** (`⌘F3`) to revisit or remove project line bookmarks; **F3** toggles a bookmark at the caret. Bookmarks are saved with Intelli-gen settings.
+Bookmarks below an inserted or removed line move with the edit; replacing a selection across multiple lines may require repositioning affected bookmarks.
 
 **Navigate → Test / production source** (`⌘⇧T`) switches between matching files in the conventional `src/main/java` and `src/test/java` trees when the counterpart exists.
 

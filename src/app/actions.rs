@@ -3891,7 +3891,7 @@ fn advance_quit(state: &mut AppState) {
     }
 }
 
-fn save_settings(state: &mut AppState) {
+pub(crate) fn save_settings(state: &mut AppState) {
     if state.settings_writable {
         match state.settings_saver.start(state.settings.clone()) {
             Ok(generation) => {

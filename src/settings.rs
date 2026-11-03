@@ -57,7 +57,7 @@ pub struct ProjectBookmarks {
     pub entries: Vec<LineBookmark>,
 }
 
-// shortcut: line based; map edits to content if bookmark drift matters.
+// shortcut: shifts lines after the caret; map selection edits if they misplace bookmarks.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LineBookmark {
     pub path: PathBuf,
@@ -211,6 +211,40 @@ impl UserSettings {
                 bookmark.path.clone_from(&new);
             }
         }
+    }
+
+    pub fn shift_bookmarks_after(
+        &mut self,
+        root: &std::path::Path,
+        path: &std::path::Path,
+        after_line: u32,
+        delta: i64,
+    ) -> bool {
+        if delta == 0 {
+            return false;
+        }
+        let Some(project) = self
+            .project_bookmarks
+            .iter_mut()
+            .find(|project| project.root == root)
+        else {
+            return false;
+        };
+        let mut changed = false;
+        for bookmark in &mut project.entries {
+            if bookmark.path == path && bookmark.line > after_line {
+                bookmark.line =
+                    (i64::from(bookmark.line) + delta).clamp(1, i64::from(u32::MAX)) as u32;
+                changed = true;
+            }
+        }
+        if changed {
+            project
+                .entries
+                .sort_by(|left, right| left.path.cmp(&right.path).then(left.line.cmp(&right.line)));
+            project.entries.dedup();
+        }
+        changed
     }
 
     /// An explicit missing/invalid override is an error, never a silent fallback.

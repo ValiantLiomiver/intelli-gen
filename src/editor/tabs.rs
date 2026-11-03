@@ -1418,6 +1418,7 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
     let mut completion_popup_action = None;
     let mut hover_popup_dismissed = false;
     let mut last_edit_location = None;
+    let mut bookmarks_adjusted = false;
     let (indent_size, insert_spaces) = state
         .active_tab
         .and_then(|index| state.editor_tabs.get(index))
@@ -1451,6 +1452,7 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
             .filter(|frame| frame.source.as_ref() == Some(&tab.path))
             .map(|frame| frame.line);
         let revision = tab.document.revision;
+        let old_line_count = tab.document.text.matches('\n').count() + 1;
         let edit_origin = crate::app::NavigationLocation {
             path: tab.path.clone(),
             position: tab.document.lsp_position(),
@@ -1469,7 +1471,26 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
             insert_spaces,
         );
         if tab.document.revision != revision {
+            let new_line_count = tab.document.text.matches('\n').count() + 1;
+            let line_delta = new_line_count as i64 - old_line_count as i64;
+            let after_line = edit_origin.position.line.saturating_add(1);
+            let after_line = if line_delta < 0
+                && edit_origin.position.character == 0
+                && edit_origin.position.line > 0
+            {
+                after_line.saturating_sub(1)
+            } else {
+                after_line
+            };
             last_edit_location = Some(edit_origin);
+            if let Some(project) = &state.project {
+                bookmarks_adjusted = state.settings.shift_bookmarks_after(
+                    &project.root,
+                    &tab.path,
+                    after_line,
+                    line_delta,
+                );
+            }
         }
         let path = tab.path.clone();
         if let Some(position) = completion_position {
@@ -1590,6 +1611,9 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
     }
     if let Some(location) = last_edit_location {
         state.last_edit_location = Some(location);
+    }
+    if bookmarks_adjusted {
+        crate::app::actions::save_settings(state);
     }
     if hover_popup_dismissed {
         state.language.hover = None;
