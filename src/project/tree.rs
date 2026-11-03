@@ -283,18 +283,24 @@ impl ProjectTree {
                 self.reveal_path = None;
             } else if let Some(id) = visible.iter().find_map(|entry| {
                 let id = entry.collapsing_id?;
-                (target.starts_with(&entry.path) && target != entry.path).then_some(id)
+                if !target.starts_with(&entry.path) || target == entry.path {
+                    return None;
+                }
+                let state = egui::collapsing_header::CollapsingState::load_with_default_open(
+                    ui.ctx(),
+                    id,
+                    false,
+                );
+                (!state.is_open()).then_some(id)
             }) {
                 let mut state = egui::collapsing_header::CollapsingState::load_with_default_open(
                     ui.ctx(),
                     id,
                     false,
                 );
-                if !state.is_open() {
-                    state.set_open(true);
-                    state.store(ui.ctx());
-                    ui.ctx().request_repaint();
-                }
+                state.set_open(true);
+                state.store(ui.ctx());
+                ui.ctx().request_repaint();
             }
         }
         if self
