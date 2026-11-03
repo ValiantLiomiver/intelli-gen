@@ -57,7 +57,7 @@ pub struct ProjectBookmarks {
     pub entries: Vec<LineBookmark>,
 }
 
-// shortcut: shifts lines after the caret; map selection edits if they misplace bookmarks.
+// shortcut: maps selected lines proportionally; use diff anchors for exact content tracking.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LineBookmark {
     pub path: PathBuf,
@@ -213,12 +213,14 @@ impl UserSettings {
         }
     }
 
-    pub fn shift_bookmarks_after(
+    pub fn remap_bookmarks_after_edit(
         &mut self,
         root: &std::path::Path,
         path: &std::path::Path,
-        after_line: u32,
+        start_line: u32,
+        end_line: u32,
         delta: i64,
+        shift_start: bool,
     ) -> bool {
         if delta == 0 {
             return false;
@@ -231,11 +233,22 @@ impl UserSettings {
             return false;
         };
         let mut changed = false;
+        let replaced_lines = i64::from(end_line.saturating_sub(start_line)) + 1;
+        let new_lines = (replaced_lines + delta).max(1);
         for bookmark in &mut project.entries {
-            if bookmark.path == path && bookmark.line > after_line {
-                bookmark.line =
-                    (i64::from(bookmark.line) + delta).clamp(1, i64::from(u32::MAX)) as u32;
-                changed = true;
+            if bookmark.path != path {
+                continue;
+            }
+            let line = i64::from(bookmark.line);
+            if line > i64::from(end_line) {
+                bookmark.line = (line + delta).clamp(1, i64::from(u32::MAX)) as u32;
+                changed |= delta != 0;
+            } else if line >= i64::from(start_line) && (start_line != end_line || shift_start) {
+                let relative = line - i64::from(start_line);
+                let mapped = (i64::from(start_line) + relative.min(new_lines - 1))
+                    .clamp(1, i64::from(u32::MAX)) as u32;
+                changed |= mapped != bookmark.line;
+                bookmark.line = mapped;
             }
         }
         if changed {

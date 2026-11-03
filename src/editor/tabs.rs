@@ -1457,6 +1457,51 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
             path: tab.path.clone(),
             position: tab.document.lsp_position(),
         };
+        let editor_id = if tab.document.text.len() > PAGED_EDITOR_BYTES {
+            egui::Id::new(("paged_source_editor", &tab.path))
+        } else {
+            egui::Id::new(("source_editor", &tab.path))
+        };
+        let edit_input = ui
+            .ctx()
+            .memory(|memory| memory.focused() == Some(editor_id))
+            && ui.input(|input| {
+                input.events.iter().any(|event| match event {
+                    egui::Event::Text(_) | egui::Event::Cut | egui::Event::Paste(_) => true,
+                    egui::Event::Key {
+                        key, pressed: true, ..
+                    } => matches!(
+                        key,
+                        egui::Key::Backspace
+                            | egui::Key::Delete
+                            | egui::Key::Enter
+                            | egui::Key::Tab
+                    ),
+                    _ => false,
+                })
+            });
+        let selection_lines = edit_input
+            .then(|| {
+                egui::text_edit::TextEditState::load(ui.ctx(), editor_id)
+                    .and_then(|editor| editor.cursor.char_range())
+                    .filter(|range| !range.is_empty())
+                    .map(|range| {
+                        let selected = range.as_sorted_char_range();
+                        let line_at = |index: usize| {
+                            tab.document
+                                .text
+                                .chars()
+                                .take(index)
+                                .filter(|character| *character == '\n')
+                                .count() as u32
+                                + 1
+                        };
+                        let start: usize = selected.start.into();
+                        let end: usize = selected.end.into();
+                        (line_at(start), line_at(end.saturating_sub(1)))
+                    })
+            })
+            .flatten();
         let (toggled, completion_position) = tab.render_editor(
             ui,
             !state.quit_approved,
@@ -1473,22 +1518,27 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
         if tab.document.revision != revision {
             let new_line_count = tab.document.text.matches('\n').count() + 1;
             let line_delta = new_line_count as i64 - old_line_count as i64;
-            let after_line = edit_origin.position.line.saturating_add(1);
-            let after_line = if line_delta < 0
-                && edit_origin.position.character == 0
-                && edit_origin.position.line > 0
-            {
-                after_line.saturating_sub(1)
+            let (start_line, end_line) = if let Some(lines) = selection_lines {
+                lines
             } else {
-                after_line
+                let line = edit_origin.position.line.saturating_add(1);
+                if line_delta < 0 && edit_origin.position.character == 0 && line > 1 {
+                    (line - 1, line)
+                } else {
+                    (line, line)
+                }
             };
+            let shift_start =
+                selection_lines.is_none() && line_delta > 0 && edit_origin.position.character == 0;
             last_edit_location = Some(edit_origin);
             if let Some(project) = &state.project {
-                bookmarks_adjusted = state.settings.shift_bookmarks_after(
+                bookmarks_adjusted = state.settings.remap_bookmarks_after_edit(
                     &project.root,
                     &tab.path,
-                    after_line,
+                    start_line,
+                    end_line,
                     line_delta,
+                    shift_start,
                 );
             }
         }
