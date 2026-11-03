@@ -310,6 +310,9 @@ pub fn keyboard_shortcuts(ctx: &egui::Context, state: &mut AppState) {
     }) {
         state.enqueue(AppEvent::ShowBreakpoints);
     }
+    if ctx.input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, egui::Key::Num6)) {
+        state.enqueue(AppEvent::ShowPanel(super::ActivePanel::Problems));
+    }
     if ctx.input_mut(|input| input.consume_key(egui::Modifiers::SHIFT, egui::Key::F2)) {
         state.enqueue(AppEvent::NavigateProblem { next: false });
     } else if ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::F2)) {

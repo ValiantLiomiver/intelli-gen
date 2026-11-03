@@ -47,6 +47,7 @@ The command-line link accepts the same optional project or file path: `dist/inte
 | Find in project | `⇧⌘F` |
 | Go to line | `⌘L` |
 | Next / previous Java or build problem | `F2` / `⇧F2` |
+| Open Problems tool window | `⌘6` |
 | Navigate back / forward | `⌘[` / `⌘]` (`Ctrl+Alt+←` / `Ctrl+Alt+→` aliases) |
 | Jump to last tool window / hide all tool windows | `F12` / `⌘⇧F12` |
 | Reformat Java file | `⌥⌘L` |
