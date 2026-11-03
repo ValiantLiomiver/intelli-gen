@@ -341,6 +341,19 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
                             .as_ref()
                             .and_then(|model| actions::current_test_class_action(&tab.path, model))
                     });
+                let test_method_action = state
+                    .active_tab
+                    .and_then(|index| state.editor_tabs.get(index))
+                    .and_then(|tab| {
+                        state.project.as_ref()?.model.as_ref().and_then(|model| {
+                            actions::current_test_method_action(
+                                &tab.path,
+                                model,
+                                tab.document.lsp_position(),
+                                &state.language.document_symbols,
+                            )
+                        })
+                    });
                 let can_launch_configuration = state.project.as_ref()
                     .and_then(|project| project.model.as_ref())
                     .is_some_and(|model| model.kind != ProjectKind::Unknown)
@@ -365,6 +378,12 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
                 if ui.add_enabled(test_action.is_some() && !state.build.running(), egui::Button::new(crate::i18n::ui_text(ui, "Run Current Test Class")))
                     .on_disabled_hover_text(crate::i18n::ui_text(ui, test_hint)).clicked() {
                     if let Some(action) = test_action {
+                        state.enqueue(AppEvent::Build(action));
+                    }
+                    ui.close();
+                }
+                if ui.add_enabled(test_method_action.is_some() && !state.build.running(), egui::Button::new(crate::i18n::ui_text(ui, "Run Current Test Method"))).clicked() {
+                    if let Some(action) = test_method_action {
                         state.enqueue(AppEvent::Build(action));
                     }
                     ui.close();

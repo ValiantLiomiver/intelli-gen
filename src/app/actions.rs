@@ -167,6 +167,29 @@ pub fn current_test_class_action(
     })
 }
 
+pub fn current_test_method_action(
+    path: &Path,
+    model: &crate::project::ProjectModel,
+    position: crate::java::lsp::Position,
+    symbols: &[crate::java::lsp::OutlineSymbol],
+) -> Option<BuildAction> {
+    // shortcut: may offer helper methods in test sources; add framework-aware test discovery to filter them.
+    let mut action = current_test_class_action(path, model)?;
+    let symbol = symbols.iter().find(|symbol| {
+        let range = symbol.location.range;
+        symbol.location.path == path
+            && symbol.kind == 6
+            && crate::java::build::valid_java_class_name(&symbol.name)
+            && !symbol.name.contains('.')
+            && (range.start.line, range.start.character) <= (position.line, position.character)
+            && (position.line, position.character) < (range.end.line, range.end.character)
+    })?;
+    if let BuildAction::RunTest { method_name, .. } = &mut action {
+        *method_name = Some(symbol.name.clone());
+    }
+    Some(action)
+}
+
 fn run_context_event(state: &AppState) -> AppEvent {
     let test_action = if state.build.running() {
         None
@@ -180,7 +203,15 @@ fn run_context_event(state: &AppState) -> AppEvent {
                     .as_ref()
                     .and_then(|project| project.model.as_ref()),
             )
-            .and_then(|(tab, model)| current_test_class_action(&tab.path, model))
+            .and_then(|(tab, model)| {
+                current_test_method_action(
+                    &tab.path,
+                    model,
+                    tab.document.lsp_position(),
+                    &state.language.document_symbols,
+                )
+                .or_else(|| current_test_class_action(&tab.path, model))
+            })
     };
     test_action.map_or_else(
         || AppEvent::Run(super::events::RunAction::Start),

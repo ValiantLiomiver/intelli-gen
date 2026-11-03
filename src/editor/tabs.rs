@@ -1410,6 +1410,18 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
         .active_tab
         .and_then(|index| state.editor_tabs.get(index))
         .map(|tab| tab.path.clone());
+    if let Some(tab) = state
+        .active_tab
+        .and_then(|index| state.editor_tabs.get(index))
+        && state
+            .project
+            .as_ref()
+            .and_then(|project| project.model.as_ref())
+            .and_then(|model| crate::app::actions::current_test_class_action(&tab.path, model))
+            .is_some()
+    {
+        state.language.ensure_document_symbols(&tab.document);
+    }
     let diagnostics = active_path
         .as_ref()
         .and_then(|path| state.language.diagnostics.get(path))

@@ -3497,6 +3497,24 @@ impl LanguageTool {
             Err(error) => self.document_symbols_error = Some(error.to_string()),
         }
     }
+    pub fn ensure_document_symbols(&mut self, document: &Document) {
+        if self.session.is_none() {
+            return;
+        }
+        let Some(version) = self
+            .documents
+            .get(&document.path)
+            .filter(|synced| synced.text == document.text)
+            .map(|synced| synced.version)
+        else {
+            return;
+        };
+        if self.document_symbols_path.as_ref() != Some(&document.path)
+            || (self.document_symbols_version != Some(version) && !self.document_symbols_loading)
+        {
+            self.request_document_symbols(document);
+        }
+    }
     pub fn did_save(&mut self, path: PathBuf) {
         if self.documents.contains_key(&path) {
             self.pending_saves.insert(path);
