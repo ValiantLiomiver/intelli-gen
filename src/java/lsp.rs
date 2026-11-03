@@ -114,6 +114,126 @@ pub struct OutlineSymbol {
     pub location: Location,
     pub depth: usize,
 }
+
+fn is_junit3_test_class(lines: &[&str]) -> bool {
+    lines.iter().any(|line| {
+        let line = line.trim_start();
+        let class_header = line.starts_with("class ")
+            || line.starts_with('@')
+            || [
+                "public ",
+                "protected ",
+                "private ",
+                "abstract ",
+                "final ",
+                "sealed ",
+                "non-sealed ",
+                "static ",
+            ]
+            .iter()
+            .any(|prefix| line.starts_with(prefix));
+        class_header
+            && !line.starts_with("//")
+            && !line.starts_with("/*")
+            && (line.contains("extends TestCase")
+                || line.contains("extends junit.framework.TestCase"))
+    })
+}
+
+pub fn document_test_methods(
+    path: &Path,
+    source: &str,
+    symbols: &[OutlineSymbol],
+) -> Vec<(u32, String)> {
+    let lines: Vec<_> = source.lines().collect();
+    let junit3_test_class = is_junit3_test_class(&lines);
+    symbols
+        .iter()
+        .filter(|symbol| {
+            symbol.location.path == path
+                && symbol.kind == 6
+                && crate::java::build::valid_java_class_name(&symbol.name)
+                && !symbol.name.contains('.')
+        })
+        .filter(|symbol| {
+            is_java_test_method_lines(
+                &lines,
+                junit3_test_class,
+                symbol.location.range.start.line,
+                &symbol.name,
+            )
+        })
+        .map(|symbol| (symbol.location.range.start.line + 1, symbol.name.clone()))
+        .collect()
+}
+
+fn is_java_test_method_lines(
+    lines: &[&str],
+    junit3_test_class: bool,
+    method_line: u32,
+    method_name: &str,
+) -> bool {
+    if method_name.starts_with("test") && junit3_test_class {
+        return true;
+    }
+    fn is_test_annotation(line: &str) -> bool {
+        let Some(annotation) = line.trim_start().strip_prefix('@') else {
+            return false;
+        };
+        matches!(
+            annotation
+                .split(|character: char| character == '(' || character.is_whitespace())
+                .next()
+                .unwrap_or_default()
+                .rsplit('.')
+                .next()
+                .unwrap_or_default(),
+            "Test" | "ParameterizedTest" | "RepeatedTest" | "TestFactory" | "TestTemplate"
+        )
+    }
+
+    let end = method_line as usize;
+    if lines.get(end).is_some_and(|line| is_test_annotation(line)) {
+        return true;
+    }
+    let mut inside_block_comment = false;
+    for line in lines.iter().take(end).rev().take(32) {
+        let line = line.trim();
+        if inside_block_comment {
+            if line.contains("/*") {
+                inside_block_comment = false;
+            }
+            continue;
+        }
+        if let Some((before_comment, comment)) = line.split_once("/*")
+            && let Some((_, after_comment)) = comment.split_once("*/")
+        {
+            if is_test_annotation(before_comment.trim()) || is_test_annotation(after_comment.trim())
+            {
+                return true;
+            }
+            continue;
+        }
+        if line.contains("*/") {
+            inside_block_comment = true;
+            continue;
+        }
+        if line.is_empty() || line.starts_with("//") {
+            continue;
+        }
+        if line.starts_with('@') {
+            if is_test_annotation(line) {
+                return true;
+            }
+        } else if line.starts_with("/*") {
+            inside_block_comment = true;
+        } else {
+            break;
+        }
+    }
+    false
+}
+
 #[derive(Clone, Debug)]
 pub struct CodeActionItem {
     pub title: String,
@@ -3036,6 +3156,7 @@ pub struct LanguageTool {
     pub document_symbols_path: Option<PathBuf>,
     pub document_symbols_version: Option<i64>,
     pub document_symbols: Vec<OutlineSymbol>,
+    pub document_test_methods: Vec<(u32, String)>,
     pub document_symbols_loading: bool,
     pub document_symbols_error: Option<String>,
 }
@@ -3201,6 +3322,7 @@ impl LanguageTool {
         self.document_symbols_path = None;
         self.document_symbols_version = None;
         self.document_symbols.clear();
+        self.document_test_methods.clear();
         self.document_symbols_loading = false;
         self.document_symbols_error = None;
         self.code_actions = None;
@@ -3458,6 +3580,7 @@ impl LanguageTool {
     pub fn request_document_symbols(&mut self, document: &Document) {
         self.document_symbols_path = Some(document.path.clone());
         self.document_symbols.clear();
+        self.document_test_methods.clear();
         self.document_symbols_error = None;
         self.document_symbols_loading = false;
         let result = (|| {
@@ -3569,6 +3692,14 @@ impl LanguageTool {
             let document = &tab.document;
             if let Some(previous) = self.documents.get_mut(&tab.path) {
                 if previous.text != document.text {
+                    if self.document_symbols_path.as_ref() == Some(&tab.path) {
+                        self.document_symbols.clear();
+                        self.document_test_methods.clear();
+                        self.document_symbols_loading = false;
+                        self.document_symbols_error = Some(
+                            "Source changed. Reopen File Structure to refresh symbols.".into(),
+                        );
+                    }
                     let version = self.next_version + 1;
                     if session
                         .try_command(LanguageCommand::Change {
@@ -3590,13 +3721,6 @@ impl LanguageTool {
                     self.completion_selection = None;
                     self.signature_help = None;
                     self.hover = None;
-                    if self.document_symbols_path.as_ref() == Some(&tab.path) {
-                        self.document_symbols.clear();
-                        self.document_symbols_loading = false;
-                        self.document_symbols_error = Some(
-                            "Source changed. Reopen File Structure to refresh symbols.".into(),
-                        );
-                    }
                 }
             } else {
                 let version = self.next_version + 1;
@@ -3996,10 +4120,19 @@ impl LanguageTool {
                 self.document_symbols_loading = false;
                 match result {
                     Ok(symbols) => {
+                        self.document_test_methods = self
+                            .documents
+                            .get(&path)
+                            .filter(|document| document.version == version)
+                            .map(|document| document_test_methods(&path, &document.text, &symbols))
+                            .unwrap_or_default();
                         self.document_symbols = symbols;
                         self.document_symbols_error = None;
                     }
-                    Err(error) => self.document_symbols_error = Some(error),
+                    Err(error) => {
+                        self.document_test_methods.clear();
+                        self.document_symbols_error = Some(error);
+                    }
                 }
             }
             LanguageEvent::DocumentEdits {

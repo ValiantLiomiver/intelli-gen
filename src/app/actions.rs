@@ -172,7 +172,7 @@ pub fn current_test_method_action(
     model: &crate::project::ProjectModel,
     position: crate::java::lsp::Position,
     symbols: &[crate::java::lsp::OutlineSymbol],
-    source: &str,
+    test_methods: &[(u32, String)],
 ) -> Option<BuildAction> {
     let mut action = current_test_class_action(path, model)?;
     let symbol = symbols.iter().find(|symbol| {
@@ -181,7 +181,9 @@ pub fn current_test_method_action(
             && symbol.kind == 6
             && crate::java::build::valid_java_class_name(&symbol.name)
             && !symbol.name.contains('.')
-            && is_java_test_method(source, range.start.line, &symbol.name)
+            && test_methods
+                .iter()
+                .any(|(line, name)| *line == range.start.line + 1 && name == &symbol.name)
             && (range.start.line, range.start.character) <= (position.line, position.character)
             && (position.line, position.character) < (range.end.line, range.end.character)
     })?;
@@ -196,107 +198,23 @@ pub fn current_test_method_at_line_action(
     model: &crate::project::ProjectModel,
     line: u32,
     symbols: &[crate::java::lsp::OutlineSymbol],
-    source: &str,
+    test_methods: &[(u32, String)],
 ) -> Option<BuildAction> {
     let mut action = current_test_class_action(path, model)?;
     let symbol = symbols.iter().find(|symbol| {
         symbol.location.path == path
             && symbol.kind == 6
             && symbol.location.range.start.line + 1 == line
-            && is_java_test_method(source, symbol.location.range.start.line, &symbol.name)
             && crate::java::build::valid_java_class_name(&symbol.name)
             && !symbol.name.contains('.')
+            && test_methods
+                .iter()
+                .any(|(method_line, name)| *method_line == line && name == &symbol.name)
     })?;
     if let BuildAction::RunTest { method_name, .. } = &mut action {
         *method_name = Some(symbol.name.clone());
     }
     Some(action)
-}
-
-pub(crate) fn is_java_test_method(source: &str, method_line: u32, method_name: &str) -> bool {
-    // shortcut: recognizes direct JUnit/TestNG annotations and JUnit 3 naming; resolve composed annotations when framework metadata is available.
-    let junit3_test_class = source.lines().any(|line| {
-        let line = line.trim_start();
-        let class_header = line.starts_with("class ")
-            || line.starts_with('@')
-            || [
-                "public ",
-                "protected ",
-                "private ",
-                "abstract ",
-                "final ",
-                "sealed ",
-                "non-sealed ",
-                "static ",
-            ]
-            .iter()
-            .any(|prefix| line.starts_with(prefix));
-        class_header
-            && !line.starts_with("//")
-            && !line.starts_with("/*")
-            && (line.contains("extends TestCase")
-                || line.contains("extends junit.framework.TestCase"))
-    });
-    if method_name.starts_with("test") && junit3_test_class {
-        return true;
-    }
-    fn is_test_annotation(line: &str) -> bool {
-        let Some(annotation) = line.trim_start().strip_prefix('@') else {
-            return false;
-        };
-        matches!(
-            annotation
-                .split(|character: char| character == '(' || character.is_whitespace())
-                .next()
-                .unwrap_or_default()
-                .rsplit('.')
-                .next()
-                .unwrap_or_default(),
-            "Test" | "ParameterizedTest" | "RepeatedTest" | "TestFactory" | "TestTemplate"
-        )
-    }
-
-    let lines: Vec<_> = source.lines().collect();
-    let end = method_line as usize;
-    if lines.get(end).is_some_and(|line| is_test_annotation(line)) {
-        return true;
-    }
-    let mut inside_block_comment = false;
-    for line in lines.iter().take(end).rev().take(32) {
-        let line = line.trim();
-        if inside_block_comment {
-            if line.contains("/*") {
-                inside_block_comment = false;
-            }
-            continue;
-        }
-        if let Some((before_comment, comment)) = line.split_once("/*")
-            && let Some((_, after_comment)) = comment.split_once("*/")
-        {
-            if is_test_annotation(before_comment.trim()) || is_test_annotation(after_comment.trim())
-            {
-                return true;
-            }
-            continue;
-        }
-        if line.contains("*/") {
-            inside_block_comment = true;
-            continue;
-        }
-        if line.is_empty() || line.starts_with("//") {
-            continue;
-        }
-        if line.starts_with('@') {
-            if is_test_annotation(line) {
-                return true;
-            }
-        } else if line.starts_with("/*") {
-            inside_block_comment = true;
-        } else {
-            break;
-        }
-    }
-    false
 }
 
 fn run_context_event(state: &AppState) -> AppEvent {
@@ -318,7 +236,7 @@ fn run_context_event(state: &AppState) -> AppEvent {
                     model,
                     tab.document.lsp_position(),
                     &state.language.document_symbols,
-                    &tab.document.text,
+                    &state.language.document_test_methods,
                 )
                 .or_else(|| current_test_class_action(&tab.path, model))
             })

@@ -1561,26 +1561,12 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
                 })
                 .map(|symbol| symbol.location.range.start.line + 1)
         });
-        let test_methods: Vec<_> = if test_class_action.is_some() {
-            state
-                .language
-                .document_symbols
-                .iter()
-                .filter(|symbol| {
-                    symbol.location.path == tab.path
-                        && symbol.kind == 6
-                        && crate::app::actions::is_java_test_method(
-                            &tab.document.text,
-                            symbol.location.range.start.line,
-                            &symbol.name,
-                        )
-                        && crate::java::build::valid_java_class_name(&symbol.name)
-                        && !symbol.name.contains('.')
-                })
-                .map(|symbol| (symbol.location.range.start.line + 1, symbol.name.clone()))
-                .collect()
+        let test_methods = if test_class_action.is_some()
+            && state.language.document_symbols_path.as_ref() == Some(&tab.path)
+        {
+            state.language.document_test_methods.as_slice()
         } else {
-            Vec::new()
+            &[]
         };
         let (toggled, completion_position) = tab.render_editor(
             ui,
@@ -1721,7 +1707,7 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
                             model,
                             line,
                             &state.language.document_symbols,
-                            &tab.document.text,
+                            &state.language.document_test_methods,
                         )
                     })
                     .filter(|action| {
