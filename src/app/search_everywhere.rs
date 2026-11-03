@@ -185,6 +185,14 @@ impl SearchEverywhere {
                 AppEvent::SearchEverywhereOpen(SearchTab::Actions),
             ),
             ("Go to Line…    ⌘L", AppEvent::GoToLineOpen),
+            (
+                "Next Problem    F2",
+                AppEvent::NavigateProblem { next: true },
+            ),
+            (
+                "Previous Problem    ⇧F2",
+                AppEvent::NavigateProblem { next: false },
+            ),
             ("File Structure…    ⌘F12", AppEvent::FileStructureOpen),
             (
                 "Test / production source    ⌘⇧T",
@@ -329,6 +337,8 @@ fn action_search_aliases(label: &str) -> &'static [&'static str] {
         "Test / production source    ⌘⇧T" => &["test_subject", "vai_al_test"],
         "Toggle line breakpoint    ⌘F8" => &["toggle_breakpoint", "punto_interruzione"],
         "View Breakpoints…    ⌘⇧F8" => &["view_breakpoints", "visualizza_breakpoint"],
+        "Next Problem    F2" => &["next_problem", "problema_successivo"],
+        "Previous Problem    ⇧F2" => &["previous_problem", "problema_precedente"],
         "Find usages    ⌥F7" => &["references", "riferimenti"],
         "Quick fixes    ⌥↩" => &["intentions", "correzioni_rapide"],
         "Organize imports    ⌃⌥O" => &["optimize_imports", "ottimizza_importazioni"],

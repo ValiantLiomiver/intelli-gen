@@ -172,6 +172,14 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
                     ));
                     ui.close();
                 }
+                if ui.button(crate::i18n::ui_text(ui, "Next Problem    F2")).clicked() {
+                    state.enqueue(AppEvent::NavigateProblem { next: true });
+                    ui.close();
+                }
+                if ui.button(crate::i18n::ui_text(ui, "Previous Problem    ⇧F2")).clicked() {
+                    state.enqueue(AppEvent::NavigateProblem { next: false });
+                    ui.close();
+                }
                 let test_source_available = state
                     .active_tab
                     .and_then(|index| state.editor_tabs.get(index))

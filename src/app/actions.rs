@@ -310,6 +310,11 @@ pub fn keyboard_shortcuts(ctx: &egui::Context, state: &mut AppState) {
     }) {
         state.enqueue(AppEvent::ShowBreakpoints);
     }
+    if ctx.input_mut(|input| input.consume_key(egui::Modifiers::SHIFT, egui::Key::F2)) {
+        state.enqueue(AppEvent::NavigateProblem { next: false });
+    } else if ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::F2)) {
+        state.enqueue(AppEvent::NavigateProblem { next: true });
+    }
     if state.find_replace.visible
         && ctx.input_mut(|input| {
             input.consume_key(
@@ -1256,6 +1261,11 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
             }
             AppEvent::NavigateBack => move_navigation_history(state, true),
             AppEvent::NavigateForward => move_navigation_history(state, false),
+            AppEvent::NavigateProblem { next } => {
+                if !state.quit_requested {
+                    super::problems::navigate(state, next);
+                }
+            }
             AppEvent::ToggleTestSource => {
                 if let Some(path) = state
                     .active_tab
