@@ -130,6 +130,16 @@ This confirms the Java execution module is shipped. JetBrains documents running
 Java tests from editor gutters in [Performing tests](https://www.jetbrains.com/help/idea/performing-tests.html);
 the package inventory itself does not establish that runtime behavior.
 
+REA inventoried `intellij.java.frontback.impl.jar` from this IntelliJ build
+(Evidence `ev_0e742228001339686e30c3744db137582b30a1e4b386bdb2b6b9e03e99d23ae5`,
+SHA-256 `4ed9b0d1abce05031a1521e5ba594f5be706adeac49b483d867f2f0e8d6e72ce`).
+Bytecode inspection of `JavaBraceMatcher` shows registered pairs for `()`, `{}`,
+`[]`, generic angle brackets, and JavaDoc inline-tag/bracket tokens; the angle
+matcher has a specialized implementation. This establishes shipped matcher
+registration, not all runtime highlighting rules. Intelli-gen currently outlines
+only ordinary Java `()`, `{}`, and `[]` pairs, so generic and JavaDoc matching
+remain gaps.
+
 The focused Java logpoint and Gradle module observations below were first
 recorded on build `IU-263.7307.44`. The current installed logpoint JAR has the
 same SHA-256, so that artifact evidence remains applicable; the Gradle evidence
