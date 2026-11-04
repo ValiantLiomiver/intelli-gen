@@ -35,6 +35,15 @@ impl GoToLine {
                 );
                 if self.focus {
                     response.request_focus();
+                    let mut state = egui::text_edit::TextEditState::load(ui.ctx(), response.id)
+                        .unwrap_or_default();
+                    state
+                        .cursor
+                        .set_char_range(Some(egui::text::CCursorRange::two(
+                            egui::text::CCursor::new(0),
+                            egui::text::CCursor::new(self.input.chars().count()),
+                        )));
+                    state.store(ui.ctx(), response.id);
                     self.focus = false;
                 }
                 let (enter, escape) = ui.input(|input| {
@@ -43,15 +52,17 @@ impl GoToLine {
                         input.key_pressed(egui::Key::Escape),
                     )
                 });
-                if let Some(position) = parse_position(&self.input) {
-                    if ui.button(crate::i18n::ui_text(ui, "Go")).clicked() || enter {
-                        chosen = Some(position);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button(crate::i18n::ui_text(ui, "OK")).clicked() || enter {
+                        if let Some(position) = parse_position(&self.input) {
+                            chosen = Some(position);
+                            close = true;
+                        }
+                    }
+                    if ui.button(crate::i18n::ui_text(ui, "Cancel")).clicked() || escape {
                         close = true;
                     }
-                }
-                if escape {
-                    close = true;
-                }
+                });
             });
         self.visible = open && !close;
         chosen

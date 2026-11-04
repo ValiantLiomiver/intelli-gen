@@ -856,17 +856,6 @@ impl EditorTab {
             state.store(ui.ctx(), editor_id);
             ui.memory_mut(|memory| memory.request_focus(editor_id));
         }
-        if let Some(index) = self.pending_character_index.take() {
-            let mut state =
-                egui::text_edit::TextEditState::load(ui.ctx(), editor_id).unwrap_or_default();
-            state
-                .cursor
-                .set_char_range(Some(egui::text::CCursorRange::one(
-                    egui::text::CCursor::new(index),
-                )));
-            state.store(ui.ctx(), editor_id);
-            ui.memory_mut(|memory| memory.request_focus(editor_id));
-        }
         let navigation = self.pending_line.take().map(|line| {
             let line = line.min(self.document.text.lines().count().max(1));
             let index = self
@@ -888,6 +877,17 @@ impl EditorTab {
             self.document.set_cursor(index);
             line
         });
+        if let Some(index) = self.pending_character_index.take() {
+            let mut state =
+                egui::text_edit::TextEditState::load(ui.ctx(), editor_id).unwrap_or_default();
+            state
+                .cursor
+                .set_char_range(Some(egui::text::CCursorRange::one(
+                    egui::text::CCursor::new(index),
+                )));
+            state.store(ui.ctx(), editor_id);
+            ui.memory_mut(|memory| memory.request_focus(editor_id));
+        }
         let language = super::highlighter::SourceLanguage::for_path(&self.path);
         let java = language == super::highlighter::SourceLanguage::Java;
         let snippet_length_before_edit = self
