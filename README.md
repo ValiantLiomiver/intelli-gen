@@ -136,9 +136,9 @@ SHA-256 `4ed9b0d1abce05031a1521e5ba594f5be706adeac49b483d867f2f0e8d6e72ce`).
 Bytecode inspection of `JavaBraceMatcher` shows registered pairs for `()`, `{}`,
 `[]`, generic angle brackets, and JavaDoc inline-tag/bracket tokens; the angle
 matcher has a specialized implementation. This establishes shipped matcher
-registration, not all runtime highlighting rules. Intelli-gen currently outlines
-only ordinary Java `()`, `{}`, and `[]` pairs, so generic and JavaDoc matching
-remain gaps.
+registration, not all runtime highlighting rules. Intelli-gen recognizes generic
+angle brackets through the existing Java lexer scopes; JavaDoc inline-tag and
+bracket matching remains a gap.
 
 The focused Java logpoint and Gradle module observations below were first
 recorded on build `IU-263.7307.44`. The current installed logpoint JAR has the

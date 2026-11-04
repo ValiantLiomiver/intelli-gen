@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::Path;
 use std::sync::OnceLock;
 
@@ -5,10 +6,15 @@ use super::document::PAGED_EDITOR_BYTES;
 use eframe::egui::{self, text::LayoutJob};
 use syntect::easy::HighlightLines;
 use syntect::highlighting::ThemeSet;
-use syntect::parsing::SyntaxSet;
+use syntect::parsing::{ParseState, ScopeStack, SyntaxSet};
 use syntect::util::LinesWithEndings;
 
 pub const MAX_HIGHLIGHT_BYTES: usize = PAGED_EDITOR_BYTES;
+
+fn syntax_set() -> &'static SyntaxSet {
+    static SYNTAXES: OnceLock<SyntaxSet> = OnceLock::new();
+    SYNTAXES.get_or_init(SyntaxSet::load_defaults_newlines)
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum SourceLanguage {
@@ -59,9 +65,19 @@ pub(super) fn paint_java_delimiter_match(
         .map_or(text.len(), |(byte, _)| byte);
     let current = text[byte_cursor..].chars().next();
     let previous = text[..byte_cursor].chars().next_back();
-    let target = if current.is_some_and(is_delimiter) {
+    let angle_tokens = if matches!(current, Some('<' | '>')) || matches!(previous, Some('<' | '>'))
+    {
+        java_generic_angle_tokens(text)
+    } else {
+        HashSet::new()
+    };
+    let target = if current.is_some_and(is_delimiter) || angle_tokens.contains(&cursor) {
         Some(cursor)
-    } else if previous.is_some_and(is_delimiter) {
+    } else if previous.is_some_and(is_delimiter)
+        || cursor
+            .checked_sub(1)
+            .is_some_and(|index| angle_tokens.contains(&index))
+    {
         cursor.checked_sub(1)
     } else {
         None
@@ -70,7 +86,7 @@ pub(super) fn paint_java_delimiter_match(
         return;
     };
     let characters: Vec<_> = text.chars().collect();
-    let Some((open, close)) = matching_java_delimiters(&characters, target) else {
+    let Some((open, close)) = matching_java_delimiters(&characters, target, &angle_tokens) else {
         return;
     };
     let painter = ui.painter().with_clip_rect(output.text_clip_rect);
@@ -96,8 +112,54 @@ pub(super) fn paint_java_delimiter_match(
     }
 }
 
+fn java_generic_angle_tokens(text: &str) -> HashSet<usize> {
+    let syntaxes = syntax_set();
+    let Some(syntax) = syntaxes.find_syntax_by_extension("java") else {
+        return HashSet::new();
+    };
+    let mut parser = ParseState::new(syntax);
+    let mut scopes = ScopeStack::default();
+    let mut tokens = HashSet::new();
+    let mut char_offset = 0;
+    for line in LinesWithEndings::from(text) {
+        let Ok(operations) = parser.parse_line(line, syntaxes) else {
+            return HashSet::new();
+        };
+        let mut operation = 0;
+        for (byte, character) in line.char_indices() {
+            while operations.get(operation).is_some_and(|(at, _)| *at <= byte) {
+                if scopes.apply(&operations[operation].1).is_err() {
+                    return HashSet::new();
+                }
+                operation += 1;
+            }
+            if matches!(character, '<' | '>')
+                && scopes.scopes.last().is_some_and(|scope| {
+                    let name = scope.build_string();
+                    name.ends_with("punctuation.definition.generic.begin.java")
+                        || name.ends_with("punctuation.definition.generic.end.java")
+                })
+            {
+                tokens.insert(char_offset + line[..byte].chars().count());
+            }
+        }
+        while let Some((_, operation_to_apply)) = operations.get(operation) {
+            if scopes.apply(operation_to_apply).is_err() {
+                return HashSet::new();
+            }
+            operation += 1;
+        }
+        char_offset += line.chars().count();
+    }
+    tokens
+}
+
 // shortcut: Java Unicode escapes are not preprocessed before lexing; add source mapping if they appear in real projects.
-fn matching_java_delimiters(characters: &[char], target: usize) -> Option<(usize, usize)> {
+fn matching_java_delimiters(
+    characters: &[char],
+    target: usize,
+    angle_tokens: &HashSet<usize>,
+) -> Option<(usize, usize)> {
     #[derive(Clone, Copy)]
     enum State {
         Code,
@@ -109,11 +171,15 @@ fn matching_java_delimiters(characters: &[char], target: usize) -> Option<(usize
     }
 
     fn matches(open: char, close: char) -> bool {
-        matches!((open, close), ('(', ')') | ('{', '}') | ('[', ']'))
+        matches!(
+            (open, close),
+            ('(', ')') | ('{', '}') | ('[', ']') | ('<', '>')
+        )
     }
 
     let target_character = *characters.get(target)?;
-    let wanted_open = matches!(target_character, '(' | '{' | '[');
+    let wanted_open = matches!(target_character, '(' | '{' | '[')
+        || (target_character == '<' && angle_tokens.contains(&target));
     let mut state = State::Code;
     let mut stack = Vec::new();
     let mut index = 0;
@@ -170,7 +236,8 @@ fn matching_java_delimiters(characters: &[char], target: usize) -> Option<(usize
                 '"' => state = State::String,
                 '\'' => state = State::Character,
                 '(' | '{' | '[' => stack.push((character, index)),
-                ')' | '}' | ']' => {
+                '<' if angle_tokens.contains(&index) => stack.push((character, index)),
+                ')' | '}' | ']' | '>' if character != '>' || angle_tokens.contains(&index) => {
                     if index == target && !wanted_open {
                         let open_index = stack
                             .last()
@@ -230,9 +297,8 @@ impl Highlighter {
             self.cached = Some((text.to_owned(), dark, language, job.clone()));
             return job;
         }
-        static SYNTAXES: OnceLock<SyntaxSet> = OnceLock::new();
         static THEMES: OnceLock<ThemeSet> = OnceLock::new();
-        let syntaxes = SYNTAXES.get_or_init(SyntaxSet::load_defaults_newlines);
+        let syntaxes = syntax_set();
         let themes = THEMES.get_or_init(ThemeSet::load_defaults);
         let syntax = language
             .syntax_extension()
