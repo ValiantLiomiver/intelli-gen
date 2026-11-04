@@ -4,12 +4,14 @@ use eframe::egui;
 pub struct GoToLine {
     visible: bool,
     input: String,
+    current_line: usize,
     focus: bool,
 }
 
 impl GoToLine {
     pub fn open(&mut self, line: usize, column: usize) {
         self.visible = true;
+        self.current_line = line.max(1);
         self.input = format!("{line}:{column}");
         self.focus = true;
     }
@@ -35,6 +37,10 @@ impl GoToLine {
                             egui::TextEdit::singleline(&mut self.input)
                                 .desired_width(f32::INFINITY),
                         )
+                        .on_hover_text(crate::i18n::ui_text(
+                            ui,
+                            "Enter +N or -N to move relative to the current line",
+                        ))
                     })
                     .inner;
                 if self.focus {
@@ -58,7 +64,7 @@ impl GoToLine {
                 });
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.button(crate::i18n::ui_text(ui, "OK")).clicked() || enter {
-                        if let Some(position) = parse_position(&self.input) {
+                        if let Some(position) = parse_position(&self.input, self.current_line) {
                             chosen = Some(position);
                             close = true;
                         }
@@ -73,8 +79,22 @@ impl GoToLine {
     }
 }
 
-fn parse_position(input: &str) -> Option<(usize, Option<usize>)> {
-    let mut parts = input.trim().split(':');
+fn parse_position(input: &str, current_line: usize) -> Option<(usize, Option<usize>)> {
+    let input = input.trim();
+    if matches!(input.as_bytes().first(), Some(b'+') | Some(b'-')) {
+        let offset = input.parse::<i64>().ok()?;
+        let line = i64::try_from(current_line.saturating_sub(1))
+            .unwrap_or(i64::MAX)
+            .saturating_add(offset)
+            .max(0);
+        return Some((
+            usize::try_from(line)
+                .unwrap_or(usize::MAX)
+                .saturating_add(1),
+            None,
+        ));
+    }
+    let mut parts = input.split(':');
     let line = parts.next()?.trim().parse::<usize>().ok()?;
     let column = parts.next().map(str::trim);
     if line == 0 || parts.next().is_some() {
