@@ -93,6 +93,7 @@ pub(super) fn paint_java_delimiter_match(
     }
 }
 
+// shortcut: Java Unicode escapes are not preprocessed before lexing; add source mapping if they appear in real projects.
 fn matching_java_delimiters(characters: &[char], target: usize) -> Option<(usize, usize)> {
     #[derive(Clone, Copy)]
     enum State {
@@ -168,10 +169,12 @@ fn matching_java_delimiters(characters: &[char], target: usize) -> Option<(usize
                 '(' | '{' | '[' => stack.push((character, index)),
                 ')' | '}' | ']' => {
                     if index == target && !wanted_open {
-                        return stack
+                        let open_index = stack
                             .last()
                             .filter(|(open, _)| matches(*open, character))
-                            .map(|(_, open_index)| (*open_index, index));
+                            .map(|(_, open_index)| *open_index)?;
+                        debug_assert!(matches(characters[open_index], character));
+                        return Some((open_index, index));
                     }
                     if let Some((open, open_index)) = stack.last().copied()
                         && matches(open, character)
