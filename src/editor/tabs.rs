@@ -970,6 +970,14 @@ impl EditorTab {
                         test_class_line,
                         test_methods,
                     );
+                    if java && let Some(cursor) = output.cursor_range {
+                        super::highlighter::paint_java_delimiter_match(
+                            ui,
+                            &output,
+                            &self.document.text,
+                            cursor.primary.index.into(),
+                        );
+                    }
                     if navigation.is_some()
                         && let Some(cursor) = output.cursor_range
                     {
@@ -1314,6 +1322,17 @@ impl EditorTab {
             })
             .inner
             .inner;
+        if super::highlighter::SourceLanguage::for_path(&self.path)
+            == super::highlighter::SourceLanguage::Java
+            && let Some(cursor) = output.cursor_range
+        {
+            super::highlighter::paint_java_delimiter_match(
+                ui,
+                &output,
+                &page,
+                cursor.primary.index.into(),
+            );
+        }
         if output.response.changed()
             || auto_indented
             || auto_deleted_pair
