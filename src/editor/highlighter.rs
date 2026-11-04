@@ -71,8 +71,12 @@ pub(super) fn paint_java_delimiter_match(
     } else {
         HashSet::new()
     };
-    let target = if current.is_some_and(is_delimiter) || angle_tokens.contains(&cursor) {
+    let target = if angle_tokens.contains(&cursor) {
         Some(cursor)
+    } else if current.is_some_and(is_delimiter) {
+        Some(cursor)
+    } else if previous == Some('@') && text[..byte_cursor].chars().rev().nth(1) == Some('{') {
+        cursor.checked_sub(1)
     } else if previous.is_some_and(is_delimiter)
         || cursor
             .checked_sub(1)
@@ -86,18 +90,20 @@ pub(super) fn paint_java_delimiter_match(
         return;
     };
     let characters: Vec<_> = text.chars().collect();
-    let Some((open, close)) = matching_java_delimiters(&characters, target, &angle_tokens) else {
+    let Some((open, close, open_length)) =
+        matching_java_delimiters(&characters, target, &angle_tokens)
+    else {
         return;
     };
     let painter = ui.painter().with_clip_rect(output.text_clip_rect);
-    for index in [open, close] {
+    for (index, length) in [(open, open_length), (close, 1)] {
         let start = output
             .galley
             .pos_from_cursor(egui::text::CCursor::new(index))
             .translate(output.galley_pos.to_vec2());
         let end = output
             .galley
-            .pos_from_cursor(egui::text::CCursor::new(index + 1))
+            .pos_from_cursor(egui::text::CCursor::new(index + length))
             .translate(output.galley_pos.to_vec2());
         let rect = egui::Rect::from_min_max(
             egui::pos2(start.left(), start.top()),
@@ -119,13 +125,14 @@ fn java_generic_angle_tokens(text: &str) -> HashSet<usize> {
     };
     let mut parser = ParseState::new(syntax);
     let mut scopes = ScopeStack::default();
-    let mut tokens = HashSet::new();
+    let mut angle_tokens = HashSet::new();
     let mut char_offset = 0;
     for line in LinesWithEndings::from(text) {
         let Ok(operations) = parser.parse_line(line, syntaxes) else {
             return HashSet::new();
         };
         let mut operation = 0;
+        let mut line_char_offset = 0;
         for (byte, character) in line.char_indices() {
             while operations.get(operation).is_some_and(|(at, _)| *at <= byte) {
                 if scopes.apply(&operations[operation].1).is_err() {
@@ -133,6 +140,8 @@ fn java_generic_angle_tokens(text: &str) -> HashSet<usize> {
                 }
                 operation += 1;
             }
+            let index = char_offset + line_char_offset;
+            line_char_offset += 1;
             if matches!(character, '<' | '>')
                 && scopes.scopes.last().is_some_and(|scope| {
                     let name = scope.build_string();
@@ -140,7 +149,7 @@ fn java_generic_angle_tokens(text: &str) -> HashSet<usize> {
                         || name.ends_with("punctuation.definition.generic.end.java")
                 })
             {
-                tokens.insert(char_offset + line[..byte].chars().count());
+                angle_tokens.insert(index);
             }
         }
         while let Some((_, operation_to_apply)) = operations.get(operation) {
@@ -149,9 +158,9 @@ fn java_generic_angle_tokens(text: &str) -> HashSet<usize> {
             }
             operation += 1;
         }
-        char_offset += line.chars().count();
+        char_offset += line_char_offset;
     }
-    tokens
+    angle_tokens
 }
 
 // shortcut: Java Unicode escapes are not preprocessed before lexing; add source mapping if they appear in real projects.
@@ -159,12 +168,12 @@ fn matching_java_delimiters(
     characters: &[char],
     target: usize,
     angle_tokens: &HashSet<usize>,
-) -> Option<(usize, usize)> {
+) -> Option<(usize, usize, usize)> {
     #[derive(Clone, Copy)]
     enum State {
         Code,
         LineComment,
-        BlockComment,
+        BlockComment { javadoc: bool },
         String,
         Character,
         TextBlock,
@@ -178,10 +187,11 @@ fn matching_java_delimiters(
     }
 
     let target_character = *characters.get(target)?;
-    let wanted_open = matches!(target_character, '(' | '{' | '[')
+    let wanted_open = matches!(target_character, '(' | '{' | '[' | '@')
         || (target_character == '<' && angle_tokens.contains(&target));
     let mut state = State::Code;
     let mut stack = Vec::new();
+    let mut javadoc_stack = Vec::new();
     let mut index = 0;
     while index < characters.len() {
         let character = characters[index];
@@ -191,10 +201,30 @@ fn matching_java_delimiters(
                     state = State::Code;
                 }
             }
-            State::BlockComment => {
+            State::BlockComment { javadoc } => {
                 if character == '*' && characters.get(index + 1) == Some(&'/') {
                     index += 1;
                     state = State::Code;
+                    javadoc_stack.clear();
+                } else if javadoc && character == '{' && characters.get(index + 1) == Some(&'@') {
+                    javadoc_stack.push(('{', index, true));
+                } else if javadoc && matches!(character, '[' | '(') {
+                    javadoc_stack.push((character, index, false));
+                } else if javadoc {
+                    if matches!(character, '}' | ']' | ')')
+                        && let Some((open, open_index, inline_tag)) = javadoc_stack.last().copied()
+                        && matches(open, character)
+                    {
+                        if index == target && !wanted_open {
+                            return Some((open_index, index, if inline_tag { 2 } else { 1 }));
+                        }
+                        javadoc_stack.pop();
+                        if wanted_open
+                            && (open_index == target || (inline_tag && open_index + 1 == target))
+                        {
+                            return Some((open_index, index, if inline_tag { 2 } else { 1 }));
+                        }
+                    }
                 }
             }
             State::String | State::Character => {
@@ -224,8 +254,9 @@ fn matching_java_delimiters(
                     state = State::LineComment;
                 }
                 '/' if characters.get(index + 1) == Some(&'*') => {
+                    let javadoc = characters.get(index + 2) == Some(&'*');
                     index += 1;
-                    state = State::BlockComment;
+                    state = State::BlockComment { javadoc };
                 }
                 '"' if characters.get(index + 1) == Some(&'"')
                     && characters.get(index + 2) == Some(&'"') =>
@@ -244,7 +275,7 @@ fn matching_java_delimiters(
                             .filter(|(open, _)| matches(*open, character))
                             .map(|(_, open_index)| *open_index)?;
                         debug_assert!(matches(characters[open_index], character));
-                        return Some((open_index, index));
+                        return Some((open_index, index, 1));
                     }
                     if let Some((open, open_index)) = stack.last().copied()
                         && matches(open, character)
@@ -252,7 +283,7 @@ fn matching_java_delimiters(
                         stack.pop();
                         if open_index == target && wanted_open {
                             debug_assert!(matches(characters[open_index], character));
-                            return Some((open_index, index));
+                            return Some((open_index, index, 1));
                         }
                     }
                 }
