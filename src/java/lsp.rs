@@ -4549,7 +4549,7 @@ pub fn render(ui: &mut eframe::egui::Ui, state: &mut crate::app::AppState) {
         && !state.language.has_pending_start()
         && !state.pending_language_restart
         && ui
-            .small_button("Retry Java intelligence")
+            .small_button(crate::i18n::ui_text(ui, "Retry Java intelligence"))
             .on_hover_text(crate::i18n::ui_text(
                 ui,
                 "Restart JDT LS and retry the connection",
@@ -4564,7 +4564,10 @@ pub fn render(ui: &mut eframe::egui::Ui, state: &mut crate::app::AppState) {
             crate::i18n::message(ui.ctx(), warning),
         );
         if ui
-            .small_button("Restart Java intelligence after resolving Lombok")
+            .small_button(crate::i18n::ui_text(
+                ui,
+                "Restart Java intelligence after resolving Lombok",
+            ))
             .clicked()
         {
             events.push(AppEvent::RestartLanguage);
