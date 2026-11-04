@@ -552,11 +552,16 @@ pub fn render(ui: &mut eframe::egui::Ui, state: &mut crate::app::AppState) {
                         let actual = status
                             .and_then(|status| status.source.as_ref())
                             .filter(|source| *source != &point.source)
-                            .map(|source| crate::i18n::format(
-                                ui.ctx(),
-                                " in {path}",
-                                &[("path", &source.display().to_string())],
-                            ))
+                            .map(|source| {
+                                format!(
+                                    " {}",
+                                    crate::i18n::format(
+                                        ui.ctx(),
+                                        "in {path}",
+                                        &[("path", &source.display().to_string())],
+                                    )
+                                )
+                            })
                             .unwrap_or_default();
                         let message = status
                             .filter(|status| status.verified)

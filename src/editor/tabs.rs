@@ -856,17 +856,6 @@ impl EditorTab {
             state.store(ui.ctx(), editor_id);
             ui.memory_mut(|memory| memory.request_focus(editor_id));
         }
-        if let Some(index) = self.pending_character_index.take() {
-            let mut state =
-                egui::text_edit::TextEditState::load(ui.ctx(), editor_id).unwrap_or_default();
-            state
-                .cursor
-                .set_char_range(Some(egui::text::CCursorRange::one(
-                    egui::text::CCursor::new(index),
-                )));
-            state.store(ui.ctx(), editor_id);
-            ui.memory_mut(|memory| memory.request_focus(editor_id));
-        }
         let navigation = self.pending_line.take().map(|line| {
             let line = line.min(self.document.text.lines().count().max(1));
             let index = self
@@ -888,6 +877,17 @@ impl EditorTab {
             self.document.set_cursor(index);
             line
         });
+        if let Some(index) = self.pending_character_index.take() {
+            let mut state =
+                egui::text_edit::TextEditState::load(ui.ctx(), editor_id).unwrap_or_default();
+            state
+                .cursor
+                .set_char_range(Some(egui::text::CCursorRange::one(
+                    egui::text::CCursor::new(index),
+                )));
+            state.store(ui.ctx(), editor_id);
+            ui.memory_mut(|memory| memory.request_focus(editor_id));
+        }
         let language = super::highlighter::SourceLanguage::for_path(&self.path);
         let java = language == super::highlighter::SourceLanguage::Java;
         let snippet_length_before_edit = self
@@ -970,14 +970,28 @@ impl EditorTab {
                         test_class_line,
                         test_methods,
                     );
-                    if let Some(line) = navigation {
-                        let height =
-                            ui.fonts_mut(|fonts| fonts.row_height(&egui::FontId::monospace(14.0)));
-                        let target = egui::Rect::from_min_size(
-                            output.response.rect.min + egui::vec2(0.0, (line - 1) as f32 * height),
-                            egui::vec2(1.0, height),
+                    if java && let Some(cursor) = output.cursor_range {
+                        super::highlighter::paint_java_delimiter_match(
+                            ui,
+                            &output,
+                            &self.document.text,
+                            cursor.primary.index.into(),
                         );
-                        ui.scroll_to_rect(target, Some(egui::Align::Center));
+                    }
+                    if navigation.is_some()
+                        && let Some(cursor) = output.cursor_range
+                    {
+                        let cursor_rect = output
+                            .galley
+                            .pos_from_cursor(cursor.primary)
+                            .translate(output.galley_pos.to_vec2());
+                        ui.scroll_to_rect(
+                            egui::Rect::from_min_size(
+                                cursor_rect.min,
+                                egui::vec2(1.0, cursor_rect.height()),
+                            ),
+                            Some(egui::Align::Center),
+                        );
                     }
                     if let Some(cursor) = output.cursor_range {
                         self.document.set_cursor(cursor.primary.index.into());
@@ -1133,26 +1147,24 @@ impl EditorTab {
     ) -> Option<super::GutterBreakpointAction> {
         ui.colored_label(ui.visuals().warn_fg_color,
             crate::i18n::ui_text(ui, "Large file: editing is limited to the visible page. Save writes the complete document."));
-        let mut start = None;
-        if let Some(line) = self.pending_line.take() {
-            start = Some(
-                self.document
-                    .text
-                    .split_inclusive('\n')
-                    .take(line.saturating_sub(1))
-                    .map(str::len)
-                    .sum(),
-            );
-        }
+        let mut target_cursor = self
+            .pending_line
+            .take()
+            .map(|line| self.document.character_index_at_line_column(line, 1));
         if let Some(index) = self.pending_character_index.take() {
-            start = Some(
-                self.document
-                    .text
-                    .char_indices()
-                    .nth(index)
-                    .map_or(self.document.text.len(), |(byte, _)| byte),
-            );
+            target_cursor = Some(index.min(self.document.text.chars().count()));
         }
+        let mut start = target_cursor.map(|index| {
+            let target = byte_index(&self.document.text, index);
+            let line_start = self.document.text[..target]
+                .rfind('\n')
+                .map_or(0, |newline| newline + 1);
+            if target - line_start <= EDITOR_PAGE_BYTES {
+                line_start
+            } else {
+                target
+            }
+        });
         ui.horizontal(|ui| {
             if ui
                 .add_enabled(
@@ -1227,7 +1239,16 @@ impl EditorTab {
         }
         let editor_id = egui::Id::new(("paged_source_editor", &self.path));
         if reset {
-            egui::text_edit::TextEditState::default().store(ui.ctx(), editor_id);
+            let mut state = egui::text_edit::TextEditState::default();
+            if let Some(index) = target_cursor {
+                let page_offset = self.document.text[..self.page_start].chars().count();
+                state
+                    .cursor
+                    .set_char_range(Some(egui::text::CCursorRange::one(
+                        egui::text::CCursor::new(index.saturating_sub(page_offset)),
+                    )));
+            }
+            state.store(ui.ctx(), editor_id);
             ui.memory_mut(|memory| memory.request_focus(editor_id));
         }
         let first_line = self.document.text[..self.page_start]
@@ -1301,6 +1322,17 @@ impl EditorTab {
             })
             .inner
             .inner;
+        if super::highlighter::SourceLanguage::for_path(&self.path)
+            == super::highlighter::SourceLanguage::Java
+            && let Some(cursor) = output.cursor_range
+        {
+            super::highlighter::paint_java_delimiter_match(
+                ui,
+                &output,
+                &page,
+                cursor.primary.index.into(),
+            );
+        }
         if output.response.changed()
             || auto_indented
             || auto_deleted_pair
@@ -1418,11 +1450,23 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
     if let Some(tab) = state
         .active_tab
         .and_then(|index| state.editor_tabs.get(index))
+    {
+        state.language.ensure_project_source_roots(&tab.document);
+    }
+    if let Some(tab) = state
+        .active_tab
+        .and_then(|index| state.editor_tabs.get(index))
         && state
             .project
             .as_ref()
             .and_then(|project| project.model.as_ref())
-            .and_then(|model| crate::app::actions::current_test_class_action(&tab.path, model))
+            .and_then(|model| {
+                crate::app::actions::current_test_class_action(
+                    &tab.path,
+                    model,
+                    state.language.project_source_roots(&tab.path),
+                )
+            })
             .is_some()
     {
         state.language.ensure_document_symbols(&tab.document);
@@ -1543,7 +1587,13 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
                 .project
                 .as_ref()
                 .and_then(|project| project.model.as_ref())
-                .and_then(|model| crate::app::actions::current_test_class_action(&tab.path, model))
+                .and_then(|model| {
+                    crate::app::actions::current_test_class_action(
+                        &tab.path,
+                        model,
+                        state.language.project_source_roots(&tab.path),
+                    )
+                })
         };
         let test_class_line = test_class_action.as_ref().and_then(|action| {
             let crate::app::events::BuildAction::RunTest { class_name, .. } = action else {
@@ -1705,6 +1755,7 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
                         crate::app::actions::current_test_method_at_line_action(
                             &path,
                             model,
+                            state.language.project_source_roots(&path),
                             line,
                             &state.language.document_symbols,
                             &state.language.document_test_methods,
