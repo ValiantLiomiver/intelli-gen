@@ -970,14 +970,20 @@ impl EditorTab {
                         test_class_line,
                         test_methods,
                     );
-                    if let Some(line) = navigation {
-                        let height =
-                            ui.fonts_mut(|fonts| fonts.row_height(&egui::FontId::monospace(14.0)));
-                        let target = egui::Rect::from_min_size(
-                            output.response.rect.min + egui::vec2(0.0, (line - 1) as f32 * height),
-                            egui::vec2(1.0, height),
+                    if navigation.is_some()
+                        && let Some(cursor) = output.cursor_range
+                    {
+                        let cursor_rect = output
+                            .galley
+                            .pos_from_cursor(cursor.primary)
+                            .translate(output.galley_pos.to_vec2());
+                        ui.scroll_to_rect(
+                            egui::Rect::from_min_size(
+                                cursor_rect.min,
+                                egui::vec2(1.0, cursor_rect.height()),
+                            ),
+                            Some(egui::Align::Center),
                         );
-                        ui.scroll_to_rect(target, Some(egui::Align::Center));
                     }
                     if let Some(cursor) = output.cursor_range {
                         self.document.set_cursor(cursor.primary.index.into());
