@@ -42,8 +42,8 @@
 - Add `AppEvent::NavigateProblem { next: bool }`.
 - Add `problems::navigate(state: &mut AppState, next: bool)`.
 
-- [ ] Extract the existing capped Java/build problem collection for reuse by rendering and navigation.
-- [ ] Order a navigation copy by path, line, and column; wrap relative to the active editor's LSP position and open via existing file-position events.
-- [ ] Wire `F2`, `Shift+F2`, Navigate menu, and Search Everywhere actions; localize labels and the no-results status.
-- [ ] Document shortcuts and verify with `cargo fmt --check`, `git diff --check`, and `cargo check --quiet`.
-- [ ] Commit and push on `main`.
+- [x] Extract the existing capped Java/build problem collection for reuse by rendering and navigation.
+- [x] Order a navigation copy by path, line, and column; wrap relative to the active editor's LSP position and open via existing file-position events.
+- [x] Wire `F2`, `Shift+F2`, Navigate menu, and Search Everywhere actions; localize labels and the no-results status.
+- [x] Document shortcuts and verify with `cargo fmt --check`, `git diff --check`, and `cargo check --quiet`.
+- [x] Commit and push on `main`.

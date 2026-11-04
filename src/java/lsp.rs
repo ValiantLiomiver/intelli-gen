@@ -45,6 +45,7 @@ pub enum EditorCommand {
     Format,
     OrganizeImports,
     Rename,
+    ProjectSourceRoots,
 }
 impl EditorCommand {
     fn method(self) -> &'static str {
@@ -62,6 +63,7 @@ impl EditorCommand {
             Self::Format => "textDocument/formatting",
             Self::OrganizeImports => "java/organizeImports",
             Self::Rename => "textDocument/rename",
+            Self::ProjectSourceRoots => "workspace/executeCommand",
         }
     }
 }
@@ -92,6 +94,12 @@ pub struct LanguageDiagnostic {
 pub struct Location {
     pub path: PathBuf,
     pub range: Range,
+}
+#[derive(Clone, Debug)]
+pub struct JavaSourceRoot {
+    pub path: PathBuf,
+    pub test: bool,
+    pub scope: Option<String>,
 }
 #[derive(Clone, Debug)]
 pub struct WorkspaceFileEdits {
@@ -558,6 +566,11 @@ pub enum LanguageEvent {
         path: PathBuf,
         version: i64,
         result: Result<Vec<OutlineSymbol>, String>,
+    },
+    ProjectSourceRoots {
+        path: PathBuf,
+        version: i64,
+        result: Result<Vec<JavaSourceRoot>, String>,
     },
     DocumentEdits {
         path: PathBuf,
@@ -2085,6 +2098,7 @@ async fn protocol(
                             params["newName"] = json!(new_name);
                         }
                         if command == EditorCommand::DocumentSymbols { params = json!({"textDocument": {"uri": uri(&path)?}}); }
+                        if command == EditorCommand::ProjectSourceRoots { params = json!({"command": "java.project.getSettings", "arguments": [uri(&path)?, ["org.eclipse.jdt.ls.core.classpathEntries"]]}); }
                         if command == EditorCommand::Format { params = json!({"textDocument": {"uri": uri(&path)?}, "options": {"tabSize": tab_size, "insertSpaces": insert_spaces}}); }
                         if command == EditorCommand::OrganizeImports { params = json!({"textDocument": {"uri": uri(&path)?}, "range": {"start": {"line": 0, "character": 0}, "end": document_end}, "context": {"diagnostics": []}}); }
                         if command == EditorCommand::CodeActions { params = json!({"textDocument": {"uri": uri(&path)?}, "range": range, "context": {"diagnostics": diagnostics}}); }
@@ -2327,6 +2341,7 @@ async fn deliver_response(request: Pending, result: &Value, events: &LanguageEve
     let Pending {
         command,
         path,
+        project_root,
         version,
         position,
         navigation_request_id,
@@ -2498,6 +2513,11 @@ async fn deliver_response(request: Pending, result: &Value, events: &LanguageEve
         }
         EditorCommand::DocumentSymbols => LanguageEvent::DocumentSymbols {
             result: document_symbols(result, &path),
+            path,
+            version,
+        },
+        EditorCommand::ProjectSourceRoots => LanguageEvent::ProjectSourceRoots {
+            result: project_source_roots(result, &path, &project_root),
             path,
             version,
         },
@@ -2968,6 +2988,14 @@ async fn deliver_request_error(request: Pending, error: String, events: &Languag
                 result: Err(error),
             })
             .await;
+    } else if request.command == EditorCommand::ProjectSourceRoots {
+        let _ = events
+            .send(LanguageEvent::ProjectSourceRoots {
+                path: request.path,
+                version: request.version,
+                result: Err(error),
+            })
+            .await;
     } else if request.command == EditorCommand::CodeActions {
         let _ = events
             .send(LanguageEvent::CodeActions {
@@ -3046,6 +3074,74 @@ fn workspace_symbols(value: &Value, root: &Path) -> Vec<WorkspaceSymbol> {
         })
         .take(500)
         .collect()
+}
+
+fn project_source_roots(
+    value: &Value,
+    path: &Path,
+    project_root: &Path,
+) -> Result<Vec<JavaSourceRoot>, String> {
+    let entries = value["org.eclipse.jdt.ls.core.classpathEntries"]
+        .as_array()
+        .ok_or("JDT LS returned no Java source classpath entries")?;
+    let canonical_root = project_root.canonicalize().ok();
+    let mut roots = Vec::new();
+    for entry in entries
+        .iter()
+        .filter(|entry| entry["kind"].as_u64() == Some(3))
+    {
+        let Some(source_path) = entry["path"].as_str().map(PathBuf::from) else {
+            continue;
+        };
+        let attributes = entry["attributes"].as_object();
+        let scope = attributes.and_then(|attributes| {
+            attributes
+                .get("gradle_scope")
+                .or_else(|| {
+                    attributes
+                        .iter()
+                        .find(|(name, _)| name.contains("scope"))
+                        .map(|(_, value)| value)
+                })
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        });
+        let is_test = attributes
+            .and_then(|attributes| attributes.get("test"))
+            .and_then(Value::as_str)
+            .is_some_and(|value| value.eq_ignore_ascii_case("true"))
+            || scope
+                .as_deref()
+                .is_some_and(|scope| scope.to_ascii_lowercase().contains("test"));
+        let source_path = if source_path.is_absolute() {
+            source_path
+        } else {
+            project_root.join(source_path)
+        };
+        let source_path = source_path.canonicalize().unwrap_or(source_path);
+        let source_path = if let Some(root) = canonical_root.as_deref() {
+            if let Ok(relative) = source_path.strip_prefix(root) {
+                project_root.join(relative)
+            } else {
+                source_path
+            }
+        } else {
+            source_path
+        };
+        roots.push(JavaSourceRoot {
+            path: source_path,
+            test: is_test,
+            scope,
+        });
+    }
+    if roots.is_empty()
+        && path
+            .extension()
+            .is_some_and(|extension| extension == "java")
+    {
+        return Err("JDT LS returned no Java source roots for the active file".into());
+    }
+    Ok(roots)
 }
 
 fn document_symbols(value: &Value, path: &Path) -> Result<Vec<OutlineSymbol>, String> {
@@ -3160,6 +3256,8 @@ pub struct LanguageTool {
     pub document_test_methods: Vec<(u32, String)>,
     pub document_symbols_loading: bool,
     pub document_symbols_error: Option<String>,
+    source_roots: HashMap<PathBuf, Result<Vec<JavaSourceRoot>, String>>,
+    source_roots_pending: HashMap<PathBuf, i64>,
 }
 
 #[cfg(test)]
@@ -3326,6 +3424,8 @@ impl LanguageTool {
         self.document_test_methods.clear();
         self.document_symbols_loading = false;
         self.document_symbols_error = None;
+        self.source_roots.clear();
+        self.source_roots_pending.clear();
         self.code_actions = None;
         self.code_actions_error = None;
         self.root = project.map(|project| project.root.clone());
@@ -3637,6 +3737,71 @@ impl LanguageTool {
             || (self.document_symbols_version != Some(version) && !self.document_symbols_loading)
         {
             self.request_document_symbols(document);
+        }
+    }
+    pub fn project_source_roots(&self, path: &Path) -> &[JavaSourceRoot] {
+        self.source_roots
+            .iter()
+            .filter_map(|(source, result)| {
+                let roots = result.as_ref().ok()?;
+                let depth = if source == path {
+                    Some(usize::MAX)
+                } else {
+                    roots
+                        .iter()
+                        .filter(|root| path.starts_with(&root.path))
+                        .map(|root| root.path.components().count())
+                        .max()
+                }?;
+                Some((depth, roots.as_slice()))
+            })
+            .max_by_key(|(depth, _)| *depth)
+            .map(|(_, roots)| roots)
+            .unwrap_or(&[])
+    }
+    pub fn ensure_project_source_roots(&mut self, document: &Document) {
+        if document
+            .path
+            .extension()
+            .is_none_or(|extension| extension != "java")
+            || self.source_roots.contains_key(&document.path)
+            || !self.project_source_roots(&document.path).is_empty()
+            || self.source_roots_pending.contains_key(&document.path)
+        {
+            return;
+        }
+        let Some(session) = self.session.as_ref() else {
+            return;
+        };
+        let Some(synced) = self
+            .documents
+            .get(&document.path)
+            .filter(|synced| synced.text == document.text)
+        else {
+            return;
+        };
+        let Some(project_root) = self.root.clone() else {
+            return;
+        };
+        if session
+            .try_command(LanguageCommand::Request {
+                command: EditorCommand::ProjectSourceRoots,
+                path: document.path.clone(),
+                project_root,
+                position: document.lsp_position(),
+                document_end: document_end_position(&document.text),
+                range: document_line_range(&document.text, document.lsp_position().line),
+                diagnostics: Vec::new(),
+                version: synced.version,
+                navigation_request_id: None,
+                rename_to: None,
+                tab_size: 4,
+                insert_spaces: true,
+            })
+            .is_ok()
+        {
+            self.source_roots_pending
+                .insert(document.path.clone(), synced.version);
         }
     }
     pub fn did_save(&mut self, path: PathBuf) {
@@ -4136,6 +4301,16 @@ impl LanguageTool {
                     }
                 }
             }
+            LanguageEvent::ProjectSourceRoots {
+                path,
+                version,
+                result,
+            } if self.source_roots_pending.get(&path) == Some(&version) => {
+                self.source_roots_pending.remove(&path);
+                if self.current(&path, version) {
+                    self.source_roots.insert(path, result);
+                }
+            }
             LanguageEvent::DocumentEdits {
                 result: Err(error),
                 path,
@@ -4549,7 +4724,7 @@ pub fn render(ui: &mut eframe::egui::Ui, state: &mut crate::app::AppState) {
         && !state.language.has_pending_start()
         && !state.pending_language_restart
         && ui
-            .small_button("Retry Java intelligence")
+            .small_button(crate::i18n::ui_text(ui, "Retry Java intelligence"))
             .on_hover_text(crate::i18n::ui_text(
                 ui,
                 "Restart JDT LS and retry the connection",
@@ -4564,7 +4739,10 @@ pub fn render(ui: &mut eframe::egui::Ui, state: &mut crate::app::AppState) {
             crate::i18n::message(ui.ctx(), warning),
         );
         if ui
-            .small_button("Restart Java intelligence after resolving Lombok")
+            .small_button(crate::i18n::ui_text(
+                ui,
+                "Restart Java intelligence after resolving Lombok",
+            ))
             .clicked()
         {
             events.push(AppEvent::RestartLanguage);
