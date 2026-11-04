@@ -191,7 +191,13 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
                 let test_source_available = state
                     .active_tab
                     .and_then(|index| state.editor_tabs.get(index))
-                    .is_some_and(|tab| super::actions::test_source_target(&tab.path).is_some());
+                    .is_some_and(|tab| {
+                        super::actions::test_source_target(
+                            &tab.path,
+                            state.language.project_source_roots(&tab.path),
+                        )
+                        .is_some()
+                    });
                 if ui.add_enabled(test_source_available, egui::Button::new(crate::i18n::ui_text(ui, "Test / production source    ⌘⇧T"))).clicked() {
                     state.enqueue(AppEvent::ToggleTestSource);
                     ui.close();
@@ -339,7 +345,13 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
                             .as_ref()?
                             .model
                             .as_ref()
-                            .and_then(|model| actions::current_test_class_action(&tab.path, model))
+                            .and_then(|model| {
+                                actions::current_test_class_action(
+                                    &tab.path,
+                                    model,
+                                    state.language.project_source_roots(&tab.path),
+                                )
+                            })
                     });
                 let test_method_action = state
                     .active_tab
@@ -349,6 +361,7 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
                             actions::current_test_method_action(
                                 &tab.path,
                                 model,
+                                state.language.project_source_roots(&tab.path),
                                 tab.document.lsp_position(),
                                 &state.language.document_symbols,
                                 &state.language.document_test_methods,

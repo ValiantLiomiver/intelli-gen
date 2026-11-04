@@ -20,7 +20,8 @@
 ## Review Focus
 
 - Nested Maven/Gradle modules: select the deepest containing module.
-- Non-test Java files and custom source roots: disable the action.
+- Non-test Java files: disable the action. For custom source roots, use JDT LS
+  classpath-entry metadata rather than guessing from directory names.
 - Package path containing invalid UTF-8 or invalid Java identifiers: disable the action.
 - An active build: disable the action; preserve the existing single-build guard.
 - Localization: ensure the new action and hint have matching English/Italian keys.
@@ -37,11 +38,12 @@
 - Modify: `README.md`
 
 **Interfaces:**
-- Add `actions::current_test_class_action(path: &Path, model: &ProjectModel) -> Option<BuildAction>`.
-- The returned event uses `RunTest { class_name, module_root, test_task: "test", integration: false }`.
+- Add `actions::current_test_class_action(path: &Path, model: &ProjectModel, source_roots: &[JavaSourceRoot]) -> Option<BuildAction>`.
+- The returned event derives `test_task` and Maven integration mode from imported source-root metadata when available.
 
-- [x] Resolve the deepest module containing `path`, require `src/test/java`, derive and validate the fully qualified class name.
+- [x] Resolve the deepest module containing `path`, derive and validate the fully qualified class name from conventional or JDT LS test source roots.
 - [x] Add **Run Current Test Class** to Run and the editor gutter context menu; enable it only for the supported active test file while no build is running, then dispatch the existing action.
 - [x] Add English/Italian labels and disabled hints, and document the menu action in README.
 - [x] Verify with `cargo fmt --check`, `git diff --check`, and `cargo check --quiet`.
 - [x] Commit the feature on `main`.
+- [x] Query the packaged JDT LS `java.project.getSettings` command and reuse its imported source-root metadata for test detection and source pairing.

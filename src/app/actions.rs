@@ -87,10 +87,24 @@ fn open_file_at_position(
     }
 }
 
-// shortcut: pairs only src/main/java and src/test/java; add other roots when supported projects need them.
-pub fn test_source_target(path: &Path) -> Option<PathBuf> {
+pub fn test_source_target(
+    path: &Path,
+    source_roots: &[crate::java::lsp::JavaSourceRoot],
+) -> Option<PathBuf> {
     if path.extension().is_none_or(|extension| extension != "java") {
         return None;
+    }
+    if let Some(source_root) = source_roots
+        .iter()
+        .filter(|root| path.starts_with(&root.path))
+        .max_by_key(|root| root.path.components().count())
+    {
+        let relative = path.strip_prefix(&source_root.path).ok()?;
+        return source_roots
+            .iter()
+            .filter(|root| root.test != source_root.test)
+            .map(|root| root.path.join(relative))
+            .find(|target| target.is_file());
     }
     let mut source_root = path.parent()?;
     while let Some(parent) = source_root.parent() {
@@ -127,10 +141,10 @@ pub fn test_source_target(path: &Path) -> Option<PathBuf> {
     None
 }
 
-// shortcut: recognizes the conventional src/test/java layout; add custom source sets when the project model can identify them.
 pub fn current_test_class_action(
     path: &Path,
     model: &crate::project::ProjectModel,
+    source_roots: &[crate::java::lsp::JavaSourceRoot],
 ) -> Option<BuildAction> {
     if model.kind == crate::project::ProjectKind::Unknown
         || path.extension().is_none_or(|extension| extension != "java")
@@ -144,11 +158,27 @@ pub fn current_test_class_action(
         .chain(std::iter::once(&model.root))
         .filter(|root| path.starts_with(root))
         .max_by_key(|root| root.components().count())?;
-    let class_path = path
-        .strip_prefix(module_root)
-        .ok()?
-        .strip_prefix(Path::new("src/test/java"))
-        .ok()?;
+    let (class_path, scope) = if let Some(source_root) = source_roots
+        .iter()
+        .filter(|root| root.test && path.starts_with(&root.path))
+        .max_by_key(|root| root.path.components().count())
+    {
+        (
+            path.strip_prefix(&source_root.path).ok()?,
+            source_root.scope.as_deref(),
+        )
+    } else {
+        if source_roots.iter().any(|root| path.starts_with(&root.path)) {
+            return None;
+        }
+        (
+            path.strip_prefix(module_root)
+                .ok()?
+                .strip_prefix(Path::new("src/test/java"))
+                .ok()?,
+            None,
+        )
+    };
     let class_name = class_path
         .with_extension("")
         .components()
@@ -162,19 +192,36 @@ pub fn current_test_class_action(
         class_name,
         method_name: None,
         module_root: module_root.clone(),
-        test_task: "test".into(),
-        integration: false,
+        test_task: (model.kind == crate::project::ProjectKind::Gradle)
+            .then(|| {
+                scope
+                    .filter(|scope| valid_gradle_test_task(scope))
+                    .unwrap_or("test")
+            })
+            .unwrap_or("test")
+            .into(),
+        integration: model.kind == crate::project::ProjectKind::Maven
+            && scope.is_some_and(|scope| scope.to_ascii_lowercase().contains("integration")),
     })
+}
+
+fn valid_gradle_test_task(task: &str) -> bool {
+    let mut characters = task.bytes();
+    characters
+        .next()
+        .is_some_and(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        && characters.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
 }
 
 pub fn current_test_method_action(
     path: &Path,
     model: &crate::project::ProjectModel,
+    source_roots: &[crate::java::lsp::JavaSourceRoot],
     position: crate::java::lsp::Position,
     symbols: &[crate::java::lsp::OutlineSymbol],
     test_methods: &[(u32, String)],
 ) -> Option<BuildAction> {
-    let mut action = current_test_class_action(path, model)?;
+    let mut action = current_test_class_action(path, model, source_roots)?;
     let symbol = symbols.iter().find(|symbol| {
         let range = symbol.location.range;
         symbol.location.path == path
@@ -196,11 +243,12 @@ pub fn current_test_method_action(
 pub fn current_test_method_at_line_action(
     path: &Path,
     model: &crate::project::ProjectModel,
+    source_roots: &[crate::java::lsp::JavaSourceRoot],
     line: u32,
     symbols: &[crate::java::lsp::OutlineSymbol],
     test_methods: &[(u32, String)],
 ) -> Option<BuildAction> {
-    let mut action = current_test_class_action(path, model)?;
+    let mut action = current_test_class_action(path, model, source_roots)?;
     let symbol = symbols.iter().find(|symbol| {
         symbol.location.path == path
             && symbol.kind == 6
@@ -234,11 +282,18 @@ fn run_context_event(state: &AppState) -> AppEvent {
                 current_test_method_action(
                     &tab.path,
                     model,
+                    state.language.project_source_roots(&tab.path),
                     tab.document.lsp_position(),
                     &state.language.document_symbols,
                     &state.language.document_test_methods,
                 )
-                .or_else(|| current_test_class_action(&tab.path, model))
+                .or_else(|| {
+                    current_test_class_action(
+                        &tab.path,
+                        model,
+                        state.language.project_source_roots(&tab.path),
+                    )
+                })
             })
     };
     test_action.map_or_else(
@@ -1481,7 +1536,12 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                 if let Some(path) = state
                     .active_tab
                     .and_then(|index| state.editor_tabs.get(index))
-                    .and_then(|tab| test_source_target(&tab.path))
+                    .and_then(|tab| {
+                        test_source_target(
+                            &tab.path,
+                            state.language.project_source_roots(&tab.path),
+                        )
+                    })
                 {
                     state.enqueue(AppEvent::OpenFile(path));
                 } else {

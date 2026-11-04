@@ -1418,11 +1418,23 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
     if let Some(tab) = state
         .active_tab
         .and_then(|index| state.editor_tabs.get(index))
+    {
+        state.language.ensure_project_source_roots(&tab.document);
+    }
+    if let Some(tab) = state
+        .active_tab
+        .and_then(|index| state.editor_tabs.get(index))
         && state
             .project
             .as_ref()
             .and_then(|project| project.model.as_ref())
-            .and_then(|model| crate::app::actions::current_test_class_action(&tab.path, model))
+            .and_then(|model| {
+                crate::app::actions::current_test_class_action(
+                    &tab.path,
+                    model,
+                    state.language.project_source_roots(&tab.path),
+                )
+            })
             .is_some()
     {
         state.language.ensure_document_symbols(&tab.document);
@@ -1543,7 +1555,13 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
                 .project
                 .as_ref()
                 .and_then(|project| project.model.as_ref())
-                .and_then(|model| crate::app::actions::current_test_class_action(&tab.path, model))
+                .and_then(|model| {
+                    crate::app::actions::current_test_class_action(
+                        &tab.path,
+                        model,
+                        state.language.project_source_roots(&tab.path),
+                    )
+                })
         };
         let test_class_line = test_class_action.as_ref().and_then(|action| {
             let crate::app::events::BuildAction::RunTest { class_name, .. } = action else {
@@ -1705,6 +1723,7 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
                         crate::app::actions::current_test_method_at_line_action(
                             &path,
                             model,
+                            state.language.project_source_roots(&path),
                             line,
                             &state.language.document_symbols,
                             &state.language.document_test_methods,
