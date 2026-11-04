@@ -1139,26 +1139,24 @@ impl EditorTab {
     ) -> Option<super::GutterBreakpointAction> {
         ui.colored_label(ui.visuals().warn_fg_color,
             crate::i18n::ui_text(ui, "Large file: editing is limited to the visible page. Save writes the complete document."));
-        let mut start = None;
-        if let Some(line) = self.pending_line.take() {
-            start = Some(
-                self.document
-                    .text
-                    .split_inclusive('\n')
-                    .take(line.saturating_sub(1))
-                    .map(str::len)
-                    .sum(),
-            );
-        }
+        let mut target_cursor = self
+            .pending_line
+            .take()
+            .map(|line| self.document.character_index_at_line_column(line, 1));
         if let Some(index) = self.pending_character_index.take() {
-            start = Some(
-                self.document
-                    .text
-                    .char_indices()
-                    .nth(index)
-                    .map_or(self.document.text.len(), |(byte, _)| byte),
-            );
+            target_cursor = Some(index.min(self.document.text.chars().count()));
         }
+        let mut start = target_cursor.map(|index| {
+            let target = byte_index(&self.document.text, index);
+            let line_start = self.document.text[..target]
+                .rfind('\n')
+                .map_or(0, |newline| newline + 1);
+            if target - line_start <= EDITOR_PAGE_BYTES {
+                line_start
+            } else {
+                target
+            }
+        });
         ui.horizontal(|ui| {
             if ui
                 .add_enabled(
@@ -1233,7 +1231,16 @@ impl EditorTab {
         }
         let editor_id = egui::Id::new(("paged_source_editor", &self.path));
         if reset {
-            egui::text_edit::TextEditState::default().store(ui.ctx(), editor_id);
+            let mut state = egui::text_edit::TextEditState::default();
+            if let Some(index) = target_cursor {
+                let page_offset = self.document.text[..self.page_start].chars().count();
+                state
+                    .cursor
+                    .set_char_range(Some(egui::text::CCursorRange::one(
+                        egui::text::CCursor::new(index.saturating_sub(page_offset)),
+                    )));
+            }
+            state.store(ui.ctx(), editor_id);
             ui.memory_mut(|memory| memory.request_focus(editor_id));
         }
         let first_line = self.document.text[..self.page_start]
