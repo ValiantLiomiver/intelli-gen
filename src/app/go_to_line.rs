@@ -21,18 +21,22 @@ impl GoToLine {
         let mut open = self.visible;
         let mut chosen = None;
         let mut close = false;
-        egui::Window::new(crate::i18n::text(ctx, "Go to Line"))
+        egui::Window::new(crate::i18n::text(ctx, "Go to Line:Column"))
             .collapsible(false)
             .resizable(false)
             .fixed_size([360.0, 105.0])
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
             .open(&mut open)
             .show(ctx, |ui| {
-                let response = ui.add(
-                    egui::TextEdit::singleline(&mut self.input)
-                        .hint_text(crate::i18n::ui_text(ui, "[Line] [:column]"))
-                        .desired_width(f32::INFINITY),
-                );
+                let response = ui
+                    .horizontal(|ui| {
+                        ui.label(crate::i18n::ui_text(ui, "[Line] [:column]:"));
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.input)
+                                .desired_width(f32::INFINITY),
+                        )
+                    })
+                    .inner;
                 if self.focus {
                     response.request_focus();
                     let mut state = egui::text_edit::TextEditState::load(ui.ctx(), response.id)

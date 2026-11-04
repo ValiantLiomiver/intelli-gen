@@ -104,6 +104,18 @@ completed inventory substep is Evidence
 Its `product-info.json` declares 86 modules and 164 bundled plugins. This is
 package-structure evidence only; no runtime behavior is inferred from it.
 
+REA extracted IntelliJ's `intellij.platform.ide.impl.jar` (Evidence
+`ev_e8f021237bb481a73e72c6835709b13d7a6e0e0a9b401fbfc2dd260f80fd19a`,
+SHA-256 `20d266471eb1767256487ee1413edea8e39b678af315317d5049266bdd0e07f8`).
+The archive contains `GotoLineAction`, `EditorGotoLineNumberDialog`, and
+`GotoLineNumberDialog`. Bytecode inspection shows the dialog labels the input
+with the line/column syntax, initializes it from the caret as `line:column`,
+maps valid coordinates to an editor logical position, centers scrolling on the
+caret, and leaves the dialog open for invalid input. This is shipped-bytecode
+evidence, not a separate runtime observation. Intelli-gen's Go to Line dialog
+uses a persistent syntax label, starts with the current caret position selected,
+and scrolls the requested caret into view.
+
 REA also inventoried the installed `intellij.platform.projectView.jar`
 (Evidence `ev_bbbbad1a5f12027ca29087b9d874e62ee05ac0d9a5155933b753e4f85572531c`,
 SHA-256 `3228a8dbe1db28ff8dce684d38ceaa9e66109cde0f8348b30ea3d2d353d5937e`).
