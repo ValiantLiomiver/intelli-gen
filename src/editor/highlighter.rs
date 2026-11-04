@@ -53,16 +53,19 @@ pub(super) fn paint_java_delimiter_match(
     cursor: usize,
 ) {
     let is_delimiter = |character: char| matches!(character, '(' | ')' | '{' | '}' | '[' | ']');
-    let target = text
-        .chars()
+    let byte_cursor = text
+        .char_indices()
         .nth(cursor)
-        .filter(|character| is_delimiter(*character))
-        .map(|_| cursor)
-        .or_else(|| {
-            cursor
-                .checked_sub(1)
-                .filter(|index| text.chars().nth(*index).is_some_and(is_delimiter))
-        });
+        .map_or(text.len(), |(byte, _)| byte);
+    let current = text[byte_cursor..].chars().next();
+    let previous = text[..byte_cursor].chars().next_back();
+    let target = if current.is_some_and(is_delimiter) {
+        Some(cursor)
+    } else if previous.is_some_and(is_delimiter) {
+        cursor.checked_sub(1)
+    } else {
+        None
+    };
     let Some(target) = target else {
         return;
     };
