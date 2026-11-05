@@ -188,6 +188,7 @@ pub struct AppState {
     pub rename_symbol: Option<RenameSymbolDialog>,
     pub pending_rename_request: Option<PendingRenameRequest>,
     pub pending_workspace_edits: HashMap<u64, PendingWorkspaceRename>,
+    pub pending_workspace_applies: HashMap<u64, PendingWorkspaceApply>,
     pub pending_workspace_replacements: HashMap<u64, PendingWorkspaceReplace>,
     pub next_workspace_edit_id: u64,
     pub editor_tabs: Vec<EditorTab>,
@@ -290,6 +291,15 @@ pub struct PendingWorkspaceRename {
     pub files: Vec<crate::java::lsp::WorkspaceFileEdits>,
 }
 
+pub struct PendingWorkspaceApply {
+    pub root: PathBuf,
+    pub generation: u64,
+    pub request_id: serde_json::Value,
+    pub label: String,
+    pub open_revisions: HashMap<PathBuf, u64>,
+    pub files: Vec<crate::java::lsp::WorkspaceFileEdits>,
+}
+
 #[derive(Clone)]
 pub struct PendingWorkspaceReplace {
     pub root: PathBuf,
@@ -347,22 +357,31 @@ impl AppState {
     }
 
     pub fn java_indent_settings(&self, path: &std::path::Path) -> (usize, bool) {
+        let (indent_size, _, insert_spaces) = self.java_editor_indent_settings(path);
+        (indent_size, insert_spaces)
+    }
+
+    pub fn java_editor_indent_settings(&self, path: &std::path::Path) -> (usize, usize, bool) {
         let style = self
             .project
             .as_ref()
             .map(|project| self.project_editor_config.style_for(&project.root, path))
             .unwrap_or_default();
-        (
-            style
-                .indent_size
-                .flatten()
-                .unwrap_or(self.settings.java_indent_size)
-                .clamp(1, 16),
-            style
-                .insert_spaces
-                .flatten()
-                .unwrap_or(self.settings.java_insert_spaces),
-        )
+        let indent_size = style
+            .indent_size
+            .flatten()
+            .unwrap_or(self.settings.java_indent_size)
+            .clamp(1, 16);
+        let continuation_indent_size = style
+            .continuation_indent_size
+            .flatten()
+            .unwrap_or(indent_size)
+            .clamp(1, 16);
+        let insert_spaces = style
+            .insert_spaces
+            .flatten()
+            .unwrap_or(self.settings.java_insert_spaces);
+        (indent_size, continuation_indent_size, insert_spaces)
     }
 }
 
@@ -459,6 +478,7 @@ impl IdeaLikeApp {
             rename_symbol: None,
             pending_rename_request: None,
             pending_workspace_edits: HashMap::new(),
+            pending_workspace_applies: HashMap::new(),
             pending_workspace_replacements: HashMap::new(),
             next_workspace_edit_id: 0,
             editor_tabs: Vec::new(),

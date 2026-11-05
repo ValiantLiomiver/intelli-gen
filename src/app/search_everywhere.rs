@@ -278,7 +278,7 @@ impl SearchEverywhere {
                 AppEvent::Debugger(super::events::DebuggerAction::Start),
             ),
             (
-                "Terminal",
+                "Terminal    ⌥F12",
                 AppEvent::Terminal(super::events::TerminalAction::Open),
             ),
         ];

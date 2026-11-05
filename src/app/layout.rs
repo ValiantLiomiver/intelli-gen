@@ -450,6 +450,10 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
                     && ui.button(translator.text(if state.gradle_collapsed { "Show Gradle sidebar" } else { "Hide Gradle sidebar" })).clicked() {
                     state.enqueue(AppEvent::Gradle(super::events::GradleAction::ToggleCollapsed));
                 }
+                if ui.button(crate::i18n::ui_text(ui, "Terminal    ⌥F12")).clicked() {
+                    actions::toggle_terminal_tool_window(state);
+                    ui.close();
+                }
                 if ui.button(crate::i18n::ui_text(ui, "Problems    ⌘6")).clicked() {
                     state.enqueue(AppEvent::ShowPanel(ActivePanel::Problems));
                     ui.close();
@@ -497,9 +501,9 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
             let debug_enabled = build_available && state.run.selected().is_some() && !state.debugger.has_workers()
                 && state.language.tooling.debug_bundle.is_some() && !state.pending_language_restart;
             let debug_hint = if !build_available {
-                "Open a Maven or Gradle project to debug"
+                crate::i18n::ui_text(ui, "Open a Maven or Gradle project to debug")
             } else {
-                "Install the bundled Java Debug Server or choose a valid plugin JAR override in Settings, and select a run configuration"
+                crate::i18n::ui_text(ui, "Install the bundled Java Debug Server or choose a valid plugin JAR override in Settings, and select a run configuration")
             };
             if ui.add_enabled(debug_enabled, egui::Button::new(crate::i18n::ui_text(ui, "Debug")))
                 .on_disabled_hover_text(debug_hint).clicked() {
@@ -661,6 +665,12 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
                                     crate::i18n::message(ui.ctx(), error),
                                 );
                             }
+                            let maven_modules = state
+                                .project
+                                .as_ref()
+                                .and_then(|project| project.model.as_ref())
+                                .filter(|model| model.kind == ProjectKind::Maven)
+                                .map_or(&[][..], |model| model.modules.as_slice());
                             if let Some(tree) = &mut state.project_tree {
                                 let tree_query = tree.typeahead_query().map(str::to_owned);
                                 let tree_search = tree_query.and_then(|query| {
@@ -674,6 +684,7 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
                                 let actions = tree.render(
                                     ui,
                                     &mut state.project_panel_focus_requested,
+                                    maven_modules,
                                     tree_search
                                         .as_ref()
                                         .map(|(query, path)| (query.as_str(), path.as_path())),
@@ -941,7 +952,10 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
                     .hint_text(crate::i18n::ui_text(ui, "Class name, e.g. CustomerService")),
             );
             ui.add(egui::TextEdit::singleline(&mut dialog.package).hint_text(
-                "Package (optional; creates matching folders, e.g. com.example.service)",
+                crate::i18n::ui_text(
+                    ui,
+                    "Package (optional; creates matching folders, e.g. com.example.service)",
+                ),
             ));
             ui.horizontal(|ui| {
                 create = ui
@@ -1148,9 +1162,10 @@ fn render_maven_sidebar(ui: &mut egui::Ui, state: &mut AppState) {
                             if profile.id == "local" {
                                 let mut checked = true;
                                 ui.add_enabled(false, egui::Checkbox::new(&mut checked, label))
-                                    .on_disabled_hover_text(
+                                    .on_disabled_hover_text(crate::i18n::ui_text(
+                                        ui,
                                         "The local profile is always active when defined",
-                                    );
+                                    ));
                             } else {
                                 let mut checked = selected;
                                 if ui.checkbox(&mut checked, label).changed() {

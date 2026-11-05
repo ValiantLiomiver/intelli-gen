@@ -772,7 +772,9 @@ pub fn keyboard_shortcuts(ctx: &egui::Context, state: &mut AppState) {
             super::search_everywhere::SearchTab::JavaSymbols,
         ));
     }
-    if ctx.input_mut(|input| {
+    if ctx.input_mut(|input| input.consume_key(egui::Modifiers::ALT, egui::Key::F12)) {
+        toggle_terminal_tool_window(state);
+    } else if ctx.input_mut(|input| {
         input.consume_key(
             egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
             egui::Key::F12,
@@ -900,6 +902,15 @@ pub fn keyboard_shortcuts(ctx: &egui::Context, state: &mut AppState) {
     }
 }
 
+pub(super) fn toggle_terminal_tool_window(state: &mut AppState) {
+    if state.settings.show_tool_window && state.active_panel == super::ActivePanel::Terminal {
+        state.settings.show_tool_window = false;
+        save_settings(state);
+    } else {
+        state.enqueue(AppEvent::Terminal(super::events::TerminalAction::Open));
+    }
+}
+
 fn double_shift_pressed(input: &egui::InputState, last_release: &mut Option<f64>) -> bool {
     if !input.focused {
         *last_release = None;
@@ -953,6 +964,10 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
         }
         match event {
             AppEvent::OpenProject(path) => {
+                cancel_pending_workspace_applies(
+                    state,
+                    "Project changed before the workspace edit completed",
+                );
                 state.pending_run = None;
                 state.quick_open.cancel();
                 state.search_everywhere.close();
@@ -1630,7 +1645,14 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
             },
             AppEvent::Terminal(action) => match action {
                 super::events::TerminalAction::Open => {
-                    if let Some(project) = &state.project {
+                    state.set_active_panel(super::ActivePanel::Terminal);
+                    if !state.settings.show_tool_window {
+                        state.settings.show_tool_window = true;
+                        save_settings(state);
+                    }
+                    if state.terminal.session.is_none()
+                        && let Some(project) = &state.project
+                    {
                         state.terminal.open(project.root.clone(), context.clone());
                     }
                 }
@@ -1694,6 +1716,7 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                 state.quit_requested = false;
             }
             AppEvent::RequestQuit => {
+                cancel_pending_workspace_applies(state, "The IDE is closing");
                 state.quit_requested = true;
                 state.search_everywhere.close();
             }
@@ -1721,6 +1744,7 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
             AppEvent::RenameSymbolConfirm(new_name) => {
                 if state.pending_rename_request.is_some()
                     || !state.pending_workspace_edits.is_empty()
+                    || !state.pending_workspace_applies.is_empty()
                 {
                     state.last_error = Some("Wait for the current Java rename to finish".into());
                     continue;
@@ -1840,9 +1864,15 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                     .and_then(|tab_index| state.editor_tabs.get_mut(tab_index))
                 {
                     match state.language.apply_code_action(index, &mut tab.document) {
-                        Ok(title) => {
+                        Ok((title, command)) => {
                             tab.restore_document_cursor();
                             state.language.summary = format!("Applied Java code action: {title}");
+                            if let Some(command) = command {
+                                state.language.sync_documents(&state.editor_tabs);
+                                if let Err(error) = state.language.execute_code_action(command) {
+                                    state.language.summary = error.to_string();
+                                }
+                            }
                         }
                         Err(error) => state.language.summary = error.to_string(),
                     }
@@ -1868,9 +1898,20 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                     } => Some((path.clone(), *version, *position, result.clone())),
                     _ => None,
                 };
+                let workspace_apply = match &update.event {
+                    crate::java::lsp::LanguageEvent::WorkspaceApplyEdit {
+                        request_id,
+                        label,
+                        result,
+                    } => Some((request_id.clone(), label.clone(), result.clone())),
+                    _ => None,
+                };
                 let accepted = state.language.accepts_generation(generation);
                 state.language.receive(update);
                 if accepted {
+                    if let Some((request_id, label, result)) = workspace_apply {
+                        begin_workspace_apply(state, generation, request_id, label, result);
+                    }
                     if let Some((path, version, position, result)) = rename_edits {
                         let Some(snapshot) = state.pending_rename_request.take() else {
                             state.language.summary =
@@ -1964,9 +2005,6 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
             }
             AppEvent::SettingsChanged => {
                 state.language.refresh_tooling(&state.settings);
-                if !state.settings.show_tool_window {
-                    state.terminal.close();
-                }
                 save_settings(state);
             }
             AppEvent::SettingsSaved { generation, result } => {
@@ -3300,6 +3338,367 @@ fn begin_symbol_rename(state: &mut AppState) {
     }
 }
 
+fn reject_workspace_apply(
+    state: &mut AppState,
+    generation: u64,
+    request_id: serde_json::Value,
+    reason: String,
+) {
+    let response =
+        state
+            .language
+            .respond_workspace_edit(generation, request_id, false, Some(reason.clone()));
+    state.language.summary = response
+        .err()
+        .map_or(reason.clone(), |error| format!("{reason}; {error}"));
+    state.last_error = Some(reason);
+}
+
+fn cancel_pending_workspace_applies(state: &mut AppState, reason: &str) {
+    let pending = std::mem::take(&mut state.pending_workspace_applies);
+    for (_, edit) in pending {
+        let _ = state.language.respond_workspace_edit(
+            edit.generation,
+            edit.request_id,
+            false,
+            Some(reason.to_owned()),
+        );
+    }
+}
+
+fn begin_workspace_apply(
+    state: &mut AppState,
+    generation: u64,
+    request_id: serde_json::Value,
+    label: String,
+    result: Result<Vec<crate::java::lsp::WorkspaceFileEdits>, String>,
+) {
+    if !state.language.accepts_generation(generation) {
+        return;
+    }
+    let Some(root) = state.project.as_ref().map(|project| project.root.clone()) else {
+        reject_workspace_apply(
+            state,
+            generation,
+            request_id,
+            "Open a project before applying Java workspace edits".into(),
+        );
+        return;
+    };
+    if state.project_opening || state.quit_requested || state.quit_approved {
+        reject_workspace_apply(
+            state,
+            generation,
+            request_id,
+            "The project is closing or changing".into(),
+        );
+        return;
+    }
+    if !state.pending_workspace_applies.is_empty()
+        || !state.pending_workspace_edits.is_empty()
+        || !state.pending_workspace_replacements.is_empty()
+        || state.pending_rename_request.is_some()
+    {
+        reject_workspace_apply(
+            state,
+            generation,
+            request_id,
+            "Another workspace edit is still in progress".into(),
+        );
+        return;
+    }
+    let files = match result {
+        Ok(files) => files
+            .into_iter()
+            .filter(|file| !file.edits.is_empty() || file.rename_to.is_some())
+            .collect::<Vec<_>>(),
+        Err(error) => {
+            reject_workspace_apply(state, generation, request_id, error);
+            return;
+        }
+    };
+    if files.is_empty() {
+        match state
+            .language
+            .respond_workspace_edit(generation, request_id, true, None)
+        {
+            Ok(()) => state.language.summary = format!("{label}: no changes"),
+            Err(error) => state.language.summary = error.to_string(),
+        }
+        return;
+    }
+    if files.len() > 200 {
+        reject_workspace_apply(
+            state,
+            generation,
+            request_id,
+            "Workspace edit exceeds the 200-file limit".into(),
+        );
+        return;
+    }
+    let mut open_revisions = HashMap::new();
+    let mut closed_paths = Vec::new();
+    for file in &files {
+        if !file.path.starts_with(&root)
+            || file
+                .rename_to
+                .as_ref()
+                .is_some_and(|destination| !destination.starts_with(&root))
+        {
+            reject_workspace_apply(
+                state,
+                generation,
+                request_id,
+                format!(
+                    "Workspace edit target is outside the project: {}",
+                    file.path.display()
+                ),
+            );
+            return;
+        }
+        let tab = state.editor_tabs.iter().find(|tab| tab.path == file.path);
+        if let Some(version) = file.version
+            && tab.is_none_or(|tab| {
+                !state
+                    .language
+                    .is_document_current(&file.path, version, &tab.document.text)
+            })
+        {
+            reject_workspace_apply(
+                state,
+                generation,
+                request_id,
+                format!(
+                    "Workspace edit targets a stale document: {}",
+                    file.path.display()
+                ),
+            );
+            return;
+        }
+        if let Some(tab) = tab {
+            if tab.saving || tab.close_after_save || tab.pending_rename_to.is_some() {
+                reject_workspace_apply(
+                    state,
+                    generation,
+                    request_id,
+                    format!(
+                        "Wait for {} to finish saving or closing",
+                        file.path.display()
+                    ),
+                );
+                return;
+            }
+            open_revisions.insert(file.path.clone(), tab.document.revision);
+        } else {
+            if file.version.is_some() || state.loading_files.contains(&file.path) {
+                reject_workspace_apply(
+                    state,
+                    generation,
+                    request_id,
+                    format!(
+                        "Cannot safely apply a versioned or loading file: {}",
+                        file.path.display()
+                    ),
+                );
+                return;
+            }
+            closed_paths.push(file.path.clone());
+        }
+    }
+    state.next_workspace_edit_id = state.next_workspace_edit_id.wrapping_add(1).max(1);
+    let load_request = state.next_workspace_edit_id;
+    state.pending_workspace_applies.insert(
+        load_request,
+        super::PendingWorkspaceApply {
+            root,
+            generation,
+            request_id: request_id.clone(),
+            label,
+            open_revisions,
+            files,
+        },
+    );
+    if closed_paths.is_empty() {
+        finish_workspace_apply_load(state, load_request, Ok(Vec::new()));
+    } else if let Err(error) = state.editor_io.load_many(load_request, closed_paths) {
+        state.pending_workspace_applies.remove(&load_request);
+        reject_workspace_apply(state, generation, request_id, error);
+    }
+}
+
+fn finish_workspace_apply_load(
+    state: &mut AppState,
+    request: u64,
+    result: Result<Vec<crate::editor::Document>, String>,
+) {
+    let Some(pending) = state.pending_workspace_applies.remove(&request) else {
+        return;
+    };
+    if !state.language.accepts_generation(pending.generation)
+        || state.project.as_ref().is_none_or(|project| {
+            project.root != pending.root || state.project_opening || state.quit_requested
+        })
+    {
+        reject_workspace_apply(
+            state,
+            pending.generation,
+            pending.request_id,
+            "Project or Java language session changed before the workspace edit could be applied"
+                .into(),
+        );
+        return;
+    }
+    let loaded = match result {
+        Ok(documents) => documents,
+        Err(error) => {
+            reject_workspace_apply(
+                state,
+                pending.generation,
+                pending.request_id,
+                format!("Cannot load workspace edit targets: {error}"),
+            );
+            return;
+        }
+    };
+    let mut loaded: HashMap<_, _> = loaded
+        .into_iter()
+        .map(|document| (document.path.clone(), document))
+        .collect();
+    let mut staged = Vec::with_capacity(pending.files.len());
+    let mut staged_bytes = 0usize;
+    for file in pending.files {
+        let mut document = if let Some(revision) = pending.open_revisions.get(&file.path) {
+            let Some(tab) = state.editor_tabs.iter().find(|tab| {
+                tab.path == file.path
+                    && tab.document.revision == *revision
+                    && !tab.saving
+                    && !tab.close_after_save
+            }) else {
+                reject_workspace_apply(
+                    state,
+                    pending.generation,
+                    pending.request_id,
+                    format!(
+                        "{} changed while workspace edits were loading",
+                        file.path.display()
+                    ),
+                );
+                return;
+            };
+            if let Some(version) = file.version
+                && !state
+                    .language
+                    .is_document_current(&file.path, version, &tab.document.text)
+            {
+                reject_workspace_apply(
+                    state,
+                    pending.generation,
+                    pending.request_id,
+                    format!(
+                        "{} changed in Java intelligence; retry the action",
+                        file.path.display()
+                    ),
+                );
+                return;
+            }
+            tab.document.clone()
+        } else {
+            if state.editor_tabs.iter().any(|tab| tab.path == file.path) {
+                reject_workspace_apply(
+                    state,
+                    pending.generation,
+                    pending.request_id,
+                    format!(
+                        "{} opened while workspace edits were loading",
+                        file.path.display()
+                    ),
+                );
+                return;
+            }
+            let Some(document) = loaded.remove(&file.path) else {
+                reject_workspace_apply(
+                    state,
+                    pending.generation,
+                    pending.request_id,
+                    format!(
+                        "Workspace edit target was not loaded: {}",
+                        file.path.display()
+                    ),
+                );
+                return;
+            };
+            document
+        };
+        if let Err(error) = document.apply_lsp_edits(&file.edits) {
+            reject_workspace_apply(
+                state,
+                pending.generation,
+                pending.request_id,
+                format!(
+                    "Cannot apply workspace edits to {}: {error}",
+                    file.path.display()
+                ),
+            );
+            return;
+        }
+        staged_bytes = match staged_bytes.checked_add(document.text.len()) {
+            Some(bytes) if bytes <= crate::editor::MAX_WORKSPACE_EDIT_BYTES => bytes,
+            _ => {
+                reject_workspace_apply(
+                    state,
+                    pending.generation,
+                    pending.request_id,
+                    format!(
+                        "Workspace edit exceeds the {} MiB limit",
+                        crate::editor::MAX_WORKSPACE_EDIT_BYTES / (1024 * 1024)
+                    ),
+                );
+                return;
+            }
+        };
+        staged.push((file.path, document, file.rename_to));
+    }
+    if !loaded.is_empty() {
+        reject_workspace_apply(
+            state,
+            pending.generation,
+            pending.request_id,
+            "Workspace edit worker returned unexpected files".into(),
+        );
+        return;
+    }
+    let changed_files = staged.len();
+    for (path, document, rename_to) in staged {
+        if let Some(tab) = state.editor_tabs.iter_mut().find(|tab| tab.path == path) {
+            tab.document = document;
+            tab.pending_rename_to = rename_to;
+            tab.refresh_after_workspace_edit();
+        } else {
+            let mut tab = EditorTab::new(document);
+            tab.pending_rename_to = rename_to;
+            state.editor_tabs.push(tab);
+        }
+    }
+    state.language.sync_documents(&state.editor_tabs);
+    match state
+        .language
+        .respond_workspace_edit(pending.generation, pending.request_id, true, None)
+    {
+        Ok(()) => {
+            state.last_error = None;
+            state.status = format!(
+                "{label} applied to {changed_files} file(s); save changed tabs to keep the edits",
+                label = pending.label
+            );
+            state.language.summary = format!("Workspace edit applied to {changed_files} file(s)");
+        }
+        Err(error) => {
+            state.language.summary =
+                format!("Workspace edit applied but not acknowledged: {error}");
+        }
+    }
+}
+
 fn begin_workspace_rename(
     state: &mut AppState,
     snapshot: super::PendingRenameRequest,
@@ -3352,6 +3751,10 @@ fn begin_workspace_rename(
         return;
     }
     if !state.pending_workspace_edits.is_empty() {
+        state.last_error = Some("Another workspace edit is still loading; wait and retry".into());
+        return;
+    }
+    if !state.pending_workspace_applies.is_empty() {
         state.last_error = Some("Another workspace edit is still loading; wait and retry".into());
         return;
     }
@@ -3582,7 +3985,9 @@ fn finish_workspace_rename(
 }
 
 fn apply_project_replace(state: &mut AppState) {
-    if !state.pending_workspace_replacements.is_empty() || !state.pending_workspace_edits.is_empty()
+    if !state.pending_workspace_replacements.is_empty()
+        || !state.pending_workspace_edits.is_empty()
+        || !state.pending_workspace_applies.is_empty()
     {
         state.search.message = "Wait for the current workspace edit to finish".into();
         return;
@@ -3884,6 +4289,8 @@ fn editor_completed(state: &mut AppState, completion: EditorCompletion) {
         EditorCompletion::LoadedMany { request, result } => {
             if state.pending_workspace_replacements.contains_key(&request) {
                 finish_workspace_replace_load(state, request, result);
+            } else if state.pending_workspace_applies.contains_key(&request) {
+                finish_workspace_apply_load(state, request, result);
             } else {
                 finish_workspace_rename(state, request, result);
             }
@@ -4559,6 +4966,7 @@ pub(crate) fn restart_language(state: &mut AppState) {
     if state.quit_requested {
         return;
     }
+    cancel_pending_workspace_applies(state, "Java language session is restarting");
     state.pending_rename_request = None;
     state.pending_workspace_edits.clear();
     state.run.cancel();

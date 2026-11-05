@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::{collections::HashSet, path::PathBuf};
 
 use eframe::egui;
 
@@ -303,7 +303,12 @@ fn auto_delete_java_pair(ui: &egui::Ui, text: &mut String, editor_id: egui::Id) 
     true
 }
 
-fn auto_pair_java_character(ui: &egui::Ui, text: &mut String, editor_id: egui::Id) -> JavaPairEdit {
+fn auto_pair_java_character(
+    ui: &egui::Ui,
+    text: &mut String,
+    editor_id: egui::Id,
+    lexical_context: Option<(&str, usize)>,
+) -> JavaPairEdit {
     if ui.memory(|memory| memory.focused()) != Some(editor_id) {
         return JavaPairEdit::None;
     }
@@ -316,6 +321,7 @@ fn auto_pair_java_character(ui: &egui::Ui, text: &mut String, editor_id: egui::I
     let primary: usize = range.primary.index.into();
     let secondary: usize = range.secondary.index.into();
     let has_selection = primary != secondary;
+    let (lexical_text, lexical_offset) = lexical_context.unwrap_or((text, 0));
     let typed = ui.input_mut(|input| {
         let index = input.events.iter().position(|event| {
             matches!(event, egui::Event::Text(character)
@@ -349,6 +355,17 @@ fn auto_pair_java_character(ui: &egui::Ui, text: &mut String, editor_id: egui::I
         let end = primary.max(secondary);
         let start_byte = byte_index(text, start);
         let end_byte = byte_index(text, end);
+        if !super::highlighter::is_java_code_at(lexical_text, lexical_offset.saturating_add(start))
+        {
+            text.replace_range(start_byte..end_byte, &typed);
+            state
+                .cursor
+                .set_char_range(Some(egui::text::CCursorRange::one(
+                    egui::text::CCursor::new(start + 1),
+                )));
+            state.store(ui.ctx(), editor_id);
+            return JavaPairEdit::InsertedPair;
+        }
         text.insert_str(end_byte, close);
         text.insert_str(start_byte, &typed);
         state
@@ -363,7 +380,15 @@ fn auto_pair_java_character(ui: &egui::Ui, text: &mut String, editor_id: egui::I
     let caret = primary;
     if close.is_none() {
         let caret_byte = byte_index(text, caret);
-        if text[caret_byte..].starts_with(&typed) {
+        let has_closing_char = text[caret_byte..].starts_with(&typed);
+        let in_java_code = (typed == "}"
+            || (has_closing_char && matches!(typed.as_str(), ")" | "]")))
+        .then(|| {
+            super::highlighter::is_java_code_at(lexical_text, lexical_offset.saturating_add(caret))
+        });
+        if has_closing_char
+            && (!matches!(typed.as_str(), ")" | "]" | "}") || in_java_code == Some(true))
+        {
             let next = caret + 1;
             state
                 .cursor
@@ -373,6 +398,81 @@ fn auto_pair_java_character(ui: &egui::Ui, text: &mut String, editor_id: egui::I
             state.store(ui.ctx(), editor_id);
             return JavaPairEdit::SkippedClosing;
         }
+        if typed == "}" && in_java_code == Some(true) {
+            let suffix = &text[caret_byte..];
+            let after_newline = if suffix.starts_with("\r\n") {
+                Some(caret_byte + 2)
+            } else if suffix.starts_with('\n') {
+                Some(caret_byte + 1)
+            } else {
+                None
+            };
+            if let Some(after_newline) = after_newline {
+                let closing_brace = after_newline
+                    + text[after_newline..]
+                        .bytes()
+                        .take_while(|byte| matches!(byte, b' ' | b'\t'))
+                        .count();
+                if text.as_bytes().get(closing_brace) == Some(&b'}')
+                    && super::highlighter::is_matching_java_closing_brace(
+                        lexical_text,
+                        lexical_offset.saturating_add(text[..closing_brace].chars().count()),
+                    )
+                {
+                    let next = text[..closing_brace + 1].chars().count();
+                    state
+                        .cursor
+                        .set_char_range(Some(egui::text::CCursorRange::one(
+                            egui::text::CCursor::new(next),
+                        )));
+                    state.store(ui.ctx(), editor_id);
+                    return JavaPairEdit::SkippedClosing;
+                }
+            }
+            let line_start = text[..caret_byte]
+                .rfind('\n')
+                .map_or(0, |newline| newline + 1);
+            let line_indent = &text[line_start..caret_byte];
+            if line_indent
+                .chars()
+                .all(|character| matches!(character, ' ' | '\t'))
+                && let Some(open) = super::highlighter::matching_java_open_brace_before(
+                    lexical_text,
+                    lexical_offset.saturating_add(caret),
+                )
+            {
+                let open_byte = byte_index(lexical_text, open);
+                let open_line_start = lexical_text[..open_byte]
+                    .rfind('\n')
+                    .map_or(0, |newline| newline + 1);
+                let mut insertion: String = lexical_text[open_line_start..open_byte]
+                    .chars()
+                    .take_while(|character| matches!(character, ' ' | '\t'))
+                    .collect();
+                insertion.push('}');
+                text.replace_range(line_start..caret_byte, &insertion);
+                let next = text[..line_start + insertion.len()].chars().count();
+                state
+                    .cursor
+                    .set_char_range(Some(egui::text::CCursorRange::one(
+                        egui::text::CCursor::new(next),
+                    )));
+                state.store(ui.ctx(), editor_id);
+                return JavaPairEdit::InsertedPair;
+            }
+        }
+        text.insert_str(caret_byte, &typed);
+        let next = caret + 1;
+        state
+            .cursor
+            .set_char_range(Some(egui::text::CCursorRange::one(
+                egui::text::CCursor::new(next),
+            )));
+        state.store(ui.ctx(), editor_id);
+        return JavaPairEdit::InsertedPair;
+    }
+    if !super::highlighter::is_java_code_at(lexical_text, lexical_offset.saturating_add(caret)) {
+        let caret_byte = byte_index(text, caret);
         text.insert_str(caret_byte, &typed);
         let next = caret + 1;
         state
@@ -402,7 +502,9 @@ fn auto_indent_java_enter(
     text: &mut String,
     editor_id: egui::Id,
     indent_size: usize,
+    continuation_indent_size: usize,
     insert_spaces: bool,
+    lexical_context: Option<(&str, usize)>,
 ) -> bool {
     if ui.memory(|memory| memory.focused()) != Some(editor_id) {
         return false;
@@ -426,17 +528,44 @@ fn auto_indent_java_enter(
         .rfind('\n')
         .map_or(0, |newline| newline + 1);
     let prefix = &text[line_start..start_byte];
+    let (lexical_text, lexical_offset) = lexical_context.unwrap_or((text, 0));
     let indent: String = prefix
         .chars()
         .take_while(|character| matches!(character, ' ' | '\t'))
         .collect();
     let newline = if text.contains("\r\n") { "\r\n" } else { "\n" };
-    let opens_block = prefix.trim_end().ends_with('{');
-    let indent_unit = if opens_block {
+    let trimmed_prefix = prefix.trim_end();
+    let opens_block = trimmed_prefix.ends_with('{')
+        && super::highlighter::is_java_code_at(
+            lexical_text,
+            lexical_offset
+                .saturating_add(text[..line_start + trimmed_prefix.len()].chars().count() - 1),
+        );
+    let adjacent_open = text[..start_byte].chars().next_back();
+    let adjacent_close = text[end_byte..].as_bytes().first().copied();
+    let opens_continuation = matches!(adjacent_open, Some('(' | '['))
+        && super::highlighter::is_java_code_at(
+            lexical_text,
+            lexical_offset.saturating_add(start.saturating_sub(1)),
+        );
+    let empty_pair = start == end
+        && matches!(
+            (adjacent_open, adjacent_close),
+            (Some('('), Some(b')')) | (Some('['), Some(b']'))
+        )
+        && opens_continuation;
+    let indent_width = if opens_continuation {
+        continuation_indent_size
+    } else {
+        indent_size
+    };
+    let indent_unit = if opens_block || opens_continuation {
         if insert_spaces {
-            " ".repeat(indent_size)
+            " ".repeat(indent_width)
         } else {
-            "\t".to_owned()
+            let tabs = indent_width / indent_size.max(1);
+            let spaces = indent_width % indent_size.max(1);
+            format!("{}{}", "\t".repeat(tabs), " ".repeat(spaces))
         }
     } else {
         String::new()
@@ -444,13 +573,18 @@ fn auto_indent_java_enter(
     let mut replace_end = end_byte;
     let mut insertion = format!("{newline}{indent}{indent_unit}");
     let cursor_byte = insertion.len();
-    if start == end && opens_block {
+    if start == end && (opens_block || empty_pair) {
         let suffix = &text[end_byte..];
         let close_offset = suffix
             .bytes()
             .take_while(|byte| matches!(byte, b' ' | b'\t'))
             .count();
-        if suffix.as_bytes().get(close_offset) == Some(&b'}') {
+        let expected_close = if opens_block {
+            b'}'
+        } else {
+            adjacent_close.unwrap_or_default()
+        };
+        if suffix.as_bytes().get(close_offset) == Some(&expected_close) {
             replace_end = end_byte + close_offset;
             insertion.push_str(newline);
             insertion.push_str(&indent);
@@ -484,6 +618,7 @@ pub struct EditorTab {
     page_start: usize,
     page_end: usize,
     page_cursor: Option<usize>,
+    folded_lines: HashSet<u32>,
 }
 
 impl EditorTab {
@@ -504,6 +639,7 @@ impl EditorTab {
             page_start: 0,
             page_end: 0,
             page_cursor: None,
+            folded_lines: HashSet::new(),
         }
     }
 
@@ -815,7 +951,10 @@ impl EditorTab {
         test_class_line: Option<u32>,
         test_methods: &[(u32, String)],
         indent_size: usize,
+        continuation_indent_size: usize,
         insert_spaces: bool,
+        semantic: Option<(&str, &[crate::java::lsp::SemanticHighlight])>,
+        folding: Option<(&str, &[crate::java::lsp::FoldRegion])>,
     ) -> (Option<super::GutterBreakpointAction>, Option<egui::Pos2>) {
         if self.document.text.len() > PAGED_EDITOR_BYTES {
             self.active_snippet_tab_stop = None;
@@ -835,7 +974,10 @@ impl EditorTab {
                     test_class_line,
                     test_methods,
                     indent_size,
+                    continuation_indent_size,
                     insert_spaces,
+                    semantic,
+                    folding,
                 ),
                 None,
             );
@@ -901,7 +1043,7 @@ impl EditorTab {
             self.document.mark_changed();
         }
         let pair_edit = if java && allow_edits && !self.close_after_save && !auto_deleted_pair {
-            auto_pair_java_character(ui, &mut self.document.text, editor_id)
+            auto_pair_java_character(ui, &mut self.document.text, editor_id, None)
         } else {
             JavaPairEdit::None
         };
@@ -916,19 +1058,41 @@ impl EditorTab {
                 &mut self.document.text,
                 editor_id,
                 indent_size,
+                continuation_indent_size,
                 insert_spaces,
+                None,
             );
         if auto_indented {
             self.document.mark_changed();
         }
         let highlighter = &mut self.highlighter;
+        let folded_lines = &self.folded_lines;
+        let fold_regions = folding
+            .filter(|(source, _)| *source == self.document.text)
+            .map_or(&[][..], |(_, regions)| regions);
         let mut layouter = |ui: &egui::Ui, buffer: &dyn egui::TextBuffer, _width: f32| {
             let mut job = highlighter.layout(ui, buffer.as_str(), language);
+            if let Some((source, highlights)) = semantic
+                && source == buffer.as_str()
+            {
+                super::highlighter::overlay_semantic_highlights(
+                    &mut job,
+                    highlights,
+                    0,
+                    ui.visuals(),
+                );
+            }
+            if let Some((source, _)) = folding
+                && source == buffer.as_str()
+            {
+                super::highlighter::overlay_folded_regions(&mut job, fold_regions, folded_lines, 0);
+            }
             job.wrap.max_width = f32::INFINITY;
             ui.fonts_mut(|fonts| fonts.layout_job(job))
         };
         let mut snippet_changed =
             auto_deleted_pair || pair_edit == JavaPairEdit::InsertedPair || auto_indented;
+        let mut expand_fold = None;
         egui::ScrollArea::both()
             .id_salt(("source_scroll", &self.path))
             .auto_shrink([false, false])
@@ -969,7 +1133,35 @@ impl EditorTab {
                         diagnostics,
                         test_class_line,
                         test_methods,
+                        fold_regions,
+                        folded_lines,
                     );
+                    if let Some((source, _)) = folding
+                        && source == self.document.text
+                        && !output.response.changed()
+                    {
+                        super::paint_fold_placeholders(
+                            ui,
+                            &output,
+                            &self.document.text,
+                            0,
+                            source,
+                            fold_regions,
+                            folded_lines,
+                        );
+                        if let Some(cursor) = output.cursor_range {
+                            let cursor_byte =
+                                byte_index(&self.document.text, cursor.primary.index.into());
+                            expand_fold = fold_regions
+                                .iter()
+                                .find(|region| {
+                                    folded_lines.contains(&region.start_line)
+                                        && region.body_start_byte <= cursor_byte
+                                        && cursor_byte < region.body_end_byte
+                                })
+                                .map(|region| region.start_line);
+                        }
+                    }
                     if java && let Some(cursor) = output.cursor_range {
                         super::highlighter::paint_java_delimiter_match(
                             ui,
@@ -1005,6 +1197,10 @@ impl EditorTab {
                     }
                 });
             });
+        if let Some(line) = expand_fold {
+            self.folded_lines.remove(&line);
+            ui.ctx().request_repaint();
+        }
         if snippet_changed && let Some(previous_length) = snippet_length_before_edit {
             self.adjust_snippet_tab_stops(previous_length);
             if self.sync_active_snippet_mirrors() {
@@ -1143,7 +1339,10 @@ impl EditorTab {
         test_class_line: Option<u32>,
         test_methods: &[(u32, String)],
         indent_size: usize,
+        continuation_indent_size: usize,
         insert_spaces: bool,
+        semantic: Option<(&str, &[crate::java::lsp::SemanticHighlight])>,
+        folding: Option<(&str, &[crate::java::lsp::FoldRegion])>,
     ) -> Option<super::GutterBreakpointAction> {
         ui.colored_label(ui.visuals().warn_fg_color,
             crate::i18n::ui_text(ui, "Large file: editing is limited to the visible page. Save writes the complete document."));
@@ -1266,22 +1465,69 @@ impl EditorTab {
                 == super::highlighter::SourceLanguage::Java
             && allow_edits
         {
-            auto_pair_java_character(ui, &mut page, editor_id)
+            auto_pair_java_character(
+                ui,
+                &mut page,
+                editor_id,
+                Some((
+                    &self.document.text,
+                    self.document.text[..self.page_start].chars().count(),
+                )),
+            )
         } else {
             JavaPairEdit::None
         };
         let auto_indented = super::highlighter::SourceLanguage::for_path(&self.path)
             == super::highlighter::SourceLanguage::Java
             && allow_edits
-            && auto_indent_java_enter(ui, &mut page, editor_id, indent_size, insert_spaces);
+            && auto_indent_java_enter(
+                ui,
+                &mut page,
+                editor_id,
+                indent_size,
+                continuation_indent_size,
+                insert_spaces,
+                Some((
+                    &self.document.text,
+                    self.document.text[..self.page_start].chars().count(),
+                )),
+            );
         let mut toggled = None;
         let highlighter = &mut self.highlighter;
+        let folded_lines = &self.folded_lines;
+        let fold_regions = folding
+            .filter(|(source, _)| *source == self.document.text)
+            .map_or(&[][..], |(_, regions)| regions);
         let mut layouter = |ui: &egui::Ui, buffer: &dyn egui::TextBuffer, _width: f32| {
             let mut job = highlighter.layout(
                 ui,
                 buffer.as_str(),
                 super::highlighter::SourceLanguage::for_path(&self.path),
             );
+            if let Some((source, highlights)) = semantic
+                && source
+                    .get(self.page_start..self.page_start.saturating_add(buffer.as_str().len()))
+                    == Some(buffer.as_str())
+            {
+                super::highlighter::overlay_semantic_highlights(
+                    &mut job,
+                    highlights,
+                    self.page_start,
+                    ui.visuals(),
+                );
+            }
+            if let Some((source, _)) = folding
+                && source
+                    .get(self.page_start..self.page_start.saturating_add(buffer.as_str().len()))
+                    == Some(buffer.as_str())
+            {
+                super::highlighter::overlay_folded_regions(
+                    &mut job,
+                    fold_regions,
+                    folded_lines,
+                    self.page_start,
+                );
+            }
             job.wrap.max_width = f32::INFINITY;
             ui.fonts_mut(|fonts| fonts.layout_job(job))
         };
@@ -1316,12 +1562,44 @@ impl EditorTab {
                         diagnostics,
                         test_class_line,
                         test_methods,
+                        fold_regions,
+                        folded_lines,
                     );
                     output
                 })
             })
             .inner
             .inner;
+        if let Some((source, _)) = folding
+            && source.get(self.page_start..self.page_start.saturating_add(page.len()))
+                == Some(page.as_str())
+            && !output.response.changed()
+        {
+            super::paint_fold_placeholders(
+                ui,
+                &output,
+                &page,
+                self.page_start,
+                source,
+                fold_regions,
+                folded_lines,
+            );
+            if let Some(cursor) = output.cursor_range {
+                let cursor_byte = self.page_start + byte_index(&page, cursor.primary.index.into());
+                if let Some(line) = fold_regions
+                    .iter()
+                    .find(|region| {
+                        folded_lines.contains(&region.start_line)
+                            && region.body_start_byte <= cursor_byte
+                            && cursor_byte < region.body_end_byte
+                    })
+                    .map(|region| region.start_line)
+                {
+                    self.folded_lines.remove(&line);
+                    ui.ctx().request_repaint();
+                }
+            }
+        }
         if super::highlighter::SourceLanguage::for_path(&self.path)
             == super::highlighter::SourceLanguage::Java
             && let Some(cursor) = output.cursor_range
@@ -1475,6 +1753,12 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
         .as_ref()
         .and_then(|path| state.language.diagnostics.get(path))
         .map_or(&[][..], Vec::as_slice);
+    let semantic = active_path
+        .as_deref()
+        .and_then(|path| state.language.semantic_highlights(path));
+    let folding = active_path
+        .as_deref()
+        .and_then(|path| state.language.folding_ranges(path));
     let bookmark_lines: Vec<_> = state
         .project
         .as_ref()
@@ -1497,11 +1781,12 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
     let mut hover_popup_dismissed = false;
     let mut last_edit_location = None;
     let mut bookmarks_adjusted = false;
-    let (indent_size, insert_spaces) = state
+    let (indent_size, continuation_indent_size, insert_spaces) = state
         .active_tab
         .and_then(|index| state.editor_tabs.get(index))
-        .map(|tab| state.java_indent_settings(&tab.path))
+        .map(|tab| state.java_editor_indent_settings(&tab.path))
         .unwrap_or((
+            state.settings.java_indent_size.clamp(1, 8),
             state.settings.java_indent_size.clamp(1, 8),
             state.settings.java_insert_spaces,
         ));
@@ -1631,9 +1916,13 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
             test_class_line,
             &test_methods,
             indent_size,
+            continuation_indent_size,
             insert_spaces,
+            semantic,
+            folding,
         );
         if tab.document.revision != revision {
+            tab.folded_lines.clear();
             let new_line_count = tab.document.text.matches('\n').count() + 1;
             let line_delta = new_line_count as i64 - old_line_count as i64;
             let (start_line, end_line) = if let Some(lines) = selection_lines {
@@ -1764,8 +2053,13 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
                     .filter(|action| {
                         matches!(action, crate::app::events::BuildAction::RunTest { method_name: Some(method), .. } if method == &name)
                     });
+            } else if let super::GutterBreakpointAction::ToggleFold(line) = action {
+                if !tab.folded_lines.remove(&line) {
+                    tab.folded_lines.insert(line);
+                }
             } else {
                 breakpoint_action = Some(match action {
+                    super::GutterBreakpointAction::ToggleFold(_) => unreachable!(),
                     super::GutterBreakpointAction::Toggle(line) => {
                         crate::app::events::DebuggerAction::ToggleBreakpoint {
                             source: path,
