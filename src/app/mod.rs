@@ -364,6 +364,15 @@ impl AppState {
                 .unwrap_or(self.settings.java_insert_spaces),
         )
     }
+
+    pub fn java_continuation_indent_size(&self, path: &std::path::Path) -> usize {
+        self.project
+            .as_ref()
+            .map(|project| self.project_editor_config.style_for(&project.root, path))
+            .and_then(|style| style.continuation_indent_size.flatten())
+            .unwrap_or_else(|| self.java_indent_settings(path).0)
+            .clamp(1, 16)
+    }
 }
 
 pub struct IdeaLikeApp {

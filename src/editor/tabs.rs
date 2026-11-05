@@ -502,6 +502,7 @@ fn auto_indent_java_enter(
     text: &mut String,
     editor_id: egui::Id,
     indent_size: usize,
+    continuation_indent_size: usize,
     insert_spaces: bool,
     lexical_context: Option<(&str, usize)>,
 ) -> bool {
@@ -553,11 +554,18 @@ fn auto_indent_java_enter(
             (Some('('), Some(b')')) | (Some('['), Some(b']'))
         )
         && opens_continuation;
+    let indent_width = if opens_continuation {
+        continuation_indent_size
+    } else {
+        indent_size
+    };
     let indent_unit = if opens_block || opens_continuation {
         if insert_spaces {
-            " ".repeat(indent_size)
+            " ".repeat(indent_width)
         } else {
-            "\t".to_owned()
+            let tabs = indent_width / indent_size.max(1);
+            let spaces = indent_width % indent_size.max(1);
+            format!("{}{}", "\t".repeat(tabs), " ".repeat(spaces))
         }
     } else {
         String::new()
@@ -941,6 +949,7 @@ impl EditorTab {
         test_class_line: Option<u32>,
         test_methods: &[(u32, String)],
         indent_size: usize,
+        continuation_indent_size: usize,
         insert_spaces: bool,
     ) -> (Option<super::GutterBreakpointAction>, Option<egui::Pos2>) {
         if self.document.text.len() > PAGED_EDITOR_BYTES {
@@ -961,6 +970,7 @@ impl EditorTab {
                     test_class_line,
                     test_methods,
                     indent_size,
+                    continuation_indent_size,
                     insert_spaces,
                 ),
                 None,
@@ -1042,6 +1052,7 @@ impl EditorTab {
                 &mut self.document.text,
                 editor_id,
                 indent_size,
+                continuation_indent_size,
                 insert_spaces,
                 None,
             );
@@ -1270,6 +1281,7 @@ impl EditorTab {
         test_class_line: Option<u32>,
         test_methods: &[(u32, String)],
         indent_size: usize,
+        continuation_indent_size: usize,
         insert_spaces: bool,
     ) -> Option<super::GutterBreakpointAction> {
         ui.colored_label(ui.visuals().warn_fg_color,
@@ -1413,6 +1425,7 @@ impl EditorTab {
                 &mut page,
                 editor_id,
                 indent_size,
+                continuation_indent_size,
                 insert_spaces,
                 Some((
                     &self.document.text,
@@ -1650,6 +1663,11 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
             state.settings.java_indent_size.clamp(1, 8),
             state.settings.java_insert_spaces,
         ));
+    let continuation_indent_size = state
+        .active_tab
+        .and_then(|index| state.editor_tabs.get(index))
+        .map(|tab| state.java_continuation_indent_size(&tab.path))
+        .unwrap_or(indent_size);
     if let Some(tab) = state
         .active_tab
         .and_then(|index| state.editor_tabs.get_mut(index))
@@ -1776,6 +1794,7 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
             test_class_line,
             &test_methods,
             indent_size,
+            continuation_indent_size,
             insert_spaces,
         );
         if tab.document.revision != revision {

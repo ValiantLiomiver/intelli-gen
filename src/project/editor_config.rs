@@ -13,6 +13,7 @@ const MAX_SCANNED_DIRECTORIES: usize = 50_000;
 pub struct EditorStyle {
     /// Outer `None` means inherit; inner `None` means EditorConfig `unset`.
     pub indent_size: Option<Option<usize>>,
+    pub continuation_indent_size: Option<Option<usize>>,
     pub insert_spaces: Option<Option<bool>>,
 }
 
@@ -165,6 +166,9 @@ fn overlay(target: &mut EditorStyle, source: EditorStyle) {
     if source.indent_size.is_some() {
         target.indent_size = source.indent_size;
     }
+    if source.continuation_indent_size.is_some() {
+        target.continuation_indent_size = source.continuation_indent_size;
+    }
     if source.insert_spaces.is_some() {
         target.insert_spaces = source.insert_spaces;
     }
@@ -265,6 +269,16 @@ impl ParsedConfig {
                                 base_indent_is_tab = false;
                             }
                         }
+                    }
+                }
+                "continuation_indent_size" if value == "unset" => {
+                    target.continuation_indent_size = Some(None);
+                }
+                "continuation_indent_size" => {
+                    if let Ok(size) = value.parse::<usize>()
+                        && (1..=16).contains(&size)
+                    {
+                        target.continuation_indent_size = Some(Some(size));
                     }
                 }
                 _ => {}
