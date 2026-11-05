@@ -46,6 +46,7 @@ pub enum EditorCommand {
     OrganizeImports,
     Rename,
     ProjectSourceRoots,
+    FoldingRanges,
 }
 impl EditorCommand {
     fn method(self) -> &'static str {
@@ -64,6 +65,7 @@ impl EditorCommand {
             Self::OrganizeImports => "java/organizeImports",
             Self::Rename => "textDocument/rename",
             Self::ProjectSourceRoots => "workspace/executeCommand",
+            Self::FoldingRanges => "textDocument/foldingRange",
         }
     }
 }
@@ -78,6 +80,63 @@ pub enum DocumentEditKind {
 pub struct Position {
     pub line: u32,
     pub character: u32,
+}
+
+const SEMANTIC_TOKEN_TYPES: &[&str] = &[
+    "namespace",
+    "class",
+    "interface",
+    "enum",
+    "enumMember",
+    "type",
+    "typeParameter",
+    "method",
+    "property",
+    "variable",
+    "parameter",
+    "modifier",
+    "keyword",
+    "annotation",
+    "annotationMember",
+    "record",
+    "recordComponent",
+];
+const SEMANTIC_TOKEN_MODIFIERS: &[&str] = &[
+    "abstract",
+    "static",
+    "readonly",
+    "deprecated",
+    "declaration",
+    "documentation",
+    "public",
+    "private",
+    "protected",
+    "native",
+    "generic",
+    "typeArgument",
+    "importDeclaration",
+    "constructor",
+];
+
+#[derive(Clone, Debug)]
+pub struct SemanticHighlight {
+    pub start_byte: usize,
+    pub end_byte: usize,
+    pub token_type: String,
+    pub declaration: bool,
+}
+#[derive(Clone, Debug)]
+pub struct FoldingRange {
+    pub start_line: u32,
+    pub end_line: u32,
+}
+#[derive(Clone, Debug)]
+pub struct FoldRegion {
+    pub start_line: u32,
+    pub end_line: u32,
+    pub header_start_byte: usize,
+    pub body_start_byte: usize,
+    pub body_end_byte: usize,
 }
 #[derive(Clone, Copy, Debug, serde::Deserialize, serde::Serialize)]
 pub struct Range {
@@ -247,6 +306,13 @@ fn is_java_test_method_lines(
 pub struct CodeActionItem {
     pub title: String,
     pub edits: Vec<(Range, String)>,
+    pub command: Option<CodeActionCommand>,
+}
+
+#[derive(Clone, Debug)]
+pub struct CodeActionCommand {
+    command: String,
+    arguments: Vec<Value>,
 }
 #[derive(Clone, Debug)]
 pub struct CompletionItem {
@@ -493,6 +559,16 @@ pub struct SignatureInformation {
 }
 #[derive(Clone, Debug)]
 pub enum LanguageEvent {
+    FoldingRanges {
+        path: PathBuf,
+        version: i64,
+        result: Result<Vec<FoldingRange>, String>,
+    },
+    SemanticTokens {
+        path: PathBuf,
+        version: i64,
+        result: Result<Vec<SemanticHighlight>, String>,
+    },
     Diagnostics {
         path: PathBuf,
         version: Option<i64>,
@@ -557,6 +633,11 @@ pub enum LanguageEvent {
         version: i64,
         position: Position,
         result: Result<Vec<CodeActionItem>, String>,
+    },
+    WorkspaceApplyEdit {
+        request_id: Value,
+        label: String,
+        result: Result<Vec<WorkspaceFileEdits>, String>,
     },
     WorkspaceSymbols {
         query: String,
@@ -1363,6 +1444,11 @@ enum LanguageCommand {
     },
     Save(PathBuf),
     Close(PathBuf),
+    SemanticTokens {
+        path: PathBuf,
+        text: String,
+        version: i64,
+    },
     Request {
         command: EditorCommand,
         path: PathBuf,
@@ -1376,6 +1462,12 @@ enum LanguageCommand {
         rename_to: Option<String>,
         tab_size: usize,
         insert_spaces: bool,
+    },
+    ExecuteCodeAction(CodeActionCommand),
+    RespondWorkspaceEdit {
+        request_id: Value,
+        applied: bool,
+        failure_reason: Option<String>,
     },
     SearchSymbols {
         query: String,
@@ -1961,6 +2053,15 @@ struct Pending {
     sent: Instant,
 }
 
+struct PendingSemanticTokens {
+    path: PathBuf,
+    text: String,
+    version: i64,
+    token_types: Vec<String>,
+    token_modifiers: Vec<String>,
+    sent: Instant,
+}
+
 async fn protocol(
     project: &ProjectModel,
     bundles: &[PathBuf],
@@ -1972,11 +2073,14 @@ async fn protocol(
     cancellation: &mut watch::Receiver<bool>,
 ) -> Result<(), LspError> {
     let root_uri = uri(&project.root)?;
+    let mut semantic_legend = None;
+    let mut folding_range_supported = false;
+    let mut execute_commands = std::collections::HashSet::new();
     send(input, json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
         "processId": std::process::id(), "clientInfo": {"name": "Intelli-gen", "version": env!("CARGO_PKG_VERSION")},
         "rootUri": root_uri, "workspaceFolders": [{"uri": root_uri, "name": project.root.file_name().unwrap_or_default().to_string_lossy()}],
         "capabilities": {"general": {"positionEncodings": ["utf-16"]},
-            "workspace": {"configuration": true, "workspaceFolders": true, "applyEdit": false,
+            "workspace": {"configuration": true, "workspaceFolders": true, "applyEdit": true,
                 "workspaceEdit": {"documentChanges": true, "resourceOperations": ["rename"]},
                 "didChangeWatchedFiles": {"dynamicRegistration": true},
                 "symbol": {"symbolKind": {"valueSet": (1..=26).collect::<Vec<_>>()}}},
@@ -1984,6 +2088,12 @@ async fn protocol(
                 "documentSymbol": {"hierarchicalDocumentSymbolSupport": true},
                 "codeAction": {"codeActionLiteralSupport": {"codeActionKind": {"valueSet": ["quickfix", "refactor", "source"]}}},
                 "completion": {"completionItem": {"snippetSupport": true, "resolveSupport": {"properties": []}}},
+                "semanticTokens": {"requests": {"range": false, "full": {"delta": false}},
+                    "tokenTypes": SEMANTIC_TOKEN_TYPES, "tokenModifiers": SEMANTIC_TOKEN_MODIFIERS,
+                    "formats": ["relative"], "multilineTokenSupport": false,
+                    "overlappingTokenSupport": false, "serverCancelSupport": false,
+                    "augmentsSyntaxTokens": true},
+                "foldingRange": {"dynamicRegistration": false, "lineFoldingOnly": true},
                 "signatureHelp": {"signatureInformation": {"documentationFormat": ["plaintext"]}},
                 "hover": {"contentFormat": ["plaintext"]}, "definition": {"linkSupport": true},
                 "implementation": {"linkSupport": true},
@@ -2013,9 +2123,45 @@ async fn protocol(
                             "JDT LS selected an unsupported position encoding".into(),
                         ));
                     }
+                    let provider = &message["result"]["capabilities"]["semanticTokensProvider"];
+                    let supports_full = provider["full"] == true || provider["full"].is_object();
+                    if supports_full {
+                        let token_types = provider["legend"]["tokenTypes"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .filter_map(Value::as_str)
+                            .map(str::to_owned)
+                            .collect::<Vec<_>>();
+                        let token_modifiers = provider["legend"]["tokenModifiers"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .filter_map(Value::as_str)
+                            .map(str::to_owned)
+                            .collect::<Vec<_>>();
+                        if !token_types.is_empty() {
+                            semantic_legend = Some((token_types, token_modifiers));
+                        }
+                    }
+                    let folding_provider =
+                        &message["result"]["capabilities"]["foldingRangeProvider"];
+                    folding_range_supported =
+                        *folding_provider == true || folding_provider.is_object();
+                    execute_commands = message["result"]["capabilities"]["executeCommandProvider"]
+                        ["commands"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .take(256)
+                        .filter_map(Value::as_str)
+                        .filter(|command| !command.is_empty() && command.len() <= 512)
+                        .map(str::to_owned)
+                        .collect();
                     return Ok(());
                 }
-                server_message(input, &message, &settings, &root_uri, events).await?;
+                server_message(input, &message, &settings, &root_uri, &project.root, events)
+                    .await?;
             }
         });
         tokio::pin!(initialized);
@@ -2040,6 +2186,9 @@ async fn protocol(
     let mut next_id = 2u64;
     let mut pending: HashMap<u64, Pending> = HashMap::new();
     let mut pending_symbols: HashMap<u64, (String, Instant)> = HashMap::new();
+    let mut pending_code_actions: HashMap<u64, (String, Instant)> = HashMap::new();
+    let mut pending_semantic_tokens: HashMap<u64, PendingSemanticTokens> = HashMap::new();
+    let mut semantic_request_ids: HashMap<PathBuf, u64> = HashMap::new();
     let mut debug_ports: HashMap<u64, (Instant, oneshot::Sender<Result<u16, LspError>>)> =
         HashMap::new();
     let mut classpaths: HashMap<u64, PendingClasspaths> = HashMap::new();
@@ -2090,14 +2239,55 @@ async fn protocol(
                     LanguageCommand::Open { path, text, version } => notify(input, "textDocument/didOpen", json!({"textDocument": {"uri": uri(&path)?, "languageId": "java", "version": version, "text": text}})).await?,
                     LanguageCommand::Change { path, text, version } => notify(input, "textDocument/didChange", json!({"textDocument": {"uri": uri(&path)?, "version": version}, "contentChanges": [{"text": text}]})).await?,
                     LanguageCommand::Save(path) => notify(input, "textDocument/didSave", json!({"textDocument": {"uri": uri(&path)?}})).await?,
-                    LanguageCommand::Close(path) => notify(input, "textDocument/didClose", json!({"textDocument": {"uri": uri(&path)?}})).await?,
+                    LanguageCommand::Close(path) => {
+                        if let Some(id) = semantic_request_ids.remove(&path) {
+                            pending_semantic_tokens.remove(&id);
+                            notify(input, "$/cancelRequest", json!({"id": id})).await?;
+                        }
+                        notify(input, "textDocument/didClose", json!({"textDocument": {"uri": uri(&path)?}})).await?;
+                    }
+                    LanguageCommand::SemanticTokens { path, text, version } => {
+                        let Some((token_types, token_modifiers)) = semantic_legend.as_ref() else {
+                            continue;
+                        };
+                        if let Some(id) = semantic_request_ids.remove(&path) {
+                            pending_semantic_tokens.remove(&id);
+                            notify(input, "$/cancelRequest", json!({"id": id})).await?;
+                        }
+                        if pending.len() + pending_symbols.len() + pending_semantic_tokens.len() >= 32 {
+                            let _ = events.send(LanguageEvent::SemanticTokens {
+                                path,
+                                version,
+                                result: Err("Java language service is busy".into()),
+                            }).await;
+                            continue;
+                        }
+                        let id = next_id;
+                        next_id += 1;
+                        semantic_request_ids.insert(path.clone(), id);
+                        pending_semantic_tokens.insert(id, PendingSemanticTokens {
+                            path: path.clone(),
+                            text,
+                            version,
+                            token_types: token_types.clone(),
+                            token_modifiers: token_modifiers.clone(),
+                            sent: Instant::now(),
+                        });
+                        send(input, json!({"jsonrpc": "2.0", "id": id,
+                            "method": "textDocument/semanticTokens/full",
+                            "params": {"textDocument": {"uri": uri(&path)?}}})).await?;
+                    }
                     LanguageCommand::Request { command, path, project_root, position, document_end, range, diagnostics, version, navigation_request_id, rename_to, tab_size, insert_spaces } => {
+                        if command == EditorCommand::FoldingRanges && !folding_range_supported {
+                            continue;
+                        }
                         let id = next_id; next_id += 1;
                         let mut params = json!({"textDocument": {"uri": uri(&path)?}, "position": position});
                         if let Some(new_name) = &rename_to {
                             params["newName"] = json!(new_name);
                         }
                         if command == EditorCommand::DocumentSymbols { params = json!({"textDocument": {"uri": uri(&path)?}}); }
+                        if command == EditorCommand::FoldingRanges { params = json!({"textDocument": {"uri": uri(&path)?}}); }
                         if command == EditorCommand::ProjectSourceRoots { params = json!({"command": "java.project.getSettings", "arguments": [uri(&path)?, ["org.eclipse.jdt.ls.core.classpathEntries"]]}); }
                         if command == EditorCommand::Format { params = json!({"textDocument": {"uri": uri(&path)?}, "options": {"tabSize": tab_size, "insertSpaces": insert_spaces}}); }
                         if command == EditorCommand::OrganizeImports { params = json!({"textDocument": {"uri": uri(&path)?}, "range": {"start": {"line": 0, "character": 0}, "end": document_end}, "context": {"diagnostics": []}}); }
@@ -2116,6 +2306,33 @@ async fn protocol(
                         }
                         pending.insert(id, Pending { command, path, project_root, version, position, navigation_request_id, rename_to, sent: Instant::now() });
                         send(input, json!({"jsonrpc": "2.0", "id": id, "method": command.method(), "params": params})).await?;
+                    }
+                    LanguageCommand::ExecuteCodeAction(command) => {
+                        if !execute_commands.contains(&command.command) {
+                            let _ = events.send(LanguageEvent::ServerState(
+                                "JDT LS did not advertise this Java action command".into(),
+                            )).await;
+                            continue;
+                        }
+                        if pending.len() + pending_symbols.len() + pending_code_actions.len() >= 32 {
+                            let _ = events.send(LanguageEvent::ServerState(
+                                "Too many Java requests pending; try again shortly".into(),
+                            )).await;
+                            continue;
+                        }
+                        let id = next_id;
+                        next_id += 1;
+                        pending_code_actions.insert(id, (command.command.clone(), Instant::now()));
+                        send(input, json!({"jsonrpc": "2.0", "id": id, "method": "workspace/executeCommand", "params": {
+                            "command": command.command, "arguments": command.arguments
+                        }})).await?;
+                    }
+                    LanguageCommand::RespondWorkspaceEdit { request_id, applied, failure_reason } => {
+                        let mut response = json!({"applied": applied});
+                        if let Some(reason) = failure_reason {
+                            response["failureReason"] = json!(reason.chars().take(1024).collect::<String>());
+                        }
+                        send(input, json!({"jsonrpc": "2.0", "id": request_id, "result": response})).await?;
                     }
                     LanguageCommand::SearchSymbols { query } => {
                         let stale: Vec<_> = pending_symbols.keys().copied().collect();
@@ -2140,7 +2357,7 @@ async fn protocol(
             }
             message = messages.recv() => {
                 let message = message.ok_or_else(|| LspError("JDT LS disconnected".into()))??;
-                if message.get("method").is_some() { server_message(input, &message, &settings, &root_uri, events).await?; }
+                if message.get("method").is_some() { server_message(input, &message, &settings, &root_uri, &project.root, events).await?; }
                 else if message.get("id").and_then(Value::as_u64).is_some_and(|id| maven_imports.remove(&id).is_some()) {
                     let _ = events.send(LanguageEvent::ServerState(maven_import_status(&message))).await;
                 }
@@ -2179,10 +2396,33 @@ async fn protocol(
                     };
                     let _ = events.send(LanguageEvent::WorkspaceSymbols { query, result }).await;
                 }
+                else if let Some((command, _)) = message.get("id").and_then(Value::as_u64).and_then(|id| pending_code_actions.remove(&id)) {
+                    let status = if let Some(error) = message.get("error") {
+                        format!("Java code action command failed ({command}): {error}")
+                    } else {
+                        format!("Java code action command completed: {command}")
+                    };
+                    let _ = events.send(LanguageEvent::ServerState(status)).await;
+                }
                 else if let Some(request) = message.get("id").and_then(Value::as_u64).and_then(|id| pending.remove(&id)) {
                     if let Some(error) = message.get("error") {
                         deliver_request_error(request, format!("Java request failed: {error}"), events).await;
-                    } else { deliver_response(request, &message["result"], events).await; }
+                    } else { deliver_response(request, &message["result"], events, &execute_commands).await; }
+                }
+                else if let Some(id) = message.get("id").and_then(Value::as_u64)
+                    && let Some(request) = pending_semantic_tokens.remove(&id)
+                {
+                    semantic_request_ids.remove(&request.path);
+                    let result = if let Some(error) = message.get("error") {
+                        Err(format!("Semantic highlighting failed: {error}"))
+                    } else {
+                        parse_semantic_tokens(&message["result"], &request)
+                    };
+                    let _ = events.send(LanguageEvent::SemanticTokens {
+                        path: request.path,
+                        version: request.version,
+                        result,
+                    }).await;
                 }
             }
             _ = heartbeat.tick() => {
@@ -2223,6 +2463,31 @@ async fn protocol(
                     }
                     notify(input, "$/cancelRequest", json!({"id": id})).await?;
                 }
+                let expired_code_actions: Vec<_> = pending_code_actions.iter()
+                    .filter(|(_, (_, sent))| sent.elapsed() > Duration::from_secs(30))
+                    .map(|(id, _)| *id).collect();
+                for id in expired_code_actions {
+                    if let Some((command, _)) = pending_code_actions.remove(&id) {
+                        let _ = events.send(LanguageEvent::ServerState(
+                            format!("Java code action command timed out: {command}"),
+                        )).await;
+                    }
+                    notify(input, "$/cancelRequest", json!({"id": id})).await?;
+                }
+                let expired_semantic: Vec<_> = pending_semantic_tokens.iter()
+                    .filter(|(_, request)| request.sent.elapsed() > Duration::from_secs(30))
+                    .map(|(id, _)| *id).collect();
+                for id in expired_semantic {
+                    if let Some(request) = pending_semantic_tokens.remove(&id) {
+                        semantic_request_ids.remove(&request.path);
+                        let _ = events.send(LanguageEvent::SemanticTokens {
+                            path: request.path,
+                            version: request.version,
+                            result: Err("Semantic highlighting timed out".into()),
+                        }).await;
+                    }
+                    notify(input, "$/cancelRequest", json!({"id": id})).await?;
+                }
             }
         }
     }
@@ -2239,7 +2504,8 @@ async fn protocol(
                 break;
             }
             if message.get("method").is_some() {
-                server_message(input, &message, &settings, &root_uri, events).await?;
+                server_message(input, &message, &settings, &root_uri, &project.root, events)
+                    .await?;
             }
         }
         Ok::<(), LspError>(())
@@ -2249,15 +2515,167 @@ async fn protocol(
     Ok(())
 }
 
+fn parse_semantic_tokens(
+    result: &Value,
+    request: &PendingSemanticTokens,
+) -> Result<Vec<SemanticHighlight>, String> {
+    const MAX_TOKEN_VALUES: usize = 1_000_000;
+    if result.is_null() {
+        return Ok(Vec::new());
+    }
+    let data = result["data"]
+        .as_array()
+        .ok_or_else(|| "JDT LS returned invalid semantic tokens".to_owned())?;
+    if data.len() > MAX_TOKEN_VALUES || data.len() % 5 != 0 {
+        return Err("JDT LS returned an oversized or malformed semantic token list".into());
+    }
+    let declaration_bit = request
+        .token_modifiers
+        .iter()
+        .position(|modifier| modifier == "declaration")
+        .filter(|index| *index < u32::BITS as usize)
+        .map(|index| 1u32 << index);
+    let mut result_tokens = Vec::with_capacity(data.len() / 5);
+    let mut line_starts = vec![0];
+    line_starts.extend(request.text.match_indices('\n').map(|(index, _)| index + 1));
+    let mut line = 0u32;
+    let mut start = 0u32;
+    let mut previous_end = None;
+    for token in data.chunks_exact(5) {
+        let delta_line = token[0]
+            .as_u64()
+            .and_then(|value| u32::try_from(value).ok())
+            .ok_or_else(|| "JDT LS returned an invalid semantic token line".to_owned())?;
+        let delta_start = token[1]
+            .as_u64()
+            .and_then(|value| u32::try_from(value).ok())
+            .ok_or_else(|| "JDT LS returned an invalid semantic token column".to_owned())?;
+        let length = token[2]
+            .as_u64()
+            .and_then(|value| u32::try_from(value).ok())
+            .filter(|value| *value > 0)
+            .ok_or_else(|| "JDT LS returned an invalid semantic token length".to_owned())?;
+        let token_type = token[3]
+            .as_u64()
+            .and_then(|value| usize::try_from(value).ok())
+            .and_then(|index| request.token_types.get(index))
+            .cloned();
+        let modifiers = token[4]
+            .as_u64()
+            .and_then(|value| u32::try_from(value).ok())
+            .ok_or_else(|| "JDT LS returned invalid semantic token modifiers".to_owned())?;
+        line = line
+            .checked_add(delta_line)
+            .ok_or_else(|| "JDT LS semantic token line overflowed".to_owned())?;
+        start = if delta_line == 0 {
+            start
+                .checked_add(delta_start)
+                .ok_or_else(|| "JDT LS semantic token column overflowed".to_owned())?
+        } else {
+            delta_start
+        };
+        let end = start
+            .checked_add(length)
+            .ok_or_else(|| "JDT LS semantic token range overflowed".to_owned())?;
+        if previous_end.is_some_and(|previous| (line, start) < previous) {
+            return Err("JDT LS returned overlapping semantic tokens".into());
+        }
+        let start_byte = utf16_position_to_byte(&request.text, &line_starts, line, start)
+            .ok_or_else(|| "JDT LS returned a semantic token outside the document".to_owned())?;
+        let end_byte = utf16_position_to_byte(&request.text, &line_starts, line, end)
+            .ok_or_else(|| "JDT LS returned a semantic token outside the document".to_owned())?;
+        if end_byte <= start_byte {
+            return Err("JDT LS returned an empty semantic token range".into());
+        }
+        if let Some(token_type) = token_type {
+            result_tokens.push(SemanticHighlight {
+                start_byte,
+                end_byte,
+                token_type,
+                declaration: declaration_bit.is_some_and(|bit| modifiers & bit != 0),
+            });
+        }
+        previous_end = Some((line, end));
+    }
+    Ok(result_tokens)
+}
+
+fn utf16_position_to_byte(
+    text: &str,
+    line_starts: &[usize],
+    line: u32,
+    column: u32,
+) -> Option<usize> {
+    let line = usize::try_from(line).ok()?;
+    let line_start = *line_starts.get(line)?;
+    let line_end = line_starts.get(line + 1).copied().unwrap_or(text.len());
+    let mut content = text.get(line_start..line_end)?;
+    if let Some(without_newline) = content.strip_suffix('\n') {
+        content = without_newline;
+    }
+    if let Some(without_cr) = content.strip_suffix('\r') {
+        content = without_cr;
+    }
+    byte_at_utf16_column(content, line_start, column)
+}
+
+fn byte_at_utf16_column(line: &str, line_start: usize, column: u32) -> Option<usize> {
+    let mut utf16_column = 0u32;
+    for (byte, character) in line.char_indices() {
+        if utf16_column == column {
+            return Some(line_start + byte);
+        }
+        utf16_column = utf16_column.checked_add(character.len_utf16() as u32)?;
+        if utf16_column > column {
+            return None;
+        }
+    }
+    (utf16_column == column).then_some(line_start + line.len())
+}
+
 async fn server_message(
     input: &mut (impl AsyncWrite + Unpin),
     message: &Value,
     settings: &Value,
     root_uri: &str,
+    project_root: &Path,
     events: &LanguageEventSender,
 ) -> Result<(), LspError> {
     let method = message["method"].as_str().unwrap_or_default();
     let params = &message["params"];
+    if method == "workspace/applyEdit" {
+        let Some(request_id) = message.get("id").filter(|id| !id.is_null()).cloned() else {
+            return Err(LspError(
+                "JDT LS sent workspace/applyEdit without a request id".into(),
+            ));
+        };
+        let label = params["label"]
+            .as_str()
+            .unwrap_or("Java workspace edit")
+            .chars()
+            .take(256)
+            .collect();
+        let result = parse_workspace_apply_edit(project_root, &params["edit"]);
+        if events
+            .send(LanguageEvent::WorkspaceApplyEdit {
+                request_id: request_id.clone(),
+                label,
+                result,
+            })
+            .await
+            .is_err()
+        {
+            send(
+                input,
+                json!({"jsonrpc": "2.0", "id": request_id, "result": {
+                    "applied": false,
+                    "failureReason": "The editor cannot receive workspace edits"
+                }}),
+            )
+            .await?;
+        }
+        return Ok(());
+    }
     if let Some(id) = message.get("id") {
         let result = match method {
             "workspace/configuration" => Value::Array(
@@ -2286,9 +2704,6 @@ async fn server_message(
             | "client/unregisterCapability"
             | "window/workDoneProgress/create" => Value::Null,
             "window/showMessageRequest" => Value::Null,
-            "workspace/applyEdit" => {
-                json!({"applied": false, "failureReason": "Workspace edits are not supported"})
-            }
             _ => {
                 send(input, json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32601, "message": "Client method not supported"}})).await?;
                 return Ok(());
@@ -2325,7 +2740,12 @@ async fn server_message(
     Ok(())
 }
 
-async fn deliver_response(request: Pending, result: &Value, events: &LanguageEventSender) {
+async fn deliver_response(
+    request: Pending,
+    result: &Value,
+    events: &LanguageEventSender,
+    execute_commands: &std::collections::HashSet<String>,
+) {
     if request.rename_to.is_some() {
         let result = parse_rename_workspace_edits(&request.project_root, result);
         let _ = events
@@ -2503,7 +2923,7 @@ async fn deliver_response(request: Pending, result: &Value, events: &LanguageEve
             locations: locations(result),
         },
         EditorCommand::CodeActions => {
-            let result = parse_code_actions(&path, version, result);
+            let result = parse_code_actions(&path, version, result, execute_commands);
             LanguageEvent::CodeActions {
                 path,
                 version,
@@ -2513,6 +2933,11 @@ async fn deliver_response(request: Pending, result: &Value, events: &LanguageEve
         }
         EditorCommand::DocumentSymbols => LanguageEvent::DocumentSymbols {
             result: document_symbols(result, &path),
+            path,
+            version,
+        },
+        EditorCommand::FoldingRanges => LanguageEvent::FoldingRanges {
+            result: parse_folding_ranges(result),
             path,
             version,
         },
@@ -2568,10 +2993,60 @@ fn parse_text_edits(value: &Value) -> Result<Vec<(Range, String)>, String> {
         .collect()
 }
 
+fn parse_folding_ranges(value: &Value) -> Result<Vec<FoldingRange>, String> {
+    if value.is_null() {
+        return Ok(Vec::new());
+    }
+    let ranges = value
+        .as_array()
+        .ok_or_else(|| "JDT LS returned invalid folding ranges".to_owned())?;
+    if ranges.len() > 20_000 {
+        return Err("JDT LS returned too many folding ranges".into());
+    }
+    let mut result = ranges
+        .iter()
+        .filter_map(|range| {
+            let start = u32::try_from(range.get("startLine")?.as_u64()?).ok()?;
+            let end = u32::try_from(range.get("endLine")?.as_u64()?).ok()?;
+            if start >= end {
+                return None;
+            }
+            Some(FoldingRange {
+                start_line: start.checked_add(1)?,
+                end_line: end.checked_add(1)?,
+            })
+        })
+        .collect::<Vec<_>>();
+    result.sort_by_key(|range| (range.start_line, range.end_line));
+    result.dedup_by_key(|range| (range.start_line, range.end_line));
+    Ok(result)
+}
+
+fn resolve_fold_regions(text: &str, ranges: Vec<FoldingRange>) -> Vec<FoldRegion> {
+    let mut line_starts = vec![0];
+    line_starts.extend(text.match_indices('\n').map(|(index, _)| index + 1));
+    ranges
+        .into_iter()
+        .filter_map(|range| {
+            let header_start_byte = *line_starts.get(range.start_line.saturating_sub(1) as usize)?;
+            let body_start_byte = *line_starts.get(range.start_line as usize)?;
+            let body_end_byte = *line_starts.get(range.end_line.saturating_sub(1) as usize)?;
+            (body_start_byte < body_end_byte).then_some(FoldRegion {
+                start_line: range.start_line,
+                end_line: range.end_line,
+                header_start_byte,
+                body_start_byte,
+                body_end_byte,
+            })
+        })
+        .collect()
+}
+
 fn parse_code_actions(
     path: &Path,
     version: i64,
     value: &Value,
+    execute_commands: &std::collections::HashSet<String>,
 ) -> Result<Vec<CodeActionItem>, String> {
     if value.is_null() {
         return Ok(Vec::new());
@@ -2589,17 +3064,23 @@ fn parse_code_actions(
             || action
                 .get("disabled")
                 .is_some_and(|disabled| !disabled.is_null())
-            || action
-                .get("command")
-                .is_some_and(|command| !command.is_null())
         {
             continue;
         }
+        let raw_command = action
+            .get("command")
+            .filter(|command| !command.is_null())
+            .or_else(|| action.get("edit").is_none().then_some(action));
+        let command = raw_command.and_then(|raw| {
+            parse_code_action_command(if raw.is_string() { action } else { raw }, execute_commands)
+        });
+        if raw_command.is_some() && command.is_none() {
+            continue;
+        }
         let edit = &action["edit"];
-        if edit.is_null()
-            || edit["changeAnnotations"]
-                .as_object()
-                .is_some_and(|items| !items.is_empty())
+        if edit["changeAnnotations"]
+            .as_object()
+            .is_some_and(|items| !items.is_empty())
         {
             continue;
         }
@@ -2663,7 +3144,7 @@ fn parse_code_actions(
                 }
             }
         }
-        if valid && !edits.is_empty() {
+        if valid && (!edits.is_empty() || command.is_some()) {
             total_edits = total_edits
                 .checked_add(edits.len())
                 .ok_or("Too many code action edits")?;
@@ -2673,10 +3154,31 @@ fn parse_code_actions(
             result.push(CodeActionItem {
                 title: title.chars().take(256).collect(),
                 edits,
+                command,
             });
         }
     }
     Ok(result)
+}
+
+fn parse_code_action_command(
+    value: &Value,
+    execute_commands: &std::collections::HashSet<String>,
+) -> Option<CodeActionCommand> {
+    let command = value["command"]
+        .as_str()
+        .filter(|command| execute_commands.contains(*command))?;
+    let arguments = match value.get("arguments") {
+        None => Vec::new(),
+        Some(arguments) => arguments.as_array()?.clone(),
+    };
+    if arguments.len() > 100 || serde_json::to_vec(&arguments).ok()?.len() > 64 * 1024 {
+        return None;
+    }
+    Some(CodeActionCommand {
+        command: command.to_owned(),
+        arguments,
+    })
 }
 
 fn same_document_path(candidate: &Path, current: &Path) -> bool {
@@ -2917,6 +3419,40 @@ fn parse_rename_workspace_edits(
     Ok(by_path.into_values().collect())
 }
 
+fn parse_workspace_apply_edit(
+    root: &Path,
+    value: &Value,
+) -> Result<Vec<WorkspaceFileEdits>, String> {
+    if value.is_null() {
+        return Err("JDT LS returned an empty workspace edit".into());
+    }
+    if value
+        .get("changes")
+        .is_some_and(|changes| !changes.is_null())
+        && value
+            .get("documentChanges")
+            .is_some_and(|changes| !changes.is_null())
+    {
+        return Err("JDT LS returned both workspace edit formats".into());
+    }
+    if !value
+        .get("changes")
+        .is_some_and(|changes| !changes.is_null())
+        && !value
+            .get("documentChanges")
+            .is_some_and(|changes| !changes.is_null())
+    {
+        return Err("JDT LS returned an invalid workspace edit".into());
+    }
+    if value["changeAnnotations"]
+        .as_object()
+        .is_some_and(|annotations| !annotations.is_empty())
+    {
+        return Err("Annotated workspace edits require user confirmation".into());
+    }
+    parse_rename_workspace_edits(root, value)
+}
+
 fn signature_parameter_label(signature_label: &str, parameter_label: &Value) -> Option<String> {
     if let Some(label) = parameter_label.as_str() {
         return Some(label.chars().take(256).collect());
@@ -2983,6 +3519,14 @@ async fn deliver_request_error(request: Pending, error: String, events: &Languag
     } else if request.command == EditorCommand::DocumentSymbols {
         let _ = events
             .send(LanguageEvent::DocumentSymbols {
+                path: request.path,
+                version: request.version,
+                result: Err(error),
+            })
+            .await;
+    } else if request.command == EditorCommand::FoldingRanges {
+        let _ = events
+            .send(LanguageEvent::FoldingRanges {
                 path: request.path,
                 version: request.version,
                 result: Err(error),
@@ -3224,6 +3768,10 @@ pub struct LanguageTool {
     pub tooling: ToolingSnapshot,
     repaint_context: Option<eframe::egui::Context>,
     documents: HashMap<PathBuf, SyncedDocument>,
+    semantic_highlights: HashMap<PathBuf, (i64, Vec<SemanticHighlight>)>,
+    semantic_token_requests: HashMap<PathBuf, (Instant, i64)>,
+    folding_ranges: HashMap<PathBuf, (i64, Vec<FoldRegion>)>,
+    folding_range_requests: HashMap<PathBuf, (Instant, i64)>,
     pending_saves: std::collections::HashSet<PathBuf>,
     pending_maven_files: std::collections::HashSet<PathBuf>,
     maven_import_requested: bool,
@@ -3312,6 +3860,18 @@ impl LanguageTool {
                 .root
                 .as_ref()
                 .is_some_and(|root| path.starts_with(root))
+    }
+
+    pub fn semantic_highlights(&self, path: &Path) -> Option<(&str, &[SemanticHighlight])> {
+        let document = self.documents.get(path)?;
+        let (version, highlights) = self.semantic_highlights.get(path)?;
+        (*version == document.version).then_some((document.text.as_str(), highlights.as_slice()))
+    }
+
+    pub fn folding_ranges(&self, path: &Path) -> Option<(&str, &[FoldRegion])> {
+        let document = self.documents.get(path)?;
+        let (version, ranges) = self.folding_ranges.get(path)?;
+        (*version == document.version).then_some((document.text.as_str(), ranges.as_slice()))
     }
 
     pub fn set_repaint_context(&mut self, context: eframe::egui::Context) {
@@ -3406,6 +3966,10 @@ impl LanguageTool {
         self.lombok_warning = None;
         self.pending_maven_files.clear();
         self.documents.clear();
+        self.semantic_highlights.clear();
+        self.semantic_token_requests.clear();
+        self.folding_ranges.clear();
+        self.folding_range_requests.clear();
         self.pending_saves.clear();
         self.diagnostics.clear();
         self.completion = None;
@@ -3852,6 +4416,10 @@ impl LanguageTool {
             {
                 self.documents.remove(&path);
                 self.diagnostics.remove(&path);
+                self.semantic_highlights.remove(&path);
+                self.semantic_token_requests.remove(&path);
+                self.folding_ranges.remove(&path);
+                self.folding_range_requests.remove(&path);
             }
         }
         for tab in tabs.iter().filter(|tab| eligible(&tab.path)) {
@@ -3880,6 +4448,16 @@ impl LanguageTool {
                     self.next_version = version;
                     previous.version = version;
                     previous.text.clone_from(&document.text);
+                    self.semantic_highlights.remove(&tab.path);
+                    self.semantic_token_requests.insert(
+                        tab.path.clone(),
+                        (Instant::now() + Duration::from_millis(200), version),
+                    );
+                    self.folding_ranges.remove(&tab.path);
+                    self.folding_range_requests.insert(
+                        tab.path.clone(),
+                        (Instant::now() + Duration::from_millis(200), version),
+                    );
                     self.diagnostics.remove(&tab.path);
                     self.code_actions = None;
                     self.code_actions_error = None;
@@ -3906,7 +4484,80 @@ impl LanguageTool {
                             version,
                         },
                     );
+                    self.semantic_token_requests.insert(
+                        tab.path.clone(),
+                        (Instant::now() + Duration::from_millis(200), version),
+                    );
+                    self.folding_range_requests.insert(
+                        tab.path.clone(),
+                        (Instant::now() + Duration::from_millis(200), version),
+                    );
                 }
+            }
+        }
+        let now = Instant::now();
+        let due: Vec<_> = self
+            .semantic_token_requests
+            .iter()
+            .filter(|(_, (deadline, _))| *deadline <= now)
+            .map(|(path, (_, version))| (path.clone(), *version))
+            .collect();
+        for (path, version) in due {
+            let Some(document) = self
+                .documents
+                .get(&path)
+                .filter(|document| document.version == version)
+            else {
+                self.semantic_token_requests.remove(&path);
+                continue;
+            };
+            if session
+                .try_command(LanguageCommand::SemanticTokens {
+                    path: path.clone(),
+                    text: document.text.clone(),
+                    version,
+                })
+                .is_ok()
+            {
+                self.semantic_token_requests.remove(&path);
+            }
+        }
+        let due_folding: Vec<_> = self
+            .folding_range_requests
+            .iter()
+            .filter(|(_, (deadline, _))| *deadline <= now)
+            .map(|(path, (_, version))| (path.clone(), *version))
+            .collect();
+        for (path, version) in due_folding {
+            let Some(document) = self
+                .documents
+                .get(&path)
+                .filter(|document| document.version == version)
+            else {
+                self.folding_range_requests.remove(&path);
+                continue;
+            };
+            if session
+                .try_command(LanguageCommand::Request {
+                    command: EditorCommand::FoldingRanges,
+                    path: path.clone(),
+                    project_root: self.root.clone().unwrap_or_default(),
+                    position: Position {
+                        line: 0,
+                        character: 0,
+                    },
+                    document_end: document_end_position(&document.text),
+                    range: document_line_range(&document.text, 0),
+                    diagnostics: Vec::new(),
+                    version,
+                    navigation_request_id: None,
+                    rename_to: None,
+                    tab_size: 4,
+                    insert_spaces: true,
+                })
+                .is_ok()
+            {
+                self.folding_range_requests.remove(&path);
             }
         }
     }
@@ -4095,6 +4746,28 @@ impl LanguageTool {
         }
         match update.event {
             LanguageEvent::ServerState(message) => self.summary = message,
+            LanguageEvent::WorkspaceApplyEdit { .. } => {}
+            LanguageEvent::FoldingRanges {
+                path,
+                version,
+                result: Ok(ranges),
+            } if self.current(&path, version) => {
+                if let Some(document) = self.documents.get(&path) {
+                    self.folding_ranges.insert(
+                        path,
+                        (version, resolve_fold_regions(&document.text, ranges)),
+                    );
+                }
+            }
+            LanguageEvent::FoldingRanges { .. } => {}
+            LanguageEvent::SemanticTokens {
+                path,
+                version,
+                result: Ok(highlights),
+            } if self.current(&path, version) => {
+                self.semantic_highlights.insert(path, (version, highlights));
+            }
+            LanguageEvent::SemanticTokens { .. } => {}
             LanguageEvent::Diagnostics {
                 path,
                 version,
@@ -4393,7 +5066,7 @@ impl LanguageTool {
         &mut self,
         index: usize,
         document: &mut Document,
-    ) -> Result<String, LspError> {
+    ) -> Result<(String, Option<CodeActionCommand>), LspError> {
         let (path, version, position, action) = self
             .code_actions
             .as_ref()
@@ -4415,9 +5088,38 @@ impl LanguageTool {
             ));
         }
         let title = action.title.clone();
-        document.apply_lsp_edits(&action.edits).map_err(LspError)?;
+        if !action.edits.is_empty() {
+            document.apply_lsp_edits(&action.edits).map_err(LspError)?;
+        }
+        let command = action.command.clone();
         self.code_actions = None;
-        Ok(title)
+        Ok((title, command))
+    }
+
+    pub fn execute_code_action(&self, command: CodeActionCommand) -> Result<(), LspError> {
+        self.session
+            .as_ref()
+            .ok_or_else(|| LspError(self.summary.clone()))?
+            .try_command(LanguageCommand::ExecuteCodeAction(command))
+    }
+
+    pub fn respond_workspace_edit(
+        &self,
+        generation: u64,
+        request_id: Value,
+        applied: bool,
+        failure_reason: Option<String>,
+    ) -> Result<(), LspError> {
+        let session = self
+            .session
+            .as_ref()
+            .filter(|session| session.generation == generation)
+            .ok_or_else(|| LspError("The Java language session has ended".into()))?;
+        session.try_command(LanguageCommand::RespondWorkspaceEdit {
+            request_id,
+            applied,
+            failure_reason,
+        })
     }
 
     pub fn move_completion_selection(&mut self, direction: i32) -> Option<usize> {

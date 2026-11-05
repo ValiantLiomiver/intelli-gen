@@ -288,7 +288,7 @@ impl QuickOpen {
             ui.weak(crate::i18n::ui_text(ui, "No matching files"));
         }
         if let Some(warning) = &self.warning {
-            ui.weak(warning);
+            ui.weak(crate::i18n::message(ui.ctx(), warning));
         }
         egui::ScrollArea::vertical()
             .max_height(310.0)

@@ -3,13 +3,179 @@ use std::path::Path;
 use std::sync::OnceLock;
 
 use super::document::PAGED_EDITOR_BYTES;
-use eframe::egui::{self, text::LayoutJob};
+use crate::java::lsp::SemanticHighlight;
+use eframe::egui::{
+    self,
+    text::{ByteIndex, LayoutJob},
+};
 use syntect::easy::HighlightLines;
 use syntect::highlighting::ThemeSet;
 use syntect::parsing::{ParseState, ScopeStack, SyntaxSet};
 use syntect::util::LinesWithEndings;
 
 pub const MAX_HIGHLIGHT_BYTES: usize = PAGED_EDITOR_BYTES;
+
+pub(super) fn overlay_semantic_highlights(
+    job: &mut LayoutJob,
+    highlights: &[SemanticHighlight],
+    source_offset: usize,
+    visuals: &egui::Visuals,
+) {
+    let mut sections = Vec::with_capacity(job.sections.len() + highlights.len());
+    let mut token_index = highlights.partition_point(|token| token.end_byte <= source_offset);
+    for section in &job.sections {
+        let start = section.byte_range.start.0;
+        let end = section.byte_range.end.0;
+        let absolute_start = source_offset.saturating_add(start);
+        let absolute_end = source_offset.saturating_add(end);
+        while highlights
+            .get(token_index)
+            .is_some_and(|token| token.end_byte <= absolute_start)
+        {
+            token_index += 1;
+        }
+        let mut cursor = start;
+        let mut index = token_index;
+        while let Some(token) = highlights.get(index) {
+            if token.start_byte >= absolute_end {
+                break;
+            }
+            let token_start = token.start_byte.saturating_sub(source_offset).max(start);
+            let token_end = token.end_byte.saturating_sub(source_offset).min(end);
+            if let Some(color) = semantic_color(&token.token_type, visuals)
+                && token_end > cursor
+            {
+                push_layout_piece(section, &mut sections, cursor, token_start, None);
+                push_layout_piece(
+                    section,
+                    &mut sections,
+                    token_start,
+                    token_end,
+                    Some((color, token.declaration)),
+                );
+                cursor = token_end;
+            }
+            index += 1;
+        }
+        push_layout_piece(section, &mut sections, cursor, end, None);
+    }
+    job.sections = sections;
+}
+
+fn push_layout_piece(
+    section: &egui::text::LayoutSection,
+    sections: &mut Vec<egui::text::LayoutSection>,
+    start: usize,
+    end: usize,
+    semantic: Option<(egui::Color32, bool)>,
+) {
+    if start >= end {
+        return;
+    }
+    let mut piece = section.clone();
+    piece.byte_range = ByteIndex(start)..ByteIndex(end);
+    if start != section.byte_range.start.0 {
+        piece.leading_space = 0.0;
+    }
+    if let Some((color, declaration)) = semantic {
+        piece.format.color = color;
+        if declaration {
+            piece.format.font_id.family =
+                egui::FontFamily::Name(crate::BOLD_MONOSPACE_FAMILY.into());
+        }
+    }
+    sections.push(piece);
+}
+
+fn semantic_color(token_type: &str, visuals: &egui::Visuals) -> Option<egui::Color32> {
+    match token_type {
+        "class" | "interface" | "enum" | "record" | "type" | "annotation" => {
+            Some(visuals.hyperlink_color)
+        }
+        "method" | "enumMember" => Some(visuals.warn_fg_color),
+        "field" | "property" | "recordComponent" => Some(visuals.selection.stroke.color),
+        "parameter" | "variable" => Some(visuals.strong_text_color()),
+        _ => None,
+    }
+}
+
+pub(super) fn overlay_folded_regions(
+    job: &mut LayoutJob,
+    regions: &[crate::java::lsp::FoldRegion],
+    folded_lines: &std::collections::HashSet<u32>,
+    source_offset: usize,
+) {
+    let source_end = source_offset.saturating_add(job.text.len());
+    let mut hidden = regions
+        .iter()
+        .filter(|region| {
+            folded_lines.contains(&region.start_line)
+                && (source_offset == 0
+                    || (region.header_start_byte >= source_offset
+                        && region.header_start_byte < source_end))
+        })
+        .map(|region| {
+            (
+                region.body_start_byte.saturating_sub(source_offset),
+                region.body_end_byte.saturating_sub(source_offset),
+            )
+        })
+        .filter(|(start, end)| start < end && *start < job.text.len() && *end > 0)
+        .collect::<Vec<_>>();
+    hidden.sort_unstable();
+    let mut merged: Vec<(usize, usize)> = Vec::with_capacity(hidden.len());
+    for (start, end) in hidden {
+        let start = start.min(job.text.len());
+        let end = end.min(job.text.len());
+        if let Some(previous) = merged.last_mut()
+            && start <= previous.1
+        {
+            previous.1 = previous.1.max(end);
+        } else if start < end {
+            merged.push((start, end));
+        }
+    }
+    let mut region_index = 0;
+    let mut sections = Vec::with_capacity(job.sections.len() + merged.len() * 2);
+    for section in &job.sections {
+        let start = section.byte_range.start.0;
+        let end = section.byte_range.end.0;
+        while merged
+            .get(region_index)
+            .is_some_and(|(_, region_end)| *region_end <= start)
+        {
+            region_index += 1;
+        }
+        let mut cursor = start;
+        let mut index = region_index;
+        while let Some((fold_start, fold_end)) = merged.get(index).copied() {
+            if fold_start >= end {
+                break;
+            }
+            let hidden_start = fold_start.max(start);
+            let hidden_end = fold_end.min(end);
+            if hidden_end > cursor {
+                push_layout_piece(section, &mut sections, cursor, hidden_start, None);
+                let mut piece = section.clone();
+                piece.byte_range = ByteIndex(hidden_start)..ByteIndex(hidden_end);
+                if hidden_start != start {
+                    piece.leading_space = 0.0;
+                }
+                piece.format.font_id.size = 0.1;
+                piece.format.line_height = Some(0.0);
+                piece.format.color = egui::Color32::TRANSPARENT;
+                piece.format.background = egui::Color32::TRANSPARENT;
+                piece.format.underline = egui::Stroke::NONE;
+                piece.format.strikethrough = egui::Stroke::NONE;
+                sections.push(piece);
+                cursor = hidden_end;
+            }
+            index += 1;
+        }
+        push_layout_piece(section, &mut sections, cursor, end, None);
+    }
+    job.sections = sections;
+}
 
 fn syntax_set() -> &'static SyntaxSet {
     static SYNTAXES: OnceLock<SyntaxSet> = OnceLock::new();
@@ -163,7 +329,71 @@ fn java_generic_angle_tokens(text: &str) -> HashSet<usize> {
     angle_tokens
 }
 
+pub(super) fn is_java_code_at(text: &str, target: usize) -> bool {
+    let syntaxes = syntax_set();
+    let Some(syntax) = syntaxes.find_syntax_by_extension("java") else {
+        return false;
+    };
+    let mut parser = ParseState::new(syntax);
+    let mut scopes = ScopeStack::default();
+    let mut char_offset = 0;
+    for line in LinesWithEndings::from(text) {
+        let Ok(operations) = parser.parse_line(line, syntaxes) else {
+            return false;
+        };
+        let mut operation = 0;
+        let mut line_char_offset = 0;
+        for (byte, _) in line.char_indices() {
+            while operations.get(operation).is_some_and(|(at, _)| *at <= byte) {
+                if scopes.apply(&operations[operation].1).is_err() {
+                    return false;
+                }
+                operation += 1;
+            }
+            if char_offset + line_char_offset == target {
+                return scopes.scopes.iter().all(|scope| {
+                    let name = scope.build_string();
+                    !name.contains("comment")
+                        && !name.contains("string")
+                        && !name.contains("character")
+                });
+            }
+            line_char_offset += 1;
+        }
+        while let Some((_, operation_to_apply)) = operations.get(operation) {
+            if scopes.apply(operation_to_apply).is_err() {
+                return false;
+            }
+            operation += 1;
+        }
+        char_offset += line_char_offset;
+    }
+    if char_offset == target {
+        scopes.scopes.iter().all(|scope| {
+            let name = scope.build_string();
+            !name.contains("comment") && !name.contains("string") && !name.contains("character")
+        })
+    } else {
+        false
+    }
+}
+
 // shortcut: Java Unicode escapes are not preprocessed before lexing; add source mapping if they appear in real projects.
+pub(super) fn is_matching_java_closing_brace(text: &str, target: usize) -> bool {
+    let characters: Vec<_> = text.chars().take(target.saturating_add(1)).collect();
+    characters.get(target) == Some(&'}')
+        && matching_java_delimiters(&characters, target, &HashSet::new()).is_some()
+}
+
+pub(super) fn matching_java_open_brace_before(text: &str, target: usize) -> Option<usize> {
+    let mut characters: Vec<_> = text.chars().take(target).collect();
+    if target > characters.len() {
+        return None;
+    }
+    characters.push('}');
+    matching_java_delimiters(&characters, target, &HashSet::new()).map(|(open, _, _)| open)
+}
+
 fn matching_java_delimiters(
     characters: &[char],
     target: usize,

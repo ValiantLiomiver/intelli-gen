@@ -179,11 +179,15 @@ impl Document {
     pub fn set_cursor(&mut self, character_index: usize) {
         self.cursor_line = 1;
         self.cursor_column = 1;
-        for character in self.text.chars().take(character_index) {
+        let mut characters = self.text.chars().peekable();
+        for _ in 0..character_index {
+            let Some(character) = characters.next() else {
+                break;
+            };
             if character == '\n' {
                 self.cursor_line += 1;
                 self.cursor_column = 1;
-            } else {
+            } else if character != '\r' || characters.peek() != Some(&'\n') {
                 self.cursor_column += 1;
             }
         }

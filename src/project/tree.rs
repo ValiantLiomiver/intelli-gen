@@ -225,6 +225,7 @@ impl ProjectTree {
         &mut self,
         ui: &mut egui::Ui,
         focus_requested: &mut bool,
+        maven_modules: &[super::ProjectModule],
         search_result: Option<(&str, &Path)>,
     ) -> Vec<TreeAction> {
         let mut actions = Vec::new();
@@ -260,6 +261,7 @@ impl ProjectTree {
             ui,
             &self.root,
             &mut self.entries,
+            maven_modules,
             &mut actions,
             &mut self.focused_path,
             &mut self.focus_pending,
@@ -722,6 +724,7 @@ fn render_entries(
     ui: &mut egui::Ui,
     workspace: &Path,
     entries: &mut [TreeEntry],
+    maven_modules: &[super::ProjectModule],
     actions: &mut Vec<TreeAction>,
     focused_path: &mut Option<PathBuf>,
     focus_pending: &mut bool,
@@ -738,13 +741,22 @@ fn render_entries(
         }
         if entry.directory {
             let id = ui.make_persistent_id(&entry.path);
+            let is_maven_module = maven_modules.iter().any(|module| module.root == entry.path);
+            let label = if is_maven_module {
+                egui::RichText::new(format!("📦 {}", entry.name)).strong()
+            } else {
+                egui::RichText::new(&entry.name)
+            };
             let header = egui::collapsing_header::CollapsingState::load_with_default_open(
                 ui.ctx(),
                 id,
                 false,
             )
             .show_header(ui, |ui| {
-                ui.selectable_label(focused_path.as_ref() == Some(&entry.path), &entry.name)
+                ui.add(
+                    egui::Button::selectable(focused_path.as_ref() == Some(&entry.path), label)
+                        .wrap_mode(egui::TextWrapMode::Extend),
+                )
             });
             let (toggle_response, header_response, _) = header.body(|ui| {
                 if entry.children.is_none()
@@ -778,6 +790,7 @@ fn render_entries(
                         ui,
                         workspace,
                         children,
+                        maven_modules,
                         actions,
                         focused_path,
                         focus_pending,
@@ -817,7 +830,10 @@ fn render_entries(
                 entry.name.clone()
             };
             let response = ui
-                .selectable_label(focused_path.as_ref() == Some(&entry.path), label)
+                .add(
+                    egui::Button::selectable(focused_path.as_ref() == Some(&entry.path), label)
+                        .wrap_mode(egui::TextWrapMode::Truncate),
+                )
                 .on_hover_text(entry.path.display().to_string());
             if focused_path.as_ref() == Some(&entry.path) && *focus_pending {
                 response.request_focus();
