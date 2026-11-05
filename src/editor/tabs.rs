@@ -388,7 +388,12 @@ fn auto_pair_java_character(ui: &egui::Ui, text: &mut String, editor_id: egui::I
                         .bytes()
                         .take_while(|byte| matches!(byte, b' ' | b'\t'))
                         .count();
-                if text.as_bytes().get(closing_brace) == Some(&b'}') {
+                if text.as_bytes().get(closing_brace) == Some(&b'}')
+                    && super::highlighter::is_matching_java_closing_brace(
+                        text,
+                        text[..closing_brace].chars().count(),
+                    )
+                {
                     let next = text[..closing_brace + 1].chars().count();
                     state
                         .cursor
