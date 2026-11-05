@@ -188,6 +188,7 @@ pub struct AppState {
     pub rename_symbol: Option<RenameSymbolDialog>,
     pub pending_rename_request: Option<PendingRenameRequest>,
     pub pending_workspace_edits: HashMap<u64, PendingWorkspaceRename>,
+    pub pending_workspace_applies: HashMap<u64, PendingWorkspaceApply>,
     pub pending_workspace_replacements: HashMap<u64, PendingWorkspaceReplace>,
     pub next_workspace_edit_id: u64,
     pub editor_tabs: Vec<EditorTab>,
@@ -286,6 +287,15 @@ pub struct PendingWorkspaceRename {
     pub version: i64,
     pub position: crate::java::lsp::Position,
     pub source_revision: u64,
+    pub open_revisions: HashMap<PathBuf, u64>,
+    pub files: Vec<crate::java::lsp::WorkspaceFileEdits>,
+}
+
+pub struct PendingWorkspaceApply {
+    pub root: PathBuf,
+    pub generation: u64,
+    pub request_id: serde_json::Value,
+    pub label: String,
     pub open_revisions: HashMap<PathBuf, u64>,
     pub files: Vec<crate::java::lsp::WorkspaceFileEdits>,
 }
@@ -468,6 +478,7 @@ impl IdeaLikeApp {
             rename_symbol: None,
             pending_rename_request: None,
             pending_workspace_edits: HashMap::new(),
+            pending_workspace_applies: HashMap::new(),
             pending_workspace_replacements: HashMap::new(),
             next_workspace_edit_id: 0,
             editor_tabs: Vec::new(),

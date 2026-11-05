@@ -634,6 +634,11 @@ pub enum LanguageEvent {
         position: Position,
         result: Result<Vec<CodeActionItem>, String>,
     },
+    WorkspaceApplyEdit {
+        request_id: Value,
+        label: String,
+        result: Result<Vec<WorkspaceFileEdits>, String>,
+    },
     WorkspaceSymbols {
         query: String,
         result: Result<Vec<WorkspaceSymbol>, String>,
@@ -1459,6 +1464,11 @@ enum LanguageCommand {
         insert_spaces: bool,
     },
     ExecuteCodeAction(CodeActionCommand),
+    RespondWorkspaceEdit {
+        request_id: Value,
+        applied: bool,
+        failure_reason: Option<String>,
+    },
     SearchSymbols {
         query: String,
     },
@@ -2070,7 +2080,7 @@ async fn protocol(
         "processId": std::process::id(), "clientInfo": {"name": "Intelli-gen", "version": env!("CARGO_PKG_VERSION")},
         "rootUri": root_uri, "workspaceFolders": [{"uri": root_uri, "name": project.root.file_name().unwrap_or_default().to_string_lossy()}],
         "capabilities": {"general": {"positionEncodings": ["utf-16"]},
-            "workspace": {"configuration": true, "workspaceFolders": true, "applyEdit": false,
+            "workspace": {"configuration": true, "workspaceFolders": true, "applyEdit": true,
                 "workspaceEdit": {"documentChanges": true, "resourceOperations": ["rename"]},
                 "didChangeWatchedFiles": {"dynamicRegistration": true},
                 "symbol": {"symbolKind": {"valueSet": (1..=26).collect::<Vec<_>>()}}},
@@ -2150,7 +2160,8 @@ async fn protocol(
                         .collect();
                     return Ok(());
                 }
-                server_message(input, &message, &settings, &root_uri, events).await?;
+                server_message(input, &message, &settings, &root_uri, &project.root, events)
+                    .await?;
             }
         });
         tokio::pin!(initialized);
@@ -2316,6 +2327,13 @@ async fn protocol(
                             "command": command.command, "arguments": command.arguments
                         }})).await?;
                     }
+                    LanguageCommand::RespondWorkspaceEdit { request_id, applied, failure_reason } => {
+                        let mut response = json!({"applied": applied});
+                        if let Some(reason) = failure_reason {
+                            response["failureReason"] = json!(reason.chars().take(1024).collect::<String>());
+                        }
+                        send(input, json!({"jsonrpc": "2.0", "id": request_id, "result": response})).await?;
+                    }
                     LanguageCommand::SearchSymbols { query } => {
                         let stale: Vec<_> = pending_symbols.keys().copied().collect();
                         for stale_id in stale {
@@ -2339,7 +2357,7 @@ async fn protocol(
             }
             message = messages.recv() => {
                 let message = message.ok_or_else(|| LspError("JDT LS disconnected".into()))??;
-                if message.get("method").is_some() { server_message(input, &message, &settings, &root_uri, events).await?; }
+                if message.get("method").is_some() { server_message(input, &message, &settings, &root_uri, &project.root, events).await?; }
                 else if message.get("id").and_then(Value::as_u64).is_some_and(|id| maven_imports.remove(&id).is_some()) {
                     let _ = events.send(LanguageEvent::ServerState(maven_import_status(&message))).await;
                 }
@@ -2486,7 +2504,8 @@ async fn protocol(
                 break;
             }
             if message.get("method").is_some() {
-                server_message(input, &message, &settings, &root_uri, events).await?;
+                server_message(input, &message, &settings, &root_uri, &project.root, events)
+                    .await?;
             }
         }
         Ok::<(), LspError>(())
@@ -2619,10 +2638,44 @@ async fn server_message(
     message: &Value,
     settings: &Value,
     root_uri: &str,
+    project_root: &Path,
     events: &LanguageEventSender,
 ) -> Result<(), LspError> {
     let method = message["method"].as_str().unwrap_or_default();
     let params = &message["params"];
+    if method == "workspace/applyEdit" {
+        let Some(request_id) = message.get("id").filter(|id| !id.is_null()).cloned() else {
+            return Err(LspError(
+                "JDT LS sent workspace/applyEdit without a request id".into(),
+            ));
+        };
+        let label = params["label"]
+            .as_str()
+            .unwrap_or("Java workspace edit")
+            .chars()
+            .take(256)
+            .collect();
+        let result = parse_workspace_apply_edit(project_root, &params["edit"]);
+        if events
+            .send(LanguageEvent::WorkspaceApplyEdit {
+                request_id: request_id.clone(),
+                label,
+                result,
+            })
+            .await
+            .is_err()
+        {
+            send(
+                input,
+                json!({"jsonrpc": "2.0", "id": request_id, "result": {
+                    "applied": false,
+                    "failureReason": "The editor cannot receive workspace edits"
+                }}),
+            )
+            .await?;
+        }
+        return Ok(());
+    }
     if let Some(id) = message.get("id") {
         let result = match method {
             "workspace/configuration" => Value::Array(
@@ -2651,9 +2704,6 @@ async fn server_message(
             | "client/unregisterCapability"
             | "window/workDoneProgress/create" => Value::Null,
             "window/showMessageRequest" => Value::Null,
-            "workspace/applyEdit" => {
-                json!({"applied": false, "failureReason": "Workspace edits are not supported"})
-            }
             _ => {
                 send(input, json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32601, "message": "Client method not supported"}})).await?;
                 return Ok(());
@@ -3367,6 +3417,40 @@ fn parse_rename_workspace_edits(
         }
     }
     Ok(by_path.into_values().collect())
+}
+
+fn parse_workspace_apply_edit(
+    root: &Path,
+    value: &Value,
+) -> Result<Vec<WorkspaceFileEdits>, String> {
+    if value.is_null() {
+        return Err("JDT LS returned an empty workspace edit".into());
+    }
+    if value
+        .get("changes")
+        .is_some_and(|changes| !changes.is_null())
+        && value
+            .get("documentChanges")
+            .is_some_and(|changes| !changes.is_null())
+    {
+        return Err("JDT LS returned both workspace edit formats".into());
+    }
+    if !value
+        .get("changes")
+        .is_some_and(|changes| !changes.is_null())
+        && !value
+            .get("documentChanges")
+            .is_some_and(|changes| !changes.is_null())
+    {
+        return Err("JDT LS returned an invalid workspace edit".into());
+    }
+    if value["changeAnnotations"]
+        .as_object()
+        .is_some_and(|annotations| !annotations.is_empty())
+    {
+        return Err("Annotated workspace edits require user confirmation".into());
+    }
+    parse_rename_workspace_edits(root, value)
 }
 
 fn signature_parameter_label(signature_label: &str, parameter_label: &Value) -> Option<String> {
@@ -4662,6 +4746,7 @@ impl LanguageTool {
         }
         match update.event {
             LanguageEvent::ServerState(message) => self.summary = message,
+            LanguageEvent::WorkspaceApplyEdit { .. } => {}
             LanguageEvent::FoldingRanges {
                 path,
                 version,
@@ -5016,6 +5101,25 @@ impl LanguageTool {
             .as_ref()
             .ok_or_else(|| LspError(self.summary.clone()))?
             .try_command(LanguageCommand::ExecuteCodeAction(command))
+    }
+
+    pub fn respond_workspace_edit(
+        &self,
+        generation: u64,
+        request_id: Value,
+        applied: bool,
+        failure_reason: Option<String>,
+    ) -> Result<(), LspError> {
+        let session = self
+            .session
+            .as_ref()
+            .filter(|session| session.generation == generation)
+            .ok_or_else(|| LspError("The Java language session has ended".into()))?;
+        session.try_command(LanguageCommand::RespondWorkspaceEdit {
+            request_id,
+            applied,
+            failure_reason,
+        })
     }
 
     pub fn move_completion_selection(&mut self, direction: i32) -> Option<usize> {
