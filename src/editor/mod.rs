@@ -329,6 +329,7 @@ impl Drop for EditorIo {
 #[derive(Clone, Debug)]
 pub enum GutterBreakpointAction {
     Toggle(u32),
+    ToggleFold(u32),
     SetEnabled { line: u32, enabled: bool },
     SetLogpoint { line: u32, message: String },
     RunCurrentTestClass,
@@ -354,6 +355,8 @@ pub fn editor_gutter(
     diagnostics: &[crate::java::lsp::LanguageDiagnostic],
     test_class_line: Option<u32>,
     test_methods: &[(u32, String)],
+    fold_regions: &[crate::java::lsp::FoldRegion],
+    folded_lines: &std::collections::HashSet<u32>,
 ) -> Option<GutterBreakpointAction> {
     use eframe::egui;
     let mut action = None;
@@ -372,6 +375,43 @@ pub fn editor_gutter(
         if !ui.is_rect_visible(rect) {
             continue;
         }
+        let foldable = fold_regions.iter().any(|region| region.start_line == line);
+        let collapsed = foldable && folded_lines.contains(&line);
+        let fold_clicked = if foldable {
+            let fold_rect = egui::Rect::from_center_size(
+                egui::pos2(rect.max.x - 7.0, rect.center().y),
+                egui::vec2(14.0, row.rect().height().max(14.0)),
+            );
+            let response = ui.interact(
+                fold_rect,
+                ui.id().with(("fold_gutter", source, line)),
+                egui::Sense::click(),
+            );
+            ui.painter().text(
+                fold_rect.center(),
+                egui::Align2::CENTER_CENTER,
+                if collapsed { "▸" } else { "▾" },
+                egui::FontId::proportional(12.0),
+                ui.visuals().weak_text_color(),
+            );
+            let clicked = response.clicked();
+            let _ = response.on_hover_text(crate::i18n::ui_text(
+                ui,
+                if collapsed {
+                    "Expand code block"
+                } else {
+                    "Collapse code block"
+                },
+            ));
+            if clicked {
+                action = Some(GutterBreakpointAction::ToggleFold(line));
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        };
         let center = egui::pos2(rect.min.x + 8.0, rect.center().y);
         let has_breakpoint = breakpoints.is_some_and(|lines| lines.contains(&line));
         let is_logpoint = logpoints.is_some_and(|lines| lines.contains(&line));
@@ -446,7 +486,14 @@ pub fn editor_gutter(
             );
         }
         ui.painter().text(
-            rect.right_center(),
+            egui::pos2(
+                if foldable {
+                    rect.max.x - 14.0
+                } else {
+                    rect.max.x
+                },
+                rect.center().y,
+            ),
             egui::Align2::RIGHT_CENTER,
             line.to_string(),
             egui::FontId::monospace(12.0),
@@ -495,7 +542,7 @@ pub fn editor_gutter(
         let mut draft = ui
             .data(|data| data.get_temp::<String>(draft_id))
             .unwrap_or_default();
-        if breakpoints.is_some() {
+        if breakpoints.is_some() && !fold_clicked {
             egui::Popup::menu(&response)
                 .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
                 .show(|ui| {
@@ -602,6 +649,52 @@ pub fn editor_gutter(
         }
     }
     action
+}
+
+pub fn paint_fold_placeholders(
+    ui: &eframe::egui::Ui,
+    output: &eframe::egui::text_edit::TextEditOutput,
+    displayed_text: &str,
+    source_offset: usize,
+    source_text: &str,
+    regions: &[crate::java::lsp::FoldRegion],
+    folded_lines: &std::collections::HashSet<u32>,
+) {
+    use eframe::egui;
+    let source_end = source_offset.saturating_add(displayed_text.len());
+    let painter = ui.painter().with_clip_rect(output.text_clip_rect);
+    for region in regions.iter().filter(|region| {
+        folded_lines.contains(&region.start_line)
+            && region.header_start_byte >= source_offset
+            && region.header_start_byte < source_end
+            && !regions.iter().any(|outer| {
+                outer.start_line < region.start_line
+                    && region.start_line < outer.end_line
+                    && folded_lines.contains(&outer.start_line)
+            })
+    }) {
+        let mut header_end = region.body_start_byte.saturating_sub(1);
+        if source_text.as_bytes().get(header_end.saturating_sub(1)) == Some(&b'\r') {
+            header_end = header_end.saturating_sub(1);
+        }
+        let Some(local_end) = header_end.checked_sub(source_offset) else {
+            continue;
+        };
+        let Some(header) = displayed_text.get(..local_end) else {
+            continue;
+        };
+        let position = output
+            .galley
+            .pos_from_cursor(egui::text::CCursor::new(header.chars().count()))
+            .translate(output.galley_pos.to_vec2());
+        painter.text(
+            position.right_center() + egui::vec2(4.0, 0.0),
+            egui::Align2::LEFT_CENTER,
+            "…",
+            egui::FontId::monospace(12.0),
+            ui.visuals().weak_text_color(),
+        );
+    }
 }
 
 #[cfg(test)]
@@ -723,6 +816,8 @@ mod gutter_ui_tests {
                             &[],
                             None,
                             &[],
+                            &[],
+                            &std::collections::HashSet::new(),
                         );
                     });
                 });

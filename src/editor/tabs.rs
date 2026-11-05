@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::{collections::HashSet, path::PathBuf};
 
 use eframe::egui;
 
@@ -618,6 +618,7 @@ pub struct EditorTab {
     page_start: usize,
     page_end: usize,
     page_cursor: Option<usize>,
+    folded_lines: HashSet<u32>,
 }
 
 impl EditorTab {
@@ -638,6 +639,7 @@ impl EditorTab {
             page_start: 0,
             page_end: 0,
             page_cursor: None,
+            folded_lines: HashSet::new(),
         }
     }
 
@@ -952,6 +954,7 @@ impl EditorTab {
         continuation_indent_size: usize,
         insert_spaces: bool,
         semantic: Option<(&str, &[crate::java::lsp::SemanticHighlight])>,
+        folding: Option<(&str, &[crate::java::lsp::FoldRegion])>,
     ) -> (Option<super::GutterBreakpointAction>, Option<egui::Pos2>) {
         if self.document.text.len() > PAGED_EDITOR_BYTES {
             self.active_snippet_tab_stop = None;
@@ -974,6 +977,7 @@ impl EditorTab {
                     continuation_indent_size,
                     insert_spaces,
                     semantic,
+                    folding,
                 ),
                 None,
             );
@@ -1062,6 +1066,10 @@ impl EditorTab {
             self.document.mark_changed();
         }
         let highlighter = &mut self.highlighter;
+        let folded_lines = &self.folded_lines;
+        let fold_regions = folding
+            .filter(|(source, _)| *source == self.document.text)
+            .map_or(&[][..], |(_, regions)| regions);
         let mut layouter = |ui: &egui::Ui, buffer: &dyn egui::TextBuffer, _width: f32| {
             let mut job = highlighter.layout(ui, buffer.as_str(), language);
             if let Some((source, highlights)) = semantic
@@ -1074,11 +1082,17 @@ impl EditorTab {
                     ui.visuals(),
                 );
             }
+            if let Some((source, _)) = folding
+                && source == buffer.as_str()
+            {
+                super::highlighter::overlay_folded_regions(&mut job, fold_regions, folded_lines, 0);
+            }
             job.wrap.max_width = f32::INFINITY;
             ui.fonts_mut(|fonts| fonts.layout_job(job))
         };
         let mut snippet_changed =
             auto_deleted_pair || pair_edit == JavaPairEdit::InsertedPair || auto_indented;
+        let mut expand_fold = None;
         egui::ScrollArea::both()
             .id_salt(("source_scroll", &self.path))
             .auto_shrink([false, false])
@@ -1119,7 +1133,35 @@ impl EditorTab {
                         diagnostics,
                         test_class_line,
                         test_methods,
+                        fold_regions,
+                        folded_lines,
                     );
+                    if let Some((source, _)) = folding
+                        && source == self.document.text
+                        && !output.response.changed()
+                    {
+                        super::paint_fold_placeholders(
+                            ui,
+                            &output,
+                            &self.document.text,
+                            0,
+                            source,
+                            fold_regions,
+                            folded_lines,
+                        );
+                        if let Some(cursor) = output.cursor_range {
+                            let cursor_byte =
+                                byte_index(&self.document.text, cursor.primary.index.into());
+                            expand_fold = fold_regions
+                                .iter()
+                                .find(|region| {
+                                    folded_lines.contains(&region.start_line)
+                                        && region.body_start_byte <= cursor_byte
+                                        && cursor_byte < region.body_end_byte
+                                })
+                                .map(|region| region.start_line);
+                        }
+                    }
                     if java && let Some(cursor) = output.cursor_range {
                         super::highlighter::paint_java_delimiter_match(
                             ui,
@@ -1155,6 +1197,10 @@ impl EditorTab {
                     }
                 });
             });
+        if let Some(line) = expand_fold {
+            self.folded_lines.remove(&line);
+            ui.ctx().request_repaint();
+        }
         if snippet_changed && let Some(previous_length) = snippet_length_before_edit {
             self.adjust_snippet_tab_stops(previous_length);
             if self.sync_active_snippet_mirrors() {
@@ -1296,6 +1342,7 @@ impl EditorTab {
         continuation_indent_size: usize,
         insert_spaces: bool,
         semantic: Option<(&str, &[crate::java::lsp::SemanticHighlight])>,
+        folding: Option<(&str, &[crate::java::lsp::FoldRegion])>,
     ) -> Option<super::GutterBreakpointAction> {
         ui.colored_label(ui.visuals().warn_fg_color,
             crate::i18n::ui_text(ui, "Large file: editing is limited to the visible page. Save writes the complete document."));
@@ -1447,6 +1494,10 @@ impl EditorTab {
             );
         let mut toggled = None;
         let highlighter = &mut self.highlighter;
+        let folded_lines = &self.folded_lines;
+        let fold_regions = folding
+            .filter(|(source, _)| *source == self.document.text)
+            .map_or(&[][..], |(_, regions)| regions);
         let mut layouter = |ui: &egui::Ui, buffer: &dyn egui::TextBuffer, _width: f32| {
             let mut job = highlighter.layout(
                 ui,
@@ -1463,6 +1514,18 @@ impl EditorTab {
                     highlights,
                     self.page_start,
                     ui.visuals(),
+                );
+            }
+            if let Some((source, _)) = folding
+                && source
+                    .get(self.page_start..self.page_start.saturating_add(buffer.as_str().len()))
+                    == Some(buffer.as_str())
+            {
+                super::highlighter::overlay_folded_regions(
+                    &mut job,
+                    fold_regions,
+                    folded_lines,
+                    self.page_start,
                 );
             }
             job.wrap.max_width = f32::INFINITY;
@@ -1499,12 +1562,44 @@ impl EditorTab {
                         diagnostics,
                         test_class_line,
                         test_methods,
+                        fold_regions,
+                        folded_lines,
                     );
                     output
                 })
             })
             .inner
             .inner;
+        if let Some((source, _)) = folding
+            && source.get(self.page_start..self.page_start.saturating_add(page.len()))
+                == Some(page.as_str())
+            && !output.response.changed()
+        {
+            super::paint_fold_placeholders(
+                ui,
+                &output,
+                &page,
+                self.page_start,
+                source,
+                fold_regions,
+                folded_lines,
+            );
+            if let Some(cursor) = output.cursor_range {
+                let cursor_byte = self.page_start + byte_index(&page, cursor.primary.index.into());
+                if let Some(line) = fold_regions
+                    .iter()
+                    .find(|region| {
+                        folded_lines.contains(&region.start_line)
+                            && region.body_start_byte <= cursor_byte
+                            && cursor_byte < region.body_end_byte
+                    })
+                    .map(|region| region.start_line)
+                {
+                    self.folded_lines.remove(&line);
+                    ui.ctx().request_repaint();
+                }
+            }
+        }
         if super::highlighter::SourceLanguage::for_path(&self.path)
             == super::highlighter::SourceLanguage::Java
             && let Some(cursor) = output.cursor_range
@@ -1661,6 +1756,9 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
     let semantic = active_path
         .as_deref()
         .and_then(|path| state.language.semantic_highlights(path));
+    let folding = active_path
+        .as_deref()
+        .and_then(|path| state.language.folding_ranges(path));
     let bookmark_lines: Vec<_> = state
         .project
         .as_ref()
@@ -1821,8 +1919,10 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
             continuation_indent_size,
             insert_spaces,
             semantic,
+            folding,
         );
         if tab.document.revision != revision {
+            tab.folded_lines.clear();
             let new_line_count = tab.document.text.matches('\n').count() + 1;
             let line_delta = new_line_count as i64 - old_line_count as i64;
             let (start_line, end_line) = if let Some(lines) = selection_lines {
@@ -1953,8 +2053,13 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
                     .filter(|action| {
                         matches!(action, crate::app::events::BuildAction::RunTest { method_name: Some(method), .. } if method == &name)
                     });
+            } else if let super::GutterBreakpointAction::ToggleFold(line) = action {
+                if !tab.folded_lines.remove(&line) {
+                    tab.folded_lines.insert(line);
+                }
             } else {
                 breakpoint_action = Some(match action {
+                    super::GutterBreakpointAction::ToggleFold(_) => unreachable!(),
                     super::GutterBreakpointAction::Toggle(line) => {
                         crate::app::events::DebuggerAction::ToggleBreakpoint {
                             source: path,

@@ -46,6 +46,7 @@ pub enum EditorCommand {
     OrganizeImports,
     Rename,
     ProjectSourceRoots,
+    FoldingRanges,
 }
 impl EditorCommand {
     fn method(self) -> &'static str {
@@ -64,6 +65,7 @@ impl EditorCommand {
             Self::OrganizeImports => "java/organizeImports",
             Self::Rename => "textDocument/rename",
             Self::ProjectSourceRoots => "workspace/executeCommand",
+            Self::FoldingRanges => "textDocument/foldingRange",
         }
     }
 }
@@ -122,6 +124,19 @@ pub struct SemanticHighlight {
     pub end_byte: usize,
     pub token_type: String,
     pub declaration: bool,
+}
+#[derive(Clone, Debug)]
+pub struct FoldingRange {
+    pub start_line: u32,
+    pub end_line: u32,
+}
+#[derive(Clone, Debug)]
+pub struct FoldRegion {
+    pub start_line: u32,
+    pub end_line: u32,
+    pub header_start_byte: usize,
+    pub body_start_byte: usize,
+    pub body_end_byte: usize,
 }
 #[derive(Clone, Copy, Debug, serde::Deserialize, serde::Serialize)]
 pub struct Range {
@@ -537,6 +552,11 @@ pub struct SignatureInformation {
 }
 #[derive(Clone, Debug)]
 pub enum LanguageEvent {
+    FoldingRanges {
+        path: PathBuf,
+        version: i64,
+        result: Result<Vec<FoldingRange>, String>,
+    },
     SemanticTokens {
         path: PathBuf,
         version: i64,
@@ -2036,6 +2056,7 @@ async fn protocol(
 ) -> Result<(), LspError> {
     let root_uri = uri(&project.root)?;
     let mut semantic_legend = None;
+    let mut folding_range_supported = false;
     send(input, json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
         "processId": std::process::id(), "clientInfo": {"name": "Intelli-gen", "version": env!("CARGO_PKG_VERSION")},
         "rootUri": root_uri, "workspaceFolders": [{"uri": root_uri, "name": project.root.file_name().unwrap_or_default().to_string_lossy()}],
@@ -2053,6 +2074,7 @@ async fn protocol(
                     "formats": ["relative"], "multilineTokenSupport": false,
                     "overlappingTokenSupport": false, "serverCancelSupport": false,
                     "augmentsSyntaxTokens": true},
+                "foldingRange": {"dynamicRegistration": false, "lineFoldingOnly": true},
                 "signatureHelp": {"signatureInformation": {"documentationFormat": ["plaintext"]}},
                 "hover": {"contentFormat": ["plaintext"]}, "definition": {"linkSupport": true},
                 "implementation": {"linkSupport": true},
@@ -2103,6 +2125,10 @@ async fn protocol(
                             semantic_legend = Some((token_types, token_modifiers));
                         }
                     }
+                    let folding_provider =
+                        &message["result"]["capabilities"]["foldingRangeProvider"];
+                    folding_range_supported =
+                        *folding_provider == true || folding_provider.is_object();
                     return Ok(());
                 }
                 server_message(input, &message, &settings, &root_uri, events).await?;
@@ -2221,12 +2247,16 @@ async fn protocol(
                             "params": {"textDocument": {"uri": uri(&path)?}}})).await?;
                     }
                     LanguageCommand::Request { command, path, project_root, position, document_end, range, diagnostics, version, navigation_request_id, rename_to, tab_size, insert_spaces } => {
+                        if command == EditorCommand::FoldingRanges && !folding_range_supported {
+                            continue;
+                        }
                         let id = next_id; next_id += 1;
                         let mut params = json!({"textDocument": {"uri": uri(&path)?}, "position": position});
                         if let Some(new_name) = &rename_to {
                             params["newName"] = json!(new_name);
                         }
                         if command == EditorCommand::DocumentSymbols { params = json!({"textDocument": {"uri": uri(&path)?}}); }
+                        if command == EditorCommand::FoldingRanges { params = json!({"textDocument": {"uri": uri(&path)?}}); }
                         if command == EditorCommand::ProjectSourceRoots { params = json!({"command": "java.project.getSettings", "arguments": [uri(&path)?, ["org.eclipse.jdt.ls.core.classpathEntries"]]}); }
                         if command == EditorCommand::Format { params = json!({"textDocument": {"uri": uri(&path)?}, "options": {"tabSize": tab_size, "insertSpaces": insert_spaces}}); }
                         if command == EditorCommand::OrganizeImports { params = json!({"textDocument": {"uri": uri(&path)?}, "range": {"start": {"line": 0, "character": 0}, "end": document_end}, "context": {"diagnostics": []}}); }
@@ -2792,6 +2822,11 @@ async fn deliver_response(request: Pending, result: &Value, events: &LanguageEve
             path,
             version,
         },
+        EditorCommand::FoldingRanges => LanguageEvent::FoldingRanges {
+            result: parse_folding_ranges(result),
+            path,
+            version,
+        },
         EditorCommand::ProjectSourceRoots => LanguageEvent::ProjectSourceRoots {
             result: project_source_roots(result, &path, &project_root),
             path,
@@ -2840,6 +2875,55 @@ fn parse_text_edits(value: &Value) -> Result<Vec<(Range, String)>, String> {
                 .as_str()
                 .ok_or_else(|| "Text edit has no replacement text".to_owned())?;
             Ok((range, text.to_owned()))
+        })
+        .collect()
+}
+
+fn parse_folding_ranges(value: &Value) -> Result<Vec<FoldingRange>, String> {
+    if value.is_null() {
+        return Ok(Vec::new());
+    }
+    let ranges = value
+        .as_array()
+        .ok_or_else(|| "JDT LS returned invalid folding ranges".to_owned())?;
+    if ranges.len() > 20_000 {
+        return Err("JDT LS returned too many folding ranges".into());
+    }
+    let mut result = ranges
+        .iter()
+        .filter_map(|range| {
+            let start = u32::try_from(range.get("startLine")?.as_u64()?).ok()?;
+            let end = u32::try_from(range.get("endLine")?.as_u64()?).ok()?;
+            if start >= end {
+                return None;
+            }
+            Some(FoldingRange {
+                start_line: start.checked_add(1)?,
+                end_line: end.checked_add(1)?,
+            })
+        })
+        .collect::<Vec<_>>();
+    result.sort_by_key(|range| (range.start_line, range.end_line));
+    result.dedup_by_key(|range| (range.start_line, range.end_line));
+    Ok(result)
+}
+
+fn resolve_fold_regions(text: &str, ranges: Vec<FoldingRange>) -> Vec<FoldRegion> {
+    let mut line_starts = vec![0];
+    line_starts.extend(text.match_indices('\n').map(|(index, _)| index + 1));
+    ranges
+        .into_iter()
+        .filter_map(|range| {
+            let header_start_byte = *line_starts.get(range.start_line.saturating_sub(1) as usize)?;
+            let body_start_byte = *line_starts.get(range.start_line as usize)?;
+            let body_end_byte = *line_starts.get(range.end_line.saturating_sub(1) as usize)?;
+            (body_start_byte < body_end_byte).then_some(FoldRegion {
+                start_line: range.start_line,
+                end_line: range.end_line,
+                header_start_byte,
+                body_start_byte,
+                body_end_byte,
+            })
         })
         .collect()
 }
@@ -3264,6 +3348,14 @@ async fn deliver_request_error(request: Pending, error: String, events: &Languag
                 result: Err(error),
             })
             .await;
+    } else if request.command == EditorCommand::FoldingRanges {
+        let _ = events
+            .send(LanguageEvent::FoldingRanges {
+                path: request.path,
+                version: request.version,
+                result: Err(error),
+            })
+            .await;
     } else if request.command == EditorCommand::ProjectSourceRoots {
         let _ = events
             .send(LanguageEvent::ProjectSourceRoots {
@@ -3502,6 +3594,8 @@ pub struct LanguageTool {
     documents: HashMap<PathBuf, SyncedDocument>,
     semantic_highlights: HashMap<PathBuf, (i64, Vec<SemanticHighlight>)>,
     semantic_token_requests: HashMap<PathBuf, (Instant, i64)>,
+    folding_ranges: HashMap<PathBuf, (i64, Vec<FoldRegion>)>,
+    folding_range_requests: HashMap<PathBuf, (Instant, i64)>,
     pending_saves: std::collections::HashSet<PathBuf>,
     pending_maven_files: std::collections::HashSet<PathBuf>,
     maven_import_requested: bool,
@@ -3598,6 +3692,12 @@ impl LanguageTool {
         (*version == document.version).then_some((document.text.as_str(), highlights.as_slice()))
     }
 
+    pub fn folding_ranges(&self, path: &Path) -> Option<(&str, &[FoldRegion])> {
+        let document = self.documents.get(path)?;
+        let (version, ranges) = self.folding_ranges.get(path)?;
+        (*version == document.version).then_some((document.text.as_str(), ranges.as_slice()))
+    }
+
     pub fn set_repaint_context(&mut self, context: eframe::egui::Context) {
         self.repaint_context = Some(context);
     }
@@ -3692,6 +3792,8 @@ impl LanguageTool {
         self.documents.clear();
         self.semantic_highlights.clear();
         self.semantic_token_requests.clear();
+        self.folding_ranges.clear();
+        self.folding_range_requests.clear();
         self.pending_saves.clear();
         self.diagnostics.clear();
         self.completion = None;
@@ -4140,6 +4242,8 @@ impl LanguageTool {
                 self.diagnostics.remove(&path);
                 self.semantic_highlights.remove(&path);
                 self.semantic_token_requests.remove(&path);
+                self.folding_ranges.remove(&path);
+                self.folding_range_requests.remove(&path);
             }
         }
         for tab in tabs.iter().filter(|tab| eligible(&tab.path)) {
@@ -4173,6 +4277,11 @@ impl LanguageTool {
                         tab.path.clone(),
                         (Instant::now() + Duration::from_millis(200), version),
                     );
+                    self.folding_ranges.remove(&tab.path);
+                    self.folding_range_requests.insert(
+                        tab.path.clone(),
+                        (Instant::now() + Duration::from_millis(200), version),
+                    );
                     self.diagnostics.remove(&tab.path);
                     self.code_actions = None;
                     self.code_actions_error = None;
@@ -4200,6 +4309,10 @@ impl LanguageTool {
                         },
                     );
                     self.semantic_token_requests.insert(
+                        tab.path.clone(),
+                        (Instant::now() + Duration::from_millis(200), version),
+                    );
+                    self.folding_range_requests.insert(
                         tab.path.clone(),
                         (Instant::now() + Duration::from_millis(200), version),
                     );
@@ -4231,6 +4344,44 @@ impl LanguageTool {
                 .is_ok()
             {
                 self.semantic_token_requests.remove(&path);
+            }
+        }
+        let due_folding: Vec<_> = self
+            .folding_range_requests
+            .iter()
+            .filter(|(_, (deadline, _))| *deadline <= now)
+            .map(|(path, (_, version))| (path.clone(), *version))
+            .collect();
+        for (path, version) in due_folding {
+            let Some(document) = self
+                .documents
+                .get(&path)
+                .filter(|document| document.version == version)
+            else {
+                self.folding_range_requests.remove(&path);
+                continue;
+            };
+            if session
+                .try_command(LanguageCommand::Request {
+                    command: EditorCommand::FoldingRanges,
+                    path: path.clone(),
+                    project_root: self.root.clone().unwrap_or_default(),
+                    position: Position {
+                        line: 0,
+                        character: 0,
+                    },
+                    document_end: document_end_position(&document.text),
+                    range: document_line_range(&document.text, 0),
+                    diagnostics: Vec::new(),
+                    version,
+                    navigation_request_id: None,
+                    rename_to: None,
+                    tab_size: 4,
+                    insert_spaces: true,
+                })
+                .is_ok()
+            {
+                self.folding_range_requests.remove(&path);
             }
         }
     }
@@ -4419,6 +4570,19 @@ impl LanguageTool {
         }
         match update.event {
             LanguageEvent::ServerState(message) => self.summary = message,
+            LanguageEvent::FoldingRanges {
+                path,
+                version,
+                result: Ok(ranges),
+            } if self.current(&path, version) => {
+                if let Some(document) = self.documents.get(&path) {
+                    self.folding_ranges.insert(
+                        path,
+                        (version, resolve_fold_regions(&document.text, ranges)),
+                    );
+                }
+            }
+            LanguageEvent::FoldingRanges { .. } => {}
             LanguageEvent::SemanticTokens {
                 path,
                 version,

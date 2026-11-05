@@ -832,7 +832,7 @@ fn render_entries(
             let response = ui
                 .add(
                     egui::Button::selectable(focused_path.as_ref() == Some(&entry.path), label)
-                        .wrap_mode(egui::TextWrapMode::Extend),
+                        .wrap_mode(egui::TextWrapMode::Truncate),
                 )
                 .on_hover_text(entry.path.display().to_string());
             if focused_path.as_ref() == Some(&entry.path) && *focus_pending {

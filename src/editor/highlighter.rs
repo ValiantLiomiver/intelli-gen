@@ -99,6 +99,84 @@ fn semantic_color(token_type: &str, visuals: &egui::Visuals) -> Option<egui::Col
     }
 }
 
+pub(super) fn overlay_folded_regions(
+    job: &mut LayoutJob,
+    regions: &[crate::java::lsp::FoldRegion],
+    folded_lines: &std::collections::HashSet<u32>,
+    source_offset: usize,
+) {
+    let source_end = source_offset.saturating_add(job.text.len());
+    let mut hidden = regions
+        .iter()
+        .filter(|region| {
+            folded_lines.contains(&region.start_line)
+                && (source_offset == 0
+                    || (region.header_start_byte >= source_offset
+                        && region.header_start_byte < source_end))
+        })
+        .map(|region| {
+            (
+                region.body_start_byte.saturating_sub(source_offset),
+                region.body_end_byte.saturating_sub(source_offset),
+            )
+        })
+        .filter(|(start, end)| start < end && *start < job.text.len() && *end > 0)
+        .collect::<Vec<_>>();
+    hidden.sort_unstable();
+    let mut merged: Vec<(usize, usize)> = Vec::with_capacity(hidden.len());
+    for (start, end) in hidden {
+        let start = start.min(job.text.len());
+        let end = end.min(job.text.len());
+        if let Some(previous) = merged.last_mut()
+            && start <= previous.1
+        {
+            previous.1 = previous.1.max(end);
+        } else if start < end {
+            merged.push((start, end));
+        }
+    }
+    let mut region_index = 0;
+    let mut sections = Vec::with_capacity(job.sections.len() + merged.len() * 2);
+    for section in &job.sections {
+        let start = section.byte_range.start.0;
+        let end = section.byte_range.end.0;
+        while merged
+            .get(region_index)
+            .is_some_and(|(_, region_end)| *region_end <= start)
+        {
+            region_index += 1;
+        }
+        let mut cursor = start;
+        let mut index = region_index;
+        while let Some((fold_start, fold_end)) = merged.get(index).copied() {
+            if fold_start >= end {
+                break;
+            }
+            let hidden_start = fold_start.max(start);
+            let hidden_end = fold_end.min(end);
+            if hidden_end > cursor {
+                push_layout_piece(section, &mut sections, cursor, hidden_start, None);
+                let mut piece = section.clone();
+                piece.byte_range = ByteIndex(hidden_start)..ByteIndex(hidden_end);
+                if hidden_start != start {
+                    piece.leading_space = 0.0;
+                }
+                piece.format.font_id.size = 0.1;
+                piece.format.line_height = Some(0.0);
+                piece.format.color = egui::Color32::TRANSPARENT;
+                piece.format.background = egui::Color32::TRANSPARENT;
+                piece.format.underline = egui::Stroke::NONE;
+                piece.format.strikethrough = egui::Stroke::NONE;
+                sections.push(piece);
+                cursor = hidden_end;
+            }
+            index += 1;
+        }
+        push_layout_piece(section, &mut sections, cursor, end, None);
+    }
+    job.sections = sections;
+}
+
 fn syntax_set() -> &'static SyntaxSet {
     static SYNTAXES: OnceLock<SyntaxSet> = OnceLock::new();
     SYNTAXES.get_or_init(SyntaxSet::load_defaults_newlines)
