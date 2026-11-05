@@ -306,6 +306,13 @@ fn is_java_test_method_lines(
 pub struct CodeActionItem {
     pub title: String,
     pub edits: Vec<(Range, String)>,
+    pub command: Option<CodeActionCommand>,
+}
+
+#[derive(Clone, Debug)]
+pub struct CodeActionCommand {
+    command: String,
+    arguments: Vec<Value>,
 }
 #[derive(Clone, Debug)]
 pub struct CompletionItem {
@@ -1451,6 +1458,7 @@ enum LanguageCommand {
         tab_size: usize,
         insert_spaces: bool,
     },
+    ExecuteCodeAction(CodeActionCommand),
     SearchSymbols {
         query: String,
     },
@@ -2057,6 +2065,7 @@ async fn protocol(
     let root_uri = uri(&project.root)?;
     let mut semantic_legend = None;
     let mut folding_range_supported = false;
+    let mut execute_commands = std::collections::HashSet::new();
     send(input, json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
         "processId": std::process::id(), "clientInfo": {"name": "Intelli-gen", "version": env!("CARGO_PKG_VERSION")},
         "rootUri": root_uri, "workspaceFolders": [{"uri": root_uri, "name": project.root.file_name().unwrap_or_default().to_string_lossy()}],
@@ -2129,6 +2138,16 @@ async fn protocol(
                         &message["result"]["capabilities"]["foldingRangeProvider"];
                     folding_range_supported =
                         *folding_provider == true || folding_provider.is_object();
+                    execute_commands = message["result"]["capabilities"]["executeCommandProvider"]
+                        ["commands"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .take(256)
+                        .filter_map(Value::as_str)
+                        .filter(|command| !command.is_empty() && command.len() <= 512)
+                        .map(str::to_owned)
+                        .collect();
                     return Ok(());
                 }
                 server_message(input, &message, &settings, &root_uri, events).await?;
@@ -2156,6 +2175,7 @@ async fn protocol(
     let mut next_id = 2u64;
     let mut pending: HashMap<u64, Pending> = HashMap::new();
     let mut pending_symbols: HashMap<u64, (String, Instant)> = HashMap::new();
+    let mut pending_code_actions: HashMap<u64, (String, Instant)> = HashMap::new();
     let mut pending_semantic_tokens: HashMap<u64, PendingSemanticTokens> = HashMap::new();
     let mut semantic_request_ids: HashMap<PathBuf, u64> = HashMap::new();
     let mut debug_ports: HashMap<u64, (Instant, oneshot::Sender<Result<u16, LspError>>)> =
@@ -2276,6 +2296,26 @@ async fn protocol(
                         pending.insert(id, Pending { command, path, project_root, version, position, navigation_request_id, rename_to, sent: Instant::now() });
                         send(input, json!({"jsonrpc": "2.0", "id": id, "method": command.method(), "params": params})).await?;
                     }
+                    LanguageCommand::ExecuteCodeAction(command) => {
+                        if !execute_commands.contains(&command.command) {
+                            let _ = events.send(LanguageEvent::ServerState(
+                                "JDT LS did not advertise this Java action command".into(),
+                            )).await;
+                            continue;
+                        }
+                        if pending.len() + pending_symbols.len() + pending_code_actions.len() >= 32 {
+                            let _ = events.send(LanguageEvent::ServerState(
+                                "Too many Java requests pending; try again shortly".into(),
+                            )).await;
+                            continue;
+                        }
+                        let id = next_id;
+                        next_id += 1;
+                        pending_code_actions.insert(id, (command.command.clone(), Instant::now()));
+                        send(input, json!({"jsonrpc": "2.0", "id": id, "method": "workspace/executeCommand", "params": {
+                            "command": command.command, "arguments": command.arguments
+                        }})).await?;
+                    }
                     LanguageCommand::SearchSymbols { query } => {
                         let stale: Vec<_> = pending_symbols.keys().copied().collect();
                         for stale_id in stale {
@@ -2338,10 +2378,18 @@ async fn protocol(
                     };
                     let _ = events.send(LanguageEvent::WorkspaceSymbols { query, result }).await;
                 }
+                else if let Some((command, _)) = message.get("id").and_then(Value::as_u64).and_then(|id| pending_code_actions.remove(&id)) {
+                    let status = if let Some(error) = message.get("error") {
+                        format!("Java code action command failed ({command}): {error}")
+                    } else {
+                        format!("Java code action command completed: {command}")
+                    };
+                    let _ = events.send(LanguageEvent::ServerState(status)).await;
+                }
                 else if let Some(request) = message.get("id").and_then(Value::as_u64).and_then(|id| pending.remove(&id)) {
                     if let Some(error) = message.get("error") {
                         deliver_request_error(request, format!("Java request failed: {error}"), events).await;
-                    } else { deliver_response(request, &message["result"], events).await; }
+                    } else { deliver_response(request, &message["result"], events, &execute_commands).await; }
                 }
                 else if let Some(id) = message.get("id").and_then(Value::as_u64)
                     && let Some(request) = pending_semantic_tokens.remove(&id)
@@ -2394,6 +2442,17 @@ async fn protocol(
                             query,
                             result: Err("Java symbol search timed out".into()),
                         }).await;
+                    }
+                    notify(input, "$/cancelRequest", json!({"id": id})).await?;
+                }
+                let expired_code_actions: Vec<_> = pending_code_actions.iter()
+                    .filter(|(_, (_, sent))| sent.elapsed() > Duration::from_secs(30))
+                    .map(|(id, _)| *id).collect();
+                for id in expired_code_actions {
+                    if let Some((command, _)) = pending_code_actions.remove(&id) {
+                        let _ = events.send(LanguageEvent::ServerState(
+                            format!("Java code action command timed out: {command}"),
+                        )).await;
                     }
                     notify(input, "$/cancelRequest", json!({"id": id})).await?;
                 }
@@ -2631,7 +2690,12 @@ async fn server_message(
     Ok(())
 }
 
-async fn deliver_response(request: Pending, result: &Value, events: &LanguageEventSender) {
+async fn deliver_response(
+    request: Pending,
+    result: &Value,
+    events: &LanguageEventSender,
+    execute_commands: &std::collections::HashSet<String>,
+) {
     if request.rename_to.is_some() {
         let result = parse_rename_workspace_edits(&request.project_root, result);
         let _ = events
@@ -2809,7 +2873,7 @@ async fn deliver_response(request: Pending, result: &Value, events: &LanguageEve
             locations: locations(result),
         },
         EditorCommand::CodeActions => {
-            let result = parse_code_actions(&path, version, result);
+            let result = parse_code_actions(&path, version, result, execute_commands);
             LanguageEvent::CodeActions {
                 path,
                 version,
@@ -2932,6 +2996,7 @@ fn parse_code_actions(
     path: &Path,
     version: i64,
     value: &Value,
+    execute_commands: &std::collections::HashSet<String>,
 ) -> Result<Vec<CodeActionItem>, String> {
     if value.is_null() {
         return Ok(Vec::new());
@@ -2949,17 +3014,23 @@ fn parse_code_actions(
             || action
                 .get("disabled")
                 .is_some_and(|disabled| !disabled.is_null())
-            || action
-                .get("command")
-                .is_some_and(|command| !command.is_null())
         {
             continue;
         }
+        let raw_command = action
+            .get("command")
+            .filter(|command| !command.is_null())
+            .or_else(|| action.get("edit").is_none().then_some(action));
+        let command = raw_command.and_then(|raw| {
+            parse_code_action_command(if raw.is_string() { action } else { raw }, execute_commands)
+        });
+        if raw_command.is_some() && command.is_none() {
+            continue;
+        }
         let edit = &action["edit"];
-        if edit.is_null()
-            || edit["changeAnnotations"]
-                .as_object()
-                .is_some_and(|items| !items.is_empty())
+        if edit["changeAnnotations"]
+            .as_object()
+            .is_some_and(|items| !items.is_empty())
         {
             continue;
         }
@@ -3023,7 +3094,7 @@ fn parse_code_actions(
                 }
             }
         }
-        if valid && !edits.is_empty() {
+        if valid && (!edits.is_empty() || command.is_some()) {
             total_edits = total_edits
                 .checked_add(edits.len())
                 .ok_or("Too many code action edits")?;
@@ -3033,10 +3104,31 @@ fn parse_code_actions(
             result.push(CodeActionItem {
                 title: title.chars().take(256).collect(),
                 edits,
+                command,
             });
         }
     }
     Ok(result)
+}
+
+fn parse_code_action_command(
+    value: &Value,
+    execute_commands: &std::collections::HashSet<String>,
+) -> Option<CodeActionCommand> {
+    let command = value["command"]
+        .as_str()
+        .filter(|command| execute_commands.contains(*command))?;
+    let arguments = match value.get("arguments") {
+        None => Vec::new(),
+        Some(arguments) => arguments.as_array()?.clone(),
+    };
+    if arguments.len() > 100 || serde_json::to_vec(&arguments).ok()?.len() > 64 * 1024 {
+        return None;
+    }
+    Some(CodeActionCommand {
+        command: command.to_owned(),
+        arguments,
+    })
 }
 
 fn same_document_path(candidate: &Path, current: &Path) -> bool {
@@ -4889,7 +4981,7 @@ impl LanguageTool {
         &mut self,
         index: usize,
         document: &mut Document,
-    ) -> Result<String, LspError> {
+    ) -> Result<(String, Option<CodeActionCommand>), LspError> {
         let (path, version, position, action) = self
             .code_actions
             .as_ref()
@@ -4911,9 +5003,19 @@ impl LanguageTool {
             ));
         }
         let title = action.title.clone();
-        document.apply_lsp_edits(&action.edits).map_err(LspError)?;
+        if !action.edits.is_empty() {
+            document.apply_lsp_edits(&action.edits).map_err(LspError)?;
+        }
+        let command = action.command.clone();
         self.code_actions = None;
-        Ok(title)
+        Ok((title, command))
+    }
+
+    pub fn execute_code_action(&self, command: CodeActionCommand) -> Result<(), LspError> {
+        self.session
+            .as_ref()
+            .ok_or_else(|| LspError(self.summary.clone()))?
+            .try_command(LanguageCommand::ExecuteCodeAction(command))
     }
 
     pub fn move_completion_selection(&mut self, direction: i32) -> Option<usize> {

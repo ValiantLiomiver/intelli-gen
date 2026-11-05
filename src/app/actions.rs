@@ -1858,9 +1858,15 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                     .and_then(|tab_index| state.editor_tabs.get_mut(tab_index))
                 {
                     match state.language.apply_code_action(index, &mut tab.document) {
-                        Ok(title) => {
+                        Ok((title, command)) => {
                             tab.restore_document_cursor();
                             state.language.summary = format!("Applied Java code action: {title}");
+                            if let Some(command) = command {
+                                state.language.sync_documents(&state.editor_tabs);
+                                if let Err(error) = state.language.execute_code_action(command) {
+                                    state.language.summary = error.to_string();
+                                }
+                            }
                         }
                         Err(error) => state.language.summary = error.to_string(),
                     }
