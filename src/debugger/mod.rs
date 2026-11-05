@@ -209,31 +209,6 @@ pub fn handle_action(tool: &mut DebugTool, action: crate::app::events::DebuggerA
             selection,
             request,
         } if epoch == controller.epoch && selection == tool.inspector.selection => request,
-        Action::Continue => {
-            let Some(thread) = tool.inspector.selected_thread else {
-                return;
-            };
-            Request::Continue(thread)
-        }
-        Action::Pause => Request::Pause,
-        Action::StepOver => {
-            let Some(thread) = tool.inspector.selected_thread else {
-                return;
-            };
-            Request::StepOver(thread)
-        }
-        Action::StepInto => {
-            let Some(thread) = tool.inspector.selected_thread else {
-                return;
-            };
-            Request::StepInto(thread)
-        }
-        Action::StepOut => {
-            let Some(thread) = tool.inspector.selected_thread else {
-                return;
-            };
-            Request::StepOut(thread)
-        }
         _ => return,
     };
     if matches!(

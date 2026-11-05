@@ -212,11 +212,6 @@ pub enum GitAction {
 pub enum DebuggerAction {
     Start,
     Stop,
-    Continue,
-    Pause,
-    StepOver,
-    StepInto,
-    StepOut,
     ToggleBreakpoint {
         source: PathBuf,
         line: u32,
