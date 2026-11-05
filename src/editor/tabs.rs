@@ -373,6 +373,33 @@ fn auto_pair_java_character(ui: &egui::Ui, text: &mut String, editor_id: egui::I
             state.store(ui.ctx(), editor_id);
             return JavaPairEdit::SkippedClosing;
         }
+        if typed == "}" {
+            let suffix = &text[caret_byte..];
+            let after_newline = if suffix.starts_with("\r\n") {
+                Some(caret_byte + 2)
+            } else if suffix.starts_with('\n') {
+                Some(caret_byte + 1)
+            } else {
+                None
+            };
+            if let Some(after_newline) = after_newline {
+                let closing_brace = after_newline
+                    + text[after_newline..]
+                        .bytes()
+                        .take_while(|byte| matches!(byte, b' ' | b'\t'))
+                        .count();
+                if text.as_bytes().get(closing_brace) == Some(&b'}') {
+                    let next = text[..closing_brace + 1].chars().count();
+                    state
+                        .cursor
+                        .set_char_range(Some(egui::text::CCursorRange::one(
+                            egui::text::CCursor::new(next),
+                        )));
+                    state.store(ui.ctx(), editor_id);
+                    return JavaPairEdit::SkippedClosing;
+                }
+            }
+        }
         text.insert_str(caret_byte, &typed);
         let next = caret + 1;
         state
