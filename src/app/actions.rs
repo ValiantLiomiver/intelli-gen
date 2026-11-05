@@ -772,7 +772,22 @@ pub fn keyboard_shortcuts(ctx: &egui::Context, state: &mut AppState) {
             super::search_everywhere::SearchTab::JavaSymbols,
         ));
     }
-    if ctx.input_mut(|input| {
+    if ctx.input_mut(|input| input.consume_key(egui::Modifiers::ALT, egui::Key::F12)) {
+        if state.settings.show_tool_window && state.active_panel == super::ActivePanel::Terminal {
+            state.settings.show_tool_window = false;
+            state.terminal.close();
+            save_settings(state);
+        } else {
+            state.set_active_panel(super::ActivePanel::Terminal);
+            if !state.settings.show_tool_window {
+                state.settings.show_tool_window = true;
+                save_settings(state);
+            }
+            if state.project.is_some() && state.terminal.session.is_none() {
+                state.enqueue(AppEvent::Terminal(super::events::TerminalAction::Open));
+            }
+        }
+    } else if ctx.input_mut(|input| {
         input.consume_key(
             egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
             egui::Key::F12,

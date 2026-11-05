@@ -450,6 +450,13 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
                     && ui.button(translator.text(if state.gradle_collapsed { "Show Gradle sidebar" } else { "Hide Gradle sidebar" })).clicked() {
                     state.enqueue(AppEvent::Gradle(super::events::GradleAction::ToggleCollapsed));
                 }
+                if ui.button(crate::i18n::ui_text(ui, "Terminal    ⌥F12")).clicked() {
+                    state.enqueue(AppEvent::ShowPanel(ActivePanel::Terminal));
+                    if state.project.is_some() && state.terminal.session.is_none() {
+                        state.enqueue(AppEvent::Terminal(super::events::TerminalAction::Open));
+                    }
+                    ui.close();
+                }
                 if ui.button(crate::i18n::ui_text(ui, "Problems    ⌘6")).clicked() {
                     state.enqueue(AppEvent::ShowPanel(ActivePanel::Problems));
                     ui.close();

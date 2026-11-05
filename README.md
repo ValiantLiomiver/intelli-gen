@@ -53,6 +53,7 @@ The command-line link accepts the same optional project or file path: `dist/inte
 | Last edit location | `⇧⌘⌫` |
 | Toggle line bookmark / show bookmarks | `F3` / `⌘F3` |
 | Jump to last tool window / hide all tool windows | `F12` / `⌘⇧F12` |
+| Toggle Terminal tool window | `⌥F12` |
 | Reformat Java file | `⌥⌘L` |
 | Organize Java imports | `⌃⌥O` |
 | Go to Java symbol | `⌘⌥O` |
