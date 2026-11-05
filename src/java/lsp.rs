@@ -79,6 +79,50 @@ pub struct Position {
     pub line: u32,
     pub character: u32,
 }
+
+const SEMANTIC_TOKEN_TYPES: &[&str] = &[
+    "namespace",
+    "class",
+    "interface",
+    "enum",
+    "enumMember",
+    "type",
+    "typeParameter",
+    "method",
+    "property",
+    "variable",
+    "parameter",
+    "modifier",
+    "keyword",
+    "annotation",
+    "annotationMember",
+    "record",
+    "recordComponent",
+];
+const SEMANTIC_TOKEN_MODIFIERS: &[&str] = &[
+    "abstract",
+    "static",
+    "readonly",
+    "deprecated",
+    "declaration",
+    "documentation",
+    "public",
+    "private",
+    "protected",
+    "native",
+    "generic",
+    "typeArgument",
+    "importDeclaration",
+    "constructor",
+];
+
+#[derive(Clone, Debug)]
+pub struct SemanticHighlight {
+    pub start_byte: usize,
+    pub end_byte: usize,
+    pub token_type: String,
+    pub declaration: bool,
+}
 #[derive(Clone, Copy, Debug, serde::Deserialize, serde::Serialize)]
 pub struct Range {
     pub start: Position,
@@ -493,6 +537,11 @@ pub struct SignatureInformation {
 }
 #[derive(Clone, Debug)]
 pub enum LanguageEvent {
+    SemanticTokens {
+        path: PathBuf,
+        version: i64,
+        result: Result<Vec<SemanticHighlight>, String>,
+    },
     Diagnostics {
         path: PathBuf,
         version: Option<i64>,
@@ -1363,6 +1412,11 @@ enum LanguageCommand {
     },
     Save(PathBuf),
     Close(PathBuf),
+    SemanticTokens {
+        path: PathBuf,
+        text: String,
+        version: i64,
+    },
     Request {
         command: EditorCommand,
         path: PathBuf,
@@ -1961,6 +2015,15 @@ struct Pending {
     sent: Instant,
 }
 
+struct PendingSemanticTokens {
+    path: PathBuf,
+    text: String,
+    version: i64,
+    token_types: Vec<String>,
+    token_modifiers: Vec<String>,
+    sent: Instant,
+}
+
 async fn protocol(
     project: &ProjectModel,
     bundles: &[PathBuf],
@@ -1972,6 +2035,7 @@ async fn protocol(
     cancellation: &mut watch::Receiver<bool>,
 ) -> Result<(), LspError> {
     let root_uri = uri(&project.root)?;
+    let mut semantic_legend = None;
     send(input, json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
         "processId": std::process::id(), "clientInfo": {"name": "Intelli-gen", "version": env!("CARGO_PKG_VERSION")},
         "rootUri": root_uri, "workspaceFolders": [{"uri": root_uri, "name": project.root.file_name().unwrap_or_default().to_string_lossy()}],
@@ -1984,6 +2048,11 @@ async fn protocol(
                 "documentSymbol": {"hierarchicalDocumentSymbolSupport": true},
                 "codeAction": {"codeActionLiteralSupport": {"codeActionKind": {"valueSet": ["quickfix", "refactor", "source"]}}},
                 "completion": {"completionItem": {"snippetSupport": true, "resolveSupport": {"properties": []}}},
+                "semanticTokens": {"requests": {"range": false, "full": {"delta": false}},
+                    "tokenTypes": SEMANTIC_TOKEN_TYPES, "tokenModifiers": SEMANTIC_TOKEN_MODIFIERS,
+                    "formats": ["relative"], "multilineTokenSupport": false,
+                    "overlappingTokenSupport": false, "serverCancelSupport": false,
+                    "augmentsSyntaxTokens": true},
                 "signatureHelp": {"signatureInformation": {"documentationFormat": ["plaintext"]}},
                 "hover": {"contentFormat": ["plaintext"]}, "definition": {"linkSupport": true},
                 "implementation": {"linkSupport": true},
@@ -2013,6 +2082,27 @@ async fn protocol(
                             "JDT LS selected an unsupported position encoding".into(),
                         ));
                     }
+                    let provider = &message["result"]["capabilities"]["semanticTokensProvider"];
+                    let supports_full = provider["full"] == true || provider["full"].is_object();
+                    if supports_full {
+                        let token_types = provider["legend"]["tokenTypes"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .filter_map(Value::as_str)
+                            .map(str::to_owned)
+                            .collect::<Vec<_>>();
+                        let token_modifiers = provider["legend"]["tokenModifiers"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .filter_map(Value::as_str)
+                            .map(str::to_owned)
+                            .collect::<Vec<_>>();
+                        if !token_types.is_empty() {
+                            semantic_legend = Some((token_types, token_modifiers));
+                        }
+                    }
                     return Ok(());
                 }
                 server_message(input, &message, &settings, &root_uri, events).await?;
@@ -2040,6 +2130,8 @@ async fn protocol(
     let mut next_id = 2u64;
     let mut pending: HashMap<u64, Pending> = HashMap::new();
     let mut pending_symbols: HashMap<u64, (String, Instant)> = HashMap::new();
+    let mut pending_semantic_tokens: HashMap<u64, PendingSemanticTokens> = HashMap::new();
+    let mut semantic_request_ids: HashMap<PathBuf, u64> = HashMap::new();
     let mut debug_ports: HashMap<u64, (Instant, oneshot::Sender<Result<u16, LspError>>)> =
         HashMap::new();
     let mut classpaths: HashMap<u64, PendingClasspaths> = HashMap::new();
@@ -2090,7 +2182,44 @@ async fn protocol(
                     LanguageCommand::Open { path, text, version } => notify(input, "textDocument/didOpen", json!({"textDocument": {"uri": uri(&path)?, "languageId": "java", "version": version, "text": text}})).await?,
                     LanguageCommand::Change { path, text, version } => notify(input, "textDocument/didChange", json!({"textDocument": {"uri": uri(&path)?, "version": version}, "contentChanges": [{"text": text}]})).await?,
                     LanguageCommand::Save(path) => notify(input, "textDocument/didSave", json!({"textDocument": {"uri": uri(&path)?}})).await?,
-                    LanguageCommand::Close(path) => notify(input, "textDocument/didClose", json!({"textDocument": {"uri": uri(&path)?}})).await?,
+                    LanguageCommand::Close(path) => {
+                        if let Some(id) = semantic_request_ids.remove(&path) {
+                            pending_semantic_tokens.remove(&id);
+                            notify(input, "$/cancelRequest", json!({"id": id})).await?;
+                        }
+                        notify(input, "textDocument/didClose", json!({"textDocument": {"uri": uri(&path)?}})).await?;
+                    }
+                    LanguageCommand::SemanticTokens { path, text, version } => {
+                        let Some((token_types, token_modifiers)) = semantic_legend.as_ref() else {
+                            continue;
+                        };
+                        if let Some(id) = semantic_request_ids.remove(&path) {
+                            pending_semantic_tokens.remove(&id);
+                            notify(input, "$/cancelRequest", json!({"id": id})).await?;
+                        }
+                        if pending.len() + pending_symbols.len() + pending_semantic_tokens.len() >= 32 {
+                            let _ = events.send(LanguageEvent::SemanticTokens {
+                                path,
+                                version,
+                                result: Err("Java language service is busy".into()),
+                            }).await;
+                            continue;
+                        }
+                        let id = next_id;
+                        next_id += 1;
+                        semantic_request_ids.insert(path.clone(), id);
+                        pending_semantic_tokens.insert(id, PendingSemanticTokens {
+                            path: path.clone(),
+                            text,
+                            version,
+                            token_types: token_types.clone(),
+                            token_modifiers: token_modifiers.clone(),
+                            sent: Instant::now(),
+                        });
+                        send(input, json!({"jsonrpc": "2.0", "id": id,
+                            "method": "textDocument/semanticTokens/full",
+                            "params": {"textDocument": {"uri": uri(&path)?}}})).await?;
+                    }
                     LanguageCommand::Request { command, path, project_root, position, document_end, range, diagnostics, version, navigation_request_id, rename_to, tab_size, insert_spaces } => {
                         let id = next_id; next_id += 1;
                         let mut params = json!({"textDocument": {"uri": uri(&path)?}, "position": position});
@@ -2184,6 +2313,21 @@ async fn protocol(
                         deliver_request_error(request, format!("Java request failed: {error}"), events).await;
                     } else { deliver_response(request, &message["result"], events).await; }
                 }
+                else if let Some(id) = message.get("id").and_then(Value::as_u64)
+                    && let Some(request) = pending_semantic_tokens.remove(&id)
+                {
+                    semantic_request_ids.remove(&request.path);
+                    let result = if let Some(error) = message.get("error") {
+                        Err(format!("Semantic highlighting failed: {error}"))
+                    } else {
+                        parse_semantic_tokens(&message["result"], &request)
+                    };
+                    let _ = events.send(LanguageEvent::SemanticTokens {
+                        path: request.path,
+                        version: request.version,
+                        result,
+                    }).await;
+                }
             }
             _ = heartbeat.tick() => {
                 let expired_imports: Vec<_> = maven_imports.iter().filter(|(_, sent)| sent.elapsed() > Duration::from_secs(90)).map(|(id, _)| *id).collect();
@@ -2223,6 +2367,20 @@ async fn protocol(
                     }
                     notify(input, "$/cancelRequest", json!({"id": id})).await?;
                 }
+                let expired_semantic: Vec<_> = pending_semantic_tokens.iter()
+                    .filter(|(_, request)| request.sent.elapsed() > Duration::from_secs(30))
+                    .map(|(id, _)| *id).collect();
+                for id in expired_semantic {
+                    if let Some(request) = pending_semantic_tokens.remove(&id) {
+                        semantic_request_ids.remove(&request.path);
+                        let _ = events.send(LanguageEvent::SemanticTokens {
+                            path: request.path,
+                            version: request.version,
+                            result: Err("Semantic highlighting timed out".into()),
+                        }).await;
+                    }
+                    notify(input, "$/cancelRequest", json!({"id": id})).await?;
+                }
             }
         }
     }
@@ -2247,6 +2405,124 @@ async fn protocol(
     .await;
     notify(input, "exit", Value::Null).await?;
     Ok(())
+}
+
+fn parse_semantic_tokens(
+    result: &Value,
+    request: &PendingSemanticTokens,
+) -> Result<Vec<SemanticHighlight>, String> {
+    const MAX_TOKEN_VALUES: usize = 1_000_000;
+    if result.is_null() {
+        return Ok(Vec::new());
+    }
+    let data = result["data"]
+        .as_array()
+        .ok_or_else(|| "JDT LS returned invalid semantic tokens".to_owned())?;
+    if data.len() > MAX_TOKEN_VALUES || data.len() % 5 != 0 {
+        return Err("JDT LS returned an oversized or malformed semantic token list".into());
+    }
+    let declaration_bit = request
+        .token_modifiers
+        .iter()
+        .position(|modifier| modifier == "declaration")
+        .filter(|index| *index < u32::BITS as usize)
+        .map(|index| 1u32 << index);
+    let mut result_tokens = Vec::with_capacity(data.len() / 5);
+    let mut line_starts = vec![0];
+    line_starts.extend(request.text.match_indices('\n').map(|(index, _)| index + 1));
+    let mut line = 0u32;
+    let mut start = 0u32;
+    let mut previous_end = None;
+    for token in data.chunks_exact(5) {
+        let delta_line = token[0]
+            .as_u64()
+            .and_then(|value| u32::try_from(value).ok())
+            .ok_or_else(|| "JDT LS returned an invalid semantic token line".to_owned())?;
+        let delta_start = token[1]
+            .as_u64()
+            .and_then(|value| u32::try_from(value).ok())
+            .ok_or_else(|| "JDT LS returned an invalid semantic token column".to_owned())?;
+        let length = token[2]
+            .as_u64()
+            .and_then(|value| u32::try_from(value).ok())
+            .filter(|value| *value > 0)
+            .ok_or_else(|| "JDT LS returned an invalid semantic token length".to_owned())?;
+        let token_type = token[3]
+            .as_u64()
+            .and_then(|value| usize::try_from(value).ok())
+            .and_then(|index| request.token_types.get(index))
+            .cloned();
+        let modifiers = token[4]
+            .as_u64()
+            .and_then(|value| u32::try_from(value).ok())
+            .ok_or_else(|| "JDT LS returned invalid semantic token modifiers".to_owned())?;
+        line = line
+            .checked_add(delta_line)
+            .ok_or_else(|| "JDT LS semantic token line overflowed".to_owned())?;
+        start = if delta_line == 0 {
+            start
+                .checked_add(delta_start)
+                .ok_or_else(|| "JDT LS semantic token column overflowed".to_owned())?
+        } else {
+            delta_start
+        };
+        let end = start
+            .checked_add(length)
+            .ok_or_else(|| "JDT LS semantic token range overflowed".to_owned())?;
+        if previous_end.is_some_and(|previous| (line, start) < previous) {
+            return Err("JDT LS returned overlapping semantic tokens".into());
+        }
+        let start_byte = utf16_position_to_byte(&request.text, &line_starts, line, start)
+            .ok_or_else(|| "JDT LS returned a semantic token outside the document".to_owned())?;
+        let end_byte = utf16_position_to_byte(&request.text, &line_starts, line, end)
+            .ok_or_else(|| "JDT LS returned a semantic token outside the document".to_owned())?;
+        if end_byte <= start_byte {
+            return Err("JDT LS returned an empty semantic token range".into());
+        }
+        if let Some(token_type) = token_type {
+            result_tokens.push(SemanticHighlight {
+                start_byte,
+                end_byte,
+                token_type,
+                declaration: declaration_bit.is_some_and(|bit| modifiers & bit != 0),
+            });
+        }
+        previous_end = Some((line, end));
+    }
+    Ok(result_tokens)
+}
+
+fn utf16_position_to_byte(
+    text: &str,
+    line_starts: &[usize],
+    line: u32,
+    column: u32,
+) -> Option<usize> {
+    let line = usize::try_from(line).ok()?;
+    let line_start = *line_starts.get(line)?;
+    let line_end = line_starts.get(line + 1).copied().unwrap_or(text.len());
+    let mut content = text.get(line_start..line_end)?;
+    if let Some(without_newline) = content.strip_suffix('\n') {
+        content = without_newline;
+    }
+    if let Some(without_cr) = content.strip_suffix('\r') {
+        content = without_cr;
+    }
+    byte_at_utf16_column(content, line_start, column)
+}
+
+fn byte_at_utf16_column(line: &str, line_start: usize, column: u32) -> Option<usize> {
+    let mut utf16_column = 0u32;
+    for (byte, character) in line.char_indices() {
+        if utf16_column == column {
+            return Some(line_start + byte);
+        }
+        utf16_column = utf16_column.checked_add(character.len_utf16() as u32)?;
+        if utf16_column > column {
+            return None;
+        }
+    }
+    (utf16_column == column).then_some(line_start + line.len())
 }
 
 async fn server_message(
@@ -3224,6 +3500,8 @@ pub struct LanguageTool {
     pub tooling: ToolingSnapshot,
     repaint_context: Option<eframe::egui::Context>,
     documents: HashMap<PathBuf, SyncedDocument>,
+    semantic_highlights: HashMap<PathBuf, (i64, Vec<SemanticHighlight>)>,
+    semantic_token_requests: HashMap<PathBuf, (Instant, i64)>,
     pending_saves: std::collections::HashSet<PathBuf>,
     pending_maven_files: std::collections::HashSet<PathBuf>,
     maven_import_requested: bool,
@@ -3312,6 +3590,12 @@ impl LanguageTool {
                 .root
                 .as_ref()
                 .is_some_and(|root| path.starts_with(root))
+    }
+
+    pub fn semantic_highlights(&self, path: &Path) -> Option<(&str, &[SemanticHighlight])> {
+        let document = self.documents.get(path)?;
+        let (version, highlights) = self.semantic_highlights.get(path)?;
+        (*version == document.version).then_some((document.text.as_str(), highlights.as_slice()))
     }
 
     pub fn set_repaint_context(&mut self, context: eframe::egui::Context) {
@@ -3406,6 +3690,8 @@ impl LanguageTool {
         self.lombok_warning = None;
         self.pending_maven_files.clear();
         self.documents.clear();
+        self.semantic_highlights.clear();
+        self.semantic_token_requests.clear();
         self.pending_saves.clear();
         self.diagnostics.clear();
         self.completion = None;
@@ -3852,6 +4138,8 @@ impl LanguageTool {
             {
                 self.documents.remove(&path);
                 self.diagnostics.remove(&path);
+                self.semantic_highlights.remove(&path);
+                self.semantic_token_requests.remove(&path);
             }
         }
         for tab in tabs.iter().filter(|tab| eligible(&tab.path)) {
@@ -3880,6 +4168,11 @@ impl LanguageTool {
                     self.next_version = version;
                     previous.version = version;
                     previous.text.clone_from(&document.text);
+                    self.semantic_highlights.remove(&tab.path);
+                    self.semantic_token_requests.insert(
+                        tab.path.clone(),
+                        (Instant::now() + Duration::from_millis(200), version),
+                    );
                     self.diagnostics.remove(&tab.path);
                     self.code_actions = None;
                     self.code_actions_error = None;
@@ -3906,7 +4199,38 @@ impl LanguageTool {
                             version,
                         },
                     );
+                    self.semantic_token_requests.insert(
+                        tab.path.clone(),
+                        (Instant::now() + Duration::from_millis(200), version),
+                    );
                 }
+            }
+        }
+        let now = Instant::now();
+        let due: Vec<_> = self
+            .semantic_token_requests
+            .iter()
+            .filter(|(_, (deadline, _))| *deadline <= now)
+            .map(|(path, (_, version))| (path.clone(), *version))
+            .collect();
+        for (path, version) in due {
+            let Some(document) = self
+                .documents
+                .get(&path)
+                .filter(|document| document.version == version)
+            else {
+                self.semantic_token_requests.remove(&path);
+                continue;
+            };
+            if session
+                .try_command(LanguageCommand::SemanticTokens {
+                    path: path.clone(),
+                    text: document.text.clone(),
+                    version,
+                })
+                .is_ok()
+            {
+                self.semantic_token_requests.remove(&path);
             }
         }
     }
@@ -4095,6 +4419,14 @@ impl LanguageTool {
         }
         match update.event {
             LanguageEvent::ServerState(message) => self.summary = message,
+            LanguageEvent::SemanticTokens {
+                path,
+                version,
+                result: Ok(highlights),
+            } if self.current(&path, version) => {
+                self.semantic_highlights.insert(path, (version, highlights));
+            }
+            LanguageEvent::SemanticTokens { .. } => {}
             LanguageEvent::Diagnostics {
                 path,
                 version,

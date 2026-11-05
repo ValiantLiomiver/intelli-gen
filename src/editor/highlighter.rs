@@ -3,13 +3,100 @@ use std::path::Path;
 use std::sync::OnceLock;
 
 use super::document::PAGED_EDITOR_BYTES;
-use eframe::egui::{self, text::LayoutJob};
+use crate::java::lsp::SemanticHighlight;
+use eframe::egui::{
+    self,
+    text::{ByteIndex, LayoutJob},
+};
 use syntect::easy::HighlightLines;
 use syntect::highlighting::ThemeSet;
 use syntect::parsing::{ParseState, ScopeStack, SyntaxSet};
 use syntect::util::LinesWithEndings;
 
 pub const MAX_HIGHLIGHT_BYTES: usize = PAGED_EDITOR_BYTES;
+
+pub(super) fn overlay_semantic_highlights(
+    job: &mut LayoutJob,
+    highlights: &[SemanticHighlight],
+    source_offset: usize,
+    visuals: &egui::Visuals,
+) {
+    let mut sections = Vec::with_capacity(job.sections.len() + highlights.len());
+    let mut token_index = highlights.partition_point(|token| token.end_byte <= source_offset);
+    for section in &job.sections {
+        let start = section.byte_range.start.0;
+        let end = section.byte_range.end.0;
+        let absolute_start = source_offset.saturating_add(start);
+        let absolute_end = source_offset.saturating_add(end);
+        while highlights
+            .get(token_index)
+            .is_some_and(|token| token.end_byte <= absolute_start)
+        {
+            token_index += 1;
+        }
+        let mut cursor = start;
+        let mut index = token_index;
+        while let Some(token) = highlights.get(index) {
+            if token.start_byte >= absolute_end {
+                break;
+            }
+            let token_start = token.start_byte.saturating_sub(source_offset).max(start);
+            let token_end = token.end_byte.saturating_sub(source_offset).min(end);
+            if let Some(color) = semantic_color(&token.token_type, visuals)
+                && token_end > cursor
+            {
+                push_layout_piece(section, &mut sections, cursor, token_start, None);
+                push_layout_piece(
+                    section,
+                    &mut sections,
+                    token_start,
+                    token_end,
+                    Some((color, token.declaration)),
+                );
+                cursor = token_end;
+            }
+            index += 1;
+        }
+        push_layout_piece(section, &mut sections, cursor, end, None);
+    }
+    job.sections = sections;
+}
+
+fn push_layout_piece(
+    section: &egui::text::LayoutSection,
+    sections: &mut Vec<egui::text::LayoutSection>,
+    start: usize,
+    end: usize,
+    semantic: Option<(egui::Color32, bool)>,
+) {
+    if start >= end {
+        return;
+    }
+    let mut piece = section.clone();
+    piece.byte_range = ByteIndex(start)..ByteIndex(end);
+    if start != section.byte_range.start.0 {
+        piece.leading_space = 0.0;
+    }
+    if let Some((color, declaration)) = semantic {
+        piece.format.color = color;
+        if declaration {
+            piece.format.underline = egui::Stroke::new(1.0, color);
+        }
+    }
+    sections.push(piece);
+}
+
+fn semantic_color(token_type: &str, visuals: &egui::Visuals) -> Option<egui::Color32> {
+    match token_type {
+        "class" | "interface" | "enum" | "record" | "type" | "annotation" => {
+            Some(visuals.hyperlink_color)
+        }
+        "method" | "enumMember" => Some(visuals.warn_fg_color),
+        "field" | "property" | "recordComponent" => Some(visuals.selection.stroke.color),
+        "parameter" | "variable" => Some(visuals.strong_text_color()),
+        _ => None,
+    }
+}
 
 fn syntax_set() -> &'static SyntaxSet {
     static SYNTAXES: OnceLock<SyntaxSet> = OnceLock::new();

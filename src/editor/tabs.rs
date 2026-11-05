@@ -951,6 +951,7 @@ impl EditorTab {
         indent_size: usize,
         continuation_indent_size: usize,
         insert_spaces: bool,
+        semantic: Option<(&str, &[crate::java::lsp::SemanticHighlight])>,
     ) -> (Option<super::GutterBreakpointAction>, Option<egui::Pos2>) {
         if self.document.text.len() > PAGED_EDITOR_BYTES {
             self.active_snippet_tab_stop = None;
@@ -972,6 +973,7 @@ impl EditorTab {
                     indent_size,
                     continuation_indent_size,
                     insert_spaces,
+                    semantic,
                 ),
                 None,
             );
@@ -1062,6 +1064,16 @@ impl EditorTab {
         let highlighter = &mut self.highlighter;
         let mut layouter = |ui: &egui::Ui, buffer: &dyn egui::TextBuffer, _width: f32| {
             let mut job = highlighter.layout(ui, buffer.as_str(), language);
+            if let Some((source, highlights)) = semantic
+                && source == buffer.as_str()
+            {
+                super::highlighter::overlay_semantic_highlights(
+                    &mut job,
+                    highlights,
+                    0,
+                    ui.visuals(),
+                );
+            }
             job.wrap.max_width = f32::INFINITY;
             ui.fonts_mut(|fonts| fonts.layout_job(job))
         };
@@ -1283,6 +1295,7 @@ impl EditorTab {
         indent_size: usize,
         continuation_indent_size: usize,
         insert_spaces: bool,
+        semantic: Option<(&str, &[crate::java::lsp::SemanticHighlight])>,
     ) -> Option<super::GutterBreakpointAction> {
         ui.colored_label(ui.visuals().warn_fg_color,
             crate::i18n::ui_text(ui, "Large file: editing is limited to the visible page. Save writes the complete document."));
@@ -1440,6 +1453,18 @@ impl EditorTab {
                 buffer.as_str(),
                 super::highlighter::SourceLanguage::for_path(&self.path),
             );
+            if let Some((source, highlights)) = semantic
+                && source
+                    .get(self.page_start..self.page_start.saturating_add(buffer.as_str().len()))
+                    == Some(buffer.as_str())
+            {
+                super::highlighter::overlay_semantic_highlights(
+                    &mut job,
+                    highlights,
+                    self.page_start,
+                    ui.visuals(),
+                );
+            }
             job.wrap.max_width = f32::INFINITY;
             ui.fonts_mut(|fonts| fonts.layout_job(job))
         };
@@ -1633,6 +1658,9 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
         .as_ref()
         .and_then(|path| state.language.diagnostics.get(path))
         .map_or(&[][..], Vec::as_slice);
+    let semantic = active_path
+        .as_deref()
+        .and_then(|path| state.language.semantic_highlights(path));
     let bookmark_lines: Vec<_> = state
         .project
         .as_ref()
@@ -1792,6 +1820,7 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
             indent_size,
             continuation_indent_size,
             insert_spaces,
+            semantic,
         );
         if tab.document.revision != revision {
             let new_line_count = tab.document.text.matches('\n').count() + 1;
