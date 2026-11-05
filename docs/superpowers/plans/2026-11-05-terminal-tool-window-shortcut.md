@@ -38,6 +38,9 @@
 Route the existing Find Action Terminal entry through the same idempotent open
 event, show the Terminal panel, and preserve any active session.
 
+Route the View menu and keyboard shortcut through one toggle helper so both
+hide an active Terminal panel without closing its PTY.
+
 ## Execution record
 
 - `cargo fmt --check` passed.

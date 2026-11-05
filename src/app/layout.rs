@@ -451,7 +451,7 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
                     state.enqueue(AppEvent::Gradle(super::events::GradleAction::ToggleCollapsed));
                 }
                 if ui.button(crate::i18n::ui_text(ui, "Terminal    ⌥F12")).clicked() {
-                    state.enqueue(AppEvent::Terminal(super::events::TerminalAction::Open));
+                    actions::toggle_terminal_tool_window(state);
                     ui.close();
                 }
                 if ui.button(crate::i18n::ui_text(ui, "Problems    ⌘6")).clicked() {

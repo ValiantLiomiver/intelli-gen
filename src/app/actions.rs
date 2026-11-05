@@ -773,12 +773,7 @@ pub fn keyboard_shortcuts(ctx: &egui::Context, state: &mut AppState) {
         ));
     }
     if ctx.input_mut(|input| input.consume_key(egui::Modifiers::ALT, egui::Key::F12)) {
-        if state.settings.show_tool_window && state.active_panel == super::ActivePanel::Terminal {
-            state.settings.show_tool_window = false;
-            save_settings(state);
-        } else {
-            state.enqueue(AppEvent::Terminal(super::events::TerminalAction::Open));
-        }
+        toggle_terminal_tool_window(state);
     } else if ctx.input_mut(|input| {
         input.consume_key(
             egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
@@ -904,6 +899,15 @@ pub fn keyboard_shortcuts(ctx: &egui::Context, state: &mut AppState) {
         state.enqueue(AppEvent::SearchEverywhereOpen(
             super::search_everywhere::SearchTab::JavaClasses,
         ));
+    }
+}
+
+pub(super) fn toggle_terminal_tool_window(state: &mut AppState) {
+    if state.settings.show_tool_window && state.active_panel == super::ActivePanel::Terminal {
+        state.settings.show_tool_window = false;
+        save_settings(state);
+    } else {
+        state.enqueue(AppEvent::Terminal(super::events::TerminalAction::Open));
     }
 }
 
