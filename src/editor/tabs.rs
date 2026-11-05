@@ -380,12 +380,14 @@ fn auto_pair_java_character(
     let caret = primary;
     if close.is_none() {
         let caret_byte = byte_index(text, caret);
-        if text[caret_byte..].starts_with(&typed)
-            && (!matches!(typed.as_str(), ")" | "]" | "}")
-                || super::highlighter::is_java_code_at(
-                    lexical_text,
-                    lexical_offset.saturating_add(caret),
-                ))
+        let has_closing_char = text[caret_byte..].starts_with(&typed);
+        let in_java_code = (typed == "}"
+            || (has_closing_char && matches!(typed.as_str(), ")" | "]")))
+        .then(|| {
+            super::highlighter::is_java_code_at(lexical_text, lexical_offset.saturating_add(caret))
+        });
+        if has_closing_char
+            && (!matches!(typed.as_str(), ")" | "]" | "}") || in_java_code == Some(true))
         {
             let next = caret + 1;
             state
@@ -396,7 +398,7 @@ fn auto_pair_java_character(
             state.store(ui.ctx(), editor_id);
             return JavaPairEdit::SkippedClosing;
         }
-        if typed == "}" {
+        if typed == "}" && in_java_code == Some(true) {
             let suffix = &text[caret_byte..];
             let after_newline = if suffix.starts_with("\r\n") {
                 Some(caret_byte + 2)
