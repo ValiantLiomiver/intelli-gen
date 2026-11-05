@@ -542,16 +542,18 @@ fn auto_indent_java_enter(
         );
     let adjacent_open = text[..start_byte].chars().next_back();
     let adjacent_close = text[end_byte..].as_bytes().first().copied();
-    let opens_pair = start == end
-        && matches!(
-            (adjacent_open, adjacent_close),
-            (Some('('), Some(b')')) | (Some('['), Some(b']'))
-        )
+    let opens_continuation = matches!(adjacent_open, Some('(' | '['))
         && super::highlighter::is_java_code_at(
             lexical_text,
             lexical_offset.saturating_add(start.saturating_sub(1)),
         );
-    let indent_unit = if opens_block || opens_pair {
+    let empty_pair = start == end
+        && matches!(
+            (adjacent_open, adjacent_close),
+            (Some('('), Some(b')')) | (Some('['), Some(b']'))
+        )
+        && opens_continuation;
+    let indent_unit = if opens_block || opens_continuation {
         if insert_spaces {
             " ".repeat(indent_size)
         } else {
@@ -563,7 +565,7 @@ fn auto_indent_java_enter(
     let mut replace_end = end_byte;
     let mut insertion = format!("{newline}{indent}{indent_unit}");
     let cursor_byte = insertion.len();
-    if start == end && (opens_block || opens_pair) {
+    if start == end && (opens_block || empty_pair) {
         let suffix = &text[end_byte..];
         let close_offset = suffix
             .bytes()
