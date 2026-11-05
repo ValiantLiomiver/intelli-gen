@@ -347,31 +347,31 @@ impl AppState {
     }
 
     pub fn java_indent_settings(&self, path: &std::path::Path) -> (usize, bool) {
+        let (indent_size, _, insert_spaces) = self.java_editor_indent_settings(path);
+        (indent_size, insert_spaces)
+    }
+
+    pub fn java_editor_indent_settings(&self, path: &std::path::Path) -> (usize, usize, bool) {
         let style = self
             .project
             .as_ref()
             .map(|project| self.project_editor_config.style_for(&project.root, path))
             .unwrap_or_default();
-        (
-            style
-                .indent_size
-                .flatten()
-                .unwrap_or(self.settings.java_indent_size)
-                .clamp(1, 16),
-            style
-                .insert_spaces
-                .flatten()
-                .unwrap_or(self.settings.java_insert_spaces),
-        )
-    }
-
-    pub fn java_continuation_indent_size(&self, path: &std::path::Path) -> usize {
-        self.project
-            .as_ref()
-            .map(|project| self.project_editor_config.style_for(&project.root, path))
-            .and_then(|style| style.continuation_indent_size.flatten())
-            .unwrap_or_else(|| self.java_indent_settings(path).0)
-            .clamp(1, 16)
+        let indent_size = style
+            .indent_size
+            .flatten()
+            .unwrap_or(self.settings.java_indent_size)
+            .clamp(1, 16);
+        let continuation_indent_size = style
+            .continuation_indent_size
+            .flatten()
+            .unwrap_or(indent_size)
+            .clamp(1, 16);
+        let insert_spaces = style
+            .insert_spaces
+            .flatten()
+            .unwrap_or(self.settings.java_insert_spaces);
+        (indent_size, continuation_indent_size, insert_spaces)
     }
 }
 

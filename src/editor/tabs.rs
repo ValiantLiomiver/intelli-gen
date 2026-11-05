@@ -1655,19 +1655,15 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
     let mut hover_popup_dismissed = false;
     let mut last_edit_location = None;
     let mut bookmarks_adjusted = false;
-    let (indent_size, insert_spaces) = state
+    let (indent_size, continuation_indent_size, insert_spaces) = state
         .active_tab
         .and_then(|index| state.editor_tabs.get(index))
-        .map(|tab| state.java_indent_settings(&tab.path))
+        .map(|tab| state.java_editor_indent_settings(&tab.path))
         .unwrap_or((
+            state.settings.java_indent_size.clamp(1, 8),
             state.settings.java_indent_size.clamp(1, 8),
             state.settings.java_insert_spaces,
         ));
-    let continuation_indent_size = state
-        .active_tab
-        .and_then(|index| state.editor_tabs.get(index))
-        .map(|tab| state.java_continuation_indent_size(&tab.path))
-        .unwrap_or(indent_size);
     if let Some(tab) = state
         .active_tab
         .and_then(|index| state.editor_tabs.get_mut(index))
