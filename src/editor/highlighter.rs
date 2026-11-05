@@ -80,7 +80,8 @@ fn push_layout_piece(
     if let Some((color, declaration)) = semantic {
         piece.format.color = color;
         if declaration {
-            piece.format.underline = egui::Stroke::new(1.0, color);
+            piece.format.font_id.family =
+                egui::FontFamily::Name(crate::BOLD_MONOSPACE_FAMILY.into());
         }
     }
     sections.push(piece);
