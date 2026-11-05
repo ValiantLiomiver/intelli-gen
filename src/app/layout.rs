@@ -665,6 +665,12 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
                                     crate::i18n::message(ui.ctx(), error),
                                 );
                             }
+                            let maven_modules = state
+                                .project
+                                .as_ref()
+                                .and_then(|project| project.model.as_ref())
+                                .filter(|model| model.kind == ProjectKind::Maven)
+                                .map_or(&[][..], |model| model.modules.as_slice());
                             if let Some(tree) = &mut state.project_tree {
                                 let tree_query = tree.typeahead_query().map(str::to_owned);
                                 let tree_search = tree_query.and_then(|query| {
@@ -678,6 +684,7 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
                                 let actions = tree.render(
                                     ui,
                                     &mut state.project_panel_focus_requested,
+                                    maven_modules,
                                     tree_search
                                         .as_ref()
                                         .map(|(query, path)| (query.as_str(), path.as_path())),
