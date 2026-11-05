@@ -303,7 +303,12 @@ fn auto_delete_java_pair(ui: &egui::Ui, text: &mut String, editor_id: egui::Id) 
     true
 }
 
-fn auto_pair_java_character(ui: &egui::Ui, text: &mut String, editor_id: egui::Id) -> JavaPairEdit {
+fn auto_pair_java_character(
+    ui: &egui::Ui,
+    text: &mut String,
+    editor_id: egui::Id,
+    lexical_context: Option<(&str, usize)>,
+) -> JavaPairEdit {
     if ui.memory(|memory| memory.focused()) != Some(editor_id) {
         return JavaPairEdit::None;
     }
@@ -362,6 +367,7 @@ fn auto_pair_java_character(ui: &egui::Ui, text: &mut String, editor_id: egui::I
     }
     let caret = primary;
     if close.is_none() {
+        let (lexical_text, lexical_offset) = lexical_context.unwrap_or((text, 0));
         let caret_byte = byte_index(text, caret);
         if text[caret_byte..].starts_with(&typed) {
             let next = caret + 1;
@@ -390,8 +396,8 @@ fn auto_pair_java_character(ui: &egui::Ui, text: &mut String, editor_id: egui::I
                         .count();
                 if text.as_bytes().get(closing_brace) == Some(&b'}')
                     && super::highlighter::is_matching_java_closing_brace(
-                        text,
-                        text[..closing_brace].chars().count(),
+                        lexical_text,
+                        lexical_offset.saturating_add(text[..closing_brace].chars().count()),
                     )
                 {
                     let next = text[..closing_brace + 1].chars().count();
@@ -411,13 +417,16 @@ fn auto_pair_java_character(ui: &egui::Ui, text: &mut String, editor_id: egui::I
             if line_indent
                 .chars()
                 .all(|character| matches!(character, ' ' | '\t'))
-                && let Some(open) = super::highlighter::matching_java_open_brace_before(text, caret)
+                && let Some(open) = super::highlighter::matching_java_open_brace_before(
+                    lexical_text,
+                    lexical_offset.saturating_add(caret),
+                )
             {
-                let open_byte = byte_index(text, open);
-                let open_line_start = text[..open_byte]
+                let open_byte = byte_index(lexical_text, open);
+                let open_line_start = lexical_text[..open_byte]
                     .rfind('\n')
                     .map_or(0, |newline| newline + 1);
-                let mut insertion: String = text[open_line_start..open_byte]
+                let mut insertion: String = lexical_text[open_line_start..open_byte]
                     .chars()
                     .take_while(|character| matches!(character, ' ' | '\t'))
                     .collect();
@@ -961,7 +970,7 @@ impl EditorTab {
             self.document.mark_changed();
         }
         let pair_edit = if java && allow_edits && !self.close_after_save && !auto_deleted_pair {
-            auto_pair_java_character(ui, &mut self.document.text, editor_id)
+            auto_pair_java_character(ui, &mut self.document.text, editor_id, None)
         } else {
             JavaPairEdit::None
         };
@@ -1326,7 +1335,15 @@ impl EditorTab {
                 == super::highlighter::SourceLanguage::Java
             && allow_edits
         {
-            auto_pair_java_character(ui, &mut page, editor_id)
+            auto_pair_java_character(
+                ui,
+                &mut page,
+                editor_id,
+                Some((
+                    &self.document.text,
+                    self.document.text[..self.page_start].chars().count(),
+                )),
+            )
         } else {
             JavaPairEdit::None
         };

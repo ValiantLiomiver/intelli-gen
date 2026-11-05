@@ -165,17 +165,17 @@ fn java_generic_angle_tokens(text: &str) -> HashSet<usize> {
 
 // shortcut: Java Unicode escapes are not preprocessed before lexing; add source mapping if they appear in real projects.
 pub(super) fn is_matching_java_closing_brace(text: &str, target: usize) -> bool {
-    let characters: Vec<_> = text.chars().collect();
+    let characters: Vec<_> = text.chars().take(target.saturating_add(1)).collect();
     characters.get(target) == Some(&'}')
         && matching_java_delimiters(&characters, target, &HashSet::new()).is_some()
 }
 
 pub(super) fn matching_java_open_brace_before(text: &str, target: usize) -> Option<usize> {
-    let mut characters: Vec<_> = text.chars().collect();
+    let mut characters: Vec<_> = text.chars().take(target).collect();
     if target > characters.len() {
         return None;
     }
-    characters.insert(target, '}');
+    characters.push('}');
     matching_java_delimiters(&characters, target, &HashSet::new()).map(|(open, _, _)| open)
 }
 
