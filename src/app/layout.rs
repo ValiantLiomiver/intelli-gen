@@ -501,9 +501,9 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
             let debug_enabled = build_available && state.run.selected().is_some() && !state.debugger.has_workers()
                 && state.language.tooling.debug_bundle.is_some() && !state.pending_language_restart;
             let debug_hint = if !build_available {
-                "Open a Maven or Gradle project to debug"
+                crate::i18n::ui_text(ui, "Open a Maven or Gradle project to debug")
             } else {
-                "Install the bundled Java Debug Server or choose a valid plugin JAR override in Settings, and select a run configuration"
+                crate::i18n::ui_text(ui, "Install the bundled Java Debug Server or choose a valid plugin JAR override in Settings, and select a run configuration")
             };
             if ui.add_enabled(debug_enabled, egui::Button::new(crate::i18n::ui_text(ui, "Debug")))
                 .on_disabled_hover_text(debug_hint).clicked() {
@@ -945,7 +945,10 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
                     .hint_text(crate::i18n::ui_text(ui, "Class name, e.g. CustomerService")),
             );
             ui.add(egui::TextEdit::singleline(&mut dialog.package).hint_text(
-                "Package (optional; creates matching folders, e.g. com.example.service)",
+                crate::i18n::ui_text(
+                    ui,
+                    "Package (optional; creates matching folders, e.g. com.example.service)",
+                ),
             ));
             ui.horizontal(|ui| {
                 create = ui
@@ -1152,9 +1155,10 @@ fn render_maven_sidebar(ui: &mut egui::Ui, state: &mut AppState) {
                             if profile.id == "local" {
                                 let mut checked = true;
                                 ui.add_enabled(false, egui::Checkbox::new(&mut checked, label))
-                                    .on_disabled_hover_text(
+                                    .on_disabled_hover_text(crate::i18n::ui_text(
+                                        ui,
                                         "The local profile is always active when defined",
-                                    );
+                                    ));
                             } else {
                                 let mut checked = selected;
                                 if ui.checkbox(&mut checked, label).changed() {

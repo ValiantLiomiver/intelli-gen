@@ -1566,9 +1566,10 @@ pub fn render(ui: &mut egui::Ui, state: &mut crate::app::AppState) {
                                     available && !state.build.running(),
                                     egui::Button::new(crate::i18n::ui_text(ui, "Run class")),
                                 )
-                                .on_disabled_hover_text(
+                                .on_disabled_hover_text(crate::i18n::ui_text(
+                                    ui,
                                     "Open a Maven or Gradle project to rerun a test",
-                                )
+                                ))
                                 .clicked()
                             {
                                 run_test = Some(crate::app::events::BuildAction::RunTest {
