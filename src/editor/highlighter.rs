@@ -170,6 +170,15 @@ pub(super) fn is_matching_java_closing_brace(text: &str, target: usize) -> bool 
         && matching_java_delimiters(&characters, target, &HashSet::new()).is_some()
 }
 
+pub(super) fn matching_java_open_brace_before(text: &str, target: usize) -> Option<usize> {
+    let mut characters: Vec<_> = text.chars().collect();
+    if target > characters.len() {
+        return None;
+    }
+    characters.insert(target, '}');
+    matching_java_delimiters(&characters, target, &HashSet::new()).map(|(open, _, _)| open)
+}
+
 fn matching_java_delimiters(
     characters: &[char],
     target: usize,

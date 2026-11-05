@@ -404,6 +404,34 @@ fn auto_pair_java_character(ui: &egui::Ui, text: &mut String, editor_id: egui::I
                     return JavaPairEdit::SkippedClosing;
                 }
             }
+            let line_start = text[..caret_byte]
+                .rfind('\n')
+                .map_or(0, |newline| newline + 1);
+            let line_indent = &text[line_start..caret_byte];
+            if line_indent
+                .chars()
+                .all(|character| matches!(character, ' ' | '\t'))
+                && let Some(open) = super::highlighter::matching_java_open_brace_before(text, caret)
+            {
+                let open_byte = byte_index(text, open);
+                let open_line_start = text[..open_byte]
+                    .rfind('\n')
+                    .map_or(0, |newline| newline + 1);
+                let mut insertion: String = text[open_line_start..open_byte]
+                    .chars()
+                    .take_while(|character| matches!(character, ' ' | '\t'))
+                    .collect();
+                insertion.push('}');
+                text.replace_range(line_start..caret_byte, &insertion);
+                let next = text[..line_start + insertion.len()].chars().count();
+                state
+                    .cursor
+                    .set_char_range(Some(egui::text::CCursorRange::one(
+                        egui::text::CCursor::new(next),
+                    )));
+                state.store(ui.ctx(), editor_id);
+                return JavaPairEdit::InsertedPair;
+            }
         }
         text.insert_str(caret_byte, &typed);
         let next = caret + 1;
