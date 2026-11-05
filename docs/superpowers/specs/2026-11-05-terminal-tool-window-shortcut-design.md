@@ -16,8 +16,14 @@ terminal session. No new terminal lifecycle or process code is needed.
 
 ## Limits
 
-- Hiding the tool window follows current settings behavior and closes the PTY.
+- Hiding the tool window keeps the PTY and its output alive; **Close session**
+  and project/app shutdown still terminate it.
 - The shortcut is fixed to the macOS Option+F12 keymap used by this workbench.
+
+JetBrains documents that Terminal tabs and sessions are retained when a project
+or IntelliJ closes: <https://www.jetbrains.com/help/idea/terminal-emulator.html>.
+Intelli-gen currently ends its session on project/app shutdown; this change
+matches the hide/show behavior without adding cross-project session persistence.
 
 ## Verification
 

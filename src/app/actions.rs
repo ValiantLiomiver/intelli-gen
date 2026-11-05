@@ -775,7 +775,6 @@ pub fn keyboard_shortcuts(ctx: &egui::Context, state: &mut AppState) {
     if ctx.input_mut(|input| input.consume_key(egui::Modifiers::ALT, egui::Key::F12)) {
         if state.settings.show_tool_window && state.active_panel == super::ActivePanel::Terminal {
             state.settings.show_tool_window = false;
-            state.terminal.close();
             save_settings(state);
         } else {
             state.enqueue(AppEvent::Terminal(super::events::TerminalAction::Open));
@@ -1979,9 +1978,6 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
             }
             AppEvent::SettingsChanged => {
                 state.language.refresh_tooling(&state.settings);
-                if !state.settings.show_tool_window {
-                    state.terminal.close();
-                }
                 save_settings(state);
             }
             AppEvent::SettingsSaved { generation, result } => {
