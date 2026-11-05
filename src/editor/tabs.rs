@@ -321,6 +321,7 @@ fn auto_pair_java_character(
     let primary: usize = range.primary.index.into();
     let secondary: usize = range.secondary.index.into();
     let has_selection = primary != secondary;
+    let (lexical_text, lexical_offset) = lexical_context.unwrap_or((text, 0));
     let typed = ui.input_mut(|input| {
         let index = input.events.iter().position(|event| {
             matches!(event, egui::Event::Text(character)
@@ -354,6 +355,17 @@ fn auto_pair_java_character(
         let end = primary.max(secondary);
         let start_byte = byte_index(text, start);
         let end_byte = byte_index(text, end);
+        if !super::highlighter::is_java_code_at(lexical_text, lexical_offset.saturating_add(start))
+        {
+            text.replace_range(start_byte..end_byte, &typed);
+            state
+                .cursor
+                .set_char_range(Some(egui::text::CCursorRange::one(
+                    egui::text::CCursor::new(start + 1),
+                )));
+            state.store(ui.ctx(), editor_id);
+            return JavaPairEdit::InsertedPair;
+        }
         text.insert_str(end_byte, close);
         text.insert_str(start_byte, &typed);
         state
@@ -367,9 +379,14 @@ fn auto_pair_java_character(
     }
     let caret = primary;
     if close.is_none() {
-        let (lexical_text, lexical_offset) = lexical_context.unwrap_or((text, 0));
         let caret_byte = byte_index(text, caret);
-        if text[caret_byte..].starts_with(&typed) {
+        if text[caret_byte..].starts_with(&typed)
+            && (!matches!(typed.as_str(), ")" | "]" | "}")
+                || super::highlighter::is_java_code_at(
+                    lexical_text,
+                    lexical_offset.saturating_add(caret),
+                ))
+        {
             let next = caret + 1;
             state
                 .cursor
@@ -452,6 +469,18 @@ fn auto_pair_java_character(
         state.store(ui.ctx(), editor_id);
         return JavaPairEdit::InsertedPair;
     }
+    if !super::highlighter::is_java_code_at(lexical_text, lexical_offset.saturating_add(caret)) {
+        let caret_byte = byte_index(text, caret);
+        text.insert_str(caret_byte, &typed);
+        let next = caret + 1;
+        state
+            .cursor
+            .set_char_range(Some(egui::text::CCursorRange::one(
+                egui::text::CCursor::new(next),
+            )));
+        state.store(ui.ctx(), editor_id);
+        return JavaPairEdit::InsertedPair;
+    }
     let caret_byte = byte_index(text, caret);
     let mut insertion = typed;
     insertion.push_str(close.unwrap_or_default());
@@ -472,6 +501,7 @@ fn auto_indent_java_enter(
     editor_id: egui::Id,
     indent_size: usize,
     insert_spaces: bool,
+    lexical_context: Option<(&str, usize)>,
 ) -> bool {
     if ui.memory(|memory| memory.focused()) != Some(editor_id) {
         return false;
@@ -495,12 +525,19 @@ fn auto_indent_java_enter(
         .rfind('\n')
         .map_or(0, |newline| newline + 1);
     let prefix = &text[line_start..start_byte];
+    let (lexical_text, lexical_offset) = lexical_context.unwrap_or((text, 0));
     let indent: String = prefix
         .chars()
         .take_while(|character| matches!(character, ' ' | '\t'))
         .collect();
     let newline = if text.contains("\r\n") { "\r\n" } else { "\n" };
-    let opens_block = prefix.trim_end().ends_with('{');
+    let trimmed_prefix = prefix.trim_end();
+    let opens_block = trimmed_prefix.ends_with('{')
+        && super::highlighter::is_java_code_at(
+            lexical_text,
+            lexical_offset
+                .saturating_add(text[..line_start + trimmed_prefix.len()].chars().count() - 1),
+        );
     let indent_unit = if opens_block {
         if insert_spaces {
             " ".repeat(indent_size)
@@ -986,6 +1023,7 @@ impl EditorTab {
                 editor_id,
                 indent_size,
                 insert_spaces,
+                None,
             );
         if auto_indented {
             self.document.mark_changed();
@@ -1350,7 +1388,17 @@ impl EditorTab {
         let auto_indented = super::highlighter::SourceLanguage::for_path(&self.path)
             == super::highlighter::SourceLanguage::Java
             && allow_edits
-            && auto_indent_java_enter(ui, &mut page, editor_id, indent_size, insert_spaces);
+            && auto_indent_java_enter(
+                ui,
+                &mut page,
+                editor_id,
+                indent_size,
+                insert_spaces,
+                Some((
+                    &self.document.text,
+                    self.document.text[..self.page_start].chars().count(),
+                )),
+            );
         let mut toggled = None;
         let highlighter = &mut self.highlighter;
         let mut layouter = |ui: &egui::Ui, buffer: &dyn egui::TextBuffer, _width: f32| {

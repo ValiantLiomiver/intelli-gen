@@ -163,6 +163,55 @@ fn java_generic_angle_tokens(text: &str) -> HashSet<usize> {
     angle_tokens
 }
 
+pub(super) fn is_java_code_at(text: &str, target: usize) -> bool {
+    let syntaxes = syntax_set();
+    let Some(syntax) = syntaxes.find_syntax_by_extension("java") else {
+        return false;
+    };
+    let mut parser = ParseState::new(syntax);
+    let mut scopes = ScopeStack::default();
+    let mut char_offset = 0;
+    for line in LinesWithEndings::from(text) {
+        let Ok(operations) = parser.parse_line(line, syntaxes) else {
+            return false;
+        };
+        let mut operation = 0;
+        let mut line_char_offset = 0;
+        for (byte, _) in line.char_indices() {
+            while operations.get(operation).is_some_and(|(at, _)| *at <= byte) {
+                if scopes.apply(&operations[operation].1).is_err() {
+                    return false;
+                }
+                operation += 1;
+            }
+            if char_offset + line_char_offset == target {
+                return scopes.scopes.iter().all(|scope| {
+                    let name = scope.build_string();
+                    !name.contains("comment")
+                        && !name.contains("string")
+                        && !name.contains("character")
+                });
+            }
+            line_char_offset += 1;
+        }
+        while let Some((_, operation_to_apply)) = operations.get(operation) {
+            if scopes.apply(operation_to_apply).is_err() {
+                return false;
+            }
+            operation += 1;
+        }
+        char_offset += line_char_offset;
+    }
+    if char_offset == target {
+        scopes.scopes.iter().all(|scope| {
+            let name = scope.build_string();
+            !name.contains("comment") && !name.contains("string") && !name.contains("character")
+        })
+    } else {
+        false
+    }
+}
+
 // shortcut: Java Unicode escapes are not preprocessed before lexing; add source mapping if they appear in real projects.
 pub(super) fn is_matching_java_closing_brace(text: &str, target: usize) -> bool {
     let characters: Vec<_> = text.chars().take(target.saturating_add(1)).collect();
