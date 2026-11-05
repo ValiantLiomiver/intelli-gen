@@ -23,6 +23,7 @@
 **Files:**
 - Modify: `src/app/actions.rs`
 - Modify: `src/app/layout.rs`
+- Modify: `src/app/search_everywhere.rs`
 - Modify: `resources/i18n/en.ini`
 - Modify: `resources/i18n/it.ini`
 - Modify: `README.md`
@@ -31,6 +32,11 @@
 - [x] Document the shortcut and localize the menu label.
 - [x] Run `cargo fmt --check`, `cargo check --quiet`, and `git diff --check`.
 - [x] Commit and push on `main`.
+
+## Follow-up
+
+Route the existing Find Action Terminal entry through the same idempotent open
+event, show the Terminal panel, and preserve any active session.
 
 ## Execution record
 

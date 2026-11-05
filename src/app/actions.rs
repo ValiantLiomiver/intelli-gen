@@ -778,14 +778,7 @@ pub fn keyboard_shortcuts(ctx: &egui::Context, state: &mut AppState) {
             state.terminal.close();
             save_settings(state);
         } else {
-            state.set_active_panel(super::ActivePanel::Terminal);
-            if !state.settings.show_tool_window {
-                state.settings.show_tool_window = true;
-                save_settings(state);
-            }
-            if state.project.is_some() && state.terminal.session.is_none() {
-                state.enqueue(AppEvent::Terminal(super::events::TerminalAction::Open));
-            }
+            state.enqueue(AppEvent::Terminal(super::events::TerminalAction::Open));
         }
     } else if ctx.input_mut(|input| {
         input.consume_key(
@@ -1645,7 +1638,14 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
             },
             AppEvent::Terminal(action) => match action {
                 super::events::TerminalAction::Open => {
-                    if let Some(project) = &state.project {
+                    state.set_active_panel(super::ActivePanel::Terminal);
+                    if !state.settings.show_tool_window {
+                        state.settings.show_tool_window = true;
+                        save_settings(state);
+                    }
+                    if state.terminal.session.is_none()
+                        && let Some(project) = &state.project
+                    {
                         state.terminal.open(project.root.clone(), context.clone());
                     }
                 }

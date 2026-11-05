@@ -451,10 +451,7 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
                     state.enqueue(AppEvent::Gradle(super::events::GradleAction::ToggleCollapsed));
                 }
                 if ui.button(crate::i18n::ui_text(ui, "Terminal    ⌥F12")).clicked() {
-                    state.enqueue(AppEvent::ShowPanel(ActivePanel::Terminal));
-                    if state.project.is_some() && state.terminal.session.is_none() {
-                        state.enqueue(AppEvent::Terminal(super::events::TerminalAction::Open));
-                    }
+                    state.enqueue(AppEvent::Terminal(super::events::TerminalAction::Open));
                     ui.close();
                 }
                 if ui.button(crate::i18n::ui_text(ui, "Problems    ⌘6")).clicked() {

@@ -8,10 +8,11 @@ and expose the same action in View. IntelliJ's current documentation assigns
 
 ## Approach
 
-Reuse Intelli-gen's existing `ShowPanel(Terminal)` and `Terminal(Open)` events.
-The key binding toggles the tool window; choosing View → Terminal shows it and
-starts a session only when a project is open and no session exists. No new
-terminal lifecycle or process code is needed.
+Reuse Intelli-gen's existing `Terminal(Open)` event. It selects and shows the
+tool window, then starts a
+session only when a project is open and no session exists. The shortcut, View
+menu, and Find Action therefore share one open path and preserve an existing
+terminal session. No new terminal lifecycle or process code is needed.
 
 ## Limits
 
