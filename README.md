@@ -79,6 +79,11 @@ With the Project sidebar focused, use `↑` / `↓` to move through visible entr
 prefix to search project files and reveal the best match in the tree. Backspace
 edits the query; Escape clears it.
 
+Project-tree file names stay on one line and truncate when the sidebar is narrow;
+hover to see the full path. Maven modules use a package icon and bold label.
+In Java files with JDT LS folding support, use the gutter chevron to collapse or
+expand code regions. Moving the caret into a collapsed region expands it.
+
 ## Project scope
 
 The Run Console accepts line input for interactive Java processes. The Build panel summarizes Maven Surefire and Gradle test totals and lists failures from fresh Surefire, Failsafe, and Gradle XML reports; select a failure to open its conventional Java test source and stack-trace line when available, or use **Run class**/**Run method** to rerun it. Method reruns use Maven Surefire/Failsafe selectors or Gradle test filters and are shown for plain Java method names; Maven method filtering depends on the configured test provider. The **Problems** tool window combines available Java language-server diagnostics with the latest build diagnostics; selecting a result opens its source location.
