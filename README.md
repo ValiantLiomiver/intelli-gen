@@ -1,5 +1,11 @@
 # Intelli-gen
 
+<p align="center">
+  <img src="resources/branding/app-icon.png" width="128" alt="Intelli-gen app icon">
+</p>
+
+![Intelli-gen startup splash screen](resources/branding/splash.png)
+
 Intelli-gen is a native macOS workbench for Java projects, built with Rust, `eframe`, and `egui`. It supports Maven and Gradle projects, with Java language and debugging features provided by external Eclipse tooling.
 
 ## Run from source
@@ -29,6 +35,8 @@ Release packaging places pinned Eclipse JDT Language Server and Microsoft Java D
 
 To build the macOS release package, run `scripts/package-release.sh`. This explicitly downloads the pinned upstream Java tooling, verifies the JDT LS archive checksum, and requires an already installed Java 21+ JDK. Review `packaging/java-tools.env` for the pinned versions. The resulting bundle's JDT LS runtime requires Java 25+.
 The package contains `dist/Intelli-gen.app` for Finder and a `dist/intelli-gen` command-line link. Launch the app with `open dist/Intelli-gen.app`.
+Application branding assets are in `resources/branding/`: `app-icon.png` supplies the app window icon, `app-icon.icns` is installed in the macOS app bundle, and `splash.png` is shown while the IDE starts.
+
 The command-line link accepts the same optional project or file path: `dist/intelli-gen /path/to/project-or-file`.
 
 ## Shortcuts

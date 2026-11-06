@@ -412,14 +412,7 @@ pub struct IdeaLikeApp {
 }
 
 impl IdeaLikeApp {
-    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        Self::new_with_startup_path(cc, None)
-    }
-
-    pub fn new_with_startup_path(
-        cc: &eframe::CreationContext<'_>,
-        startup_path: Option<PathBuf>,
-    ) -> Self {
+    pub(crate) fn new_with_context(egui_ctx: egui::Context, startup_path: Option<PathBuf>) -> Self {
         let (settings, settings_load_error, settings_writable) = match UserSettings::load() {
             Ok(settings) => (settings, None, true),
             Err(error) => (
@@ -433,12 +426,12 @@ impl IdeaLikeApp {
         let config_dir = UserSettings::config_dir().ok();
         let (translator, localization_error) =
             Translator::load(settings.language, config_dir.as_deref());
-        cc.egui_ctx.set_theme(if settings.dark_mode {
+        egui_ctx.set_theme(if settings.dark_mode {
             egui::Theme::Dark
         } else {
             egui::Theme::Light
         });
-        cc.egui_ctx.send_viewport_cmd(egui::ViewportCommand::Title(
+        egui_ctx.send_viewport_cmd(egui::ViewportCommand::Title(
             translator.text("Intelli-gen — Java Workbench").into_owned(),
         ));
         let (open_file_dialog_sender, open_file_dialog_receiver) = std::sync::mpsc::channel();
@@ -451,9 +444,9 @@ impl IdeaLikeApp {
             project_tree_loader: crate::project::workspace::ProjectTreeLoader::default(),
             project_tree_generation: 0,
             project_tree_loading: false,
-            search: crate::search::ProjectSearch::new(cc.egui_ctx.clone()),
+            search: crate::search::ProjectSearch::new(egui_ctx.clone()),
             terminal: crate::terminal::TerminalTool::default(),
-            git: crate::git::GitTool::new(cc.egui_ctx.clone()),
+            git: crate::git::GitTool::new(egui_ctx.clone()),
             build: crate::java::build::BuildTool::default(),
             maven_view_loader: MavenViewLoader::default(),
             maven_cache_loader: MavenCacheLoader::default(),
@@ -515,7 +508,7 @@ impl IdeaLikeApp {
             navigation_forward: Vec::new(),
             last_edit_location: None,
             project_panel_focus_requested: false,
-            editor_io: EditorIo::new(cc.egui_ctx.clone()),
+            editor_io: EditorIo::new(egui_ctx.clone()),
             open_file_dialog_sender,
             open_file_dialog_receiver,
             open_file_dialog_pending: false,
@@ -556,7 +549,7 @@ impl IdeaLikeApp {
                 state.last_error = Some(error);
             }
         }
-        state.language.set_repaint_context(cc.egui_ctx.clone());
+        state.language.set_repaint_context(egui_ctx);
         state.language.refresh_tooling(&state.settings);
         if let Some(path) = startup_path {
             state.enqueue(AppEvent::OpenProject(path));
