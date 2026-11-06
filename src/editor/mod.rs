@@ -698,6 +698,48 @@ pub fn paint_fold_placeholders(
 }
 
 #[cfg(test)]
+mod editor_io_tests {
+    use super::*;
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn open_file_worker_returns_the_selected_java_source() {
+        let root = std::env::temp_dir().join(format!(
+            "intelli-gen-open-file-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let path = root.join("Example.java");
+        std::fs::write(&path, "class Example {}\n").unwrap();
+
+        let io = EditorIo::new(eframe::egui::Context::default());
+        io.load(path.clone()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let completion = loop {
+            if let Some(completion) = io.drain().into_iter().next() {
+                break completion;
+            }
+            assert!(Instant::now() < deadline, "file load worker timed out");
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        let EditorCompletion::Loaded {
+            requested_path,
+            result: Ok(document),
+        } = completion
+        else {
+            panic!("unexpected file load completion: {completion:?}");
+        };
+        assert_eq!(requested_path, path);
+        assert_eq!(document.text, "class Example {}\n");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[cfg(test)]
 mod workspace_replace_tests {
     use super::*;
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};

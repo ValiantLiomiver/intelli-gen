@@ -203,6 +203,9 @@ pub struct AppState {
     pub last_edit_location: Option<NavigationLocation>,
     pub project_panel_focus_requested: bool,
     pub editor_io: EditorIo,
+    pub open_file_dialog_sender: std::sync::mpsc::Sender<Result<Option<PathBuf>, String>>,
+    pub open_file_dialog_receiver: std::sync::mpsc::Receiver<Result<Option<PathBuf>, String>>,
+    pub open_file_dialog_pending: bool,
     pub loading_files: HashSet<PathBuf>,
     pub pending_close: Option<PathBuf>,
     pub quit_requested: bool,
@@ -438,6 +441,7 @@ impl IdeaLikeApp {
         cc.egui_ctx.send_viewport_cmd(egui::ViewportCommand::Title(
             translator.text("Intelli-gen — Java Workbench").into_owned(),
         ));
+        let (open_file_dialog_sender, open_file_dialog_receiver) = std::sync::mpsc::channel();
         let mut state = AppState {
             project: None,
             project_editor_config: crate::project::editor_config::ProjectEditorConfig::default(),
@@ -512,6 +516,9 @@ impl IdeaLikeApp {
             last_edit_location: None,
             project_panel_focus_requested: false,
             editor_io: EditorIo::new(cc.egui_ctx.clone()),
+            open_file_dialog_sender,
+            open_file_dialog_receiver,
+            open_file_dialog_pending: false,
             loading_files: HashSet::new(),
             pending_close: None,
             quit_requested: false,
@@ -598,6 +605,10 @@ impl eframe::App for IdeaLikeApp {
         }
         for completion in self.state.editor_io.drain() {
             self.state.enqueue(AppEvent::EditorCompleted(completion));
+        }
+        while let Ok(result) = self.state.open_file_dialog_receiver.try_recv() {
+            self.state
+                .enqueue(AppEvent::OpenFileDialogCompleted(result));
         }
         let active_find_tab = self
             .state
