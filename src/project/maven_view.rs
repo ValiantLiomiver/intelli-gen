@@ -1,12 +1,16 @@
 //! Maven's effective model is resolved on workers so the UI only polls typed results.
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::ffi::OsString;
 use std::fs;
+use std::io::Read;
+#[cfg(not(unix))]
+use std::io::{Seek, SeekFrom};
 use std::path::{Component, Path, PathBuf};
+#[cfg(not(unix))]
 use std::process::{Command, Stdio};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
@@ -77,6 +81,101 @@ pub struct MavenViewLoader {
     latest: HashMap<PathBuf, u64>,
     workers: Vec<MavenViewWorker>,
     generations: HashMap<PathBuf, Arc<AtomicU64>>,
+    progress: Arc<MavenProgress>,
+    log: Arc<MavenProcessLog>,
+    console: Arc<MavenConsole>,
+}
+
+#[derive(Default)]
+struct MavenConsole(Mutex<VecDeque<u8>>);
+
+impl MavenConsole {
+    fn append(&self, bytes: &[u8]) {
+        const LIMIT: usize = 131_072;
+        let mut output = self.0.lock().unwrap_or_else(|error| error.into_inner());
+        let bytes = &bytes[bytes.len().saturating_sub(LIMIT)..];
+        let excess = output
+            .len()
+            .saturating_add(bytes.len())
+            .saturating_sub(LIMIT);
+        output.drain(..excess);
+        output.extend(bytes);
+    }
+
+    fn text(&self) -> String {
+        let output = self.0.lock().unwrap_or_else(|error| error.into_inner());
+        let bytes: Vec<_> = output.iter().copied().collect();
+        let mut plain = Vec::with_capacity(bytes.len());
+        let mut index = 0;
+        // shortcut: strip CSI sequences only; use terminal emulation for interactive output.
+        while index < bytes.len() {
+            if bytes[index] == b'\x1b' && bytes.get(index + 1) == Some(&b'[') {
+                index += 2;
+                while index < bytes.len() {
+                    let byte = bytes[index];
+                    index += 1;
+                    if (0x40..=0x7e).contains(&byte) {
+                        break;
+                    }
+                }
+            } else {
+                if bytes[index] != b'\r' {
+                    plain.push(bytes[index]);
+                }
+                index += 1;
+            }
+        }
+        String::from_utf8_lossy(&plain).into_owned()
+    }
+}
+
+#[derive(Default)]
+struct MavenProcessLog(Mutex<VecDeque<String>>);
+
+impl MavenProcessLog {
+    fn record(&self, entry: String) {
+        let mut entries = self.0.lock().unwrap_or_else(|error| error.into_inner());
+        if entries.len() == 200 {
+            entries.pop_front();
+        }
+        entries.push_back(entry);
+    }
+
+    fn entries(&self) -> Vec<String> {
+        self.0
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .iter()
+            .cloned()
+            .collect()
+    }
+}
+
+struct MavenProgress {
+    total: AtomicUsize,
+    completed: AtomicUsize,
+}
+
+impl Default for MavenProgress {
+    fn default() -> Self {
+        Self {
+            total: AtomicUsize::new(1),
+            completed: AtomicUsize::new(0),
+        }
+    }
+}
+
+impl MavenProgress {
+    fn discover(&self, count: usize) {
+        self.total.fetch_add(count, Ordering::Relaxed);
+    }
+    fn complete(&self) {
+        self.completed.fetch_add(1, Ordering::Relaxed);
+    }
+    fn percent(&self) -> usize {
+        let total = self.total.load(Ordering::Relaxed);
+        (self.completed.load(Ordering::Relaxed).saturating_mul(100) / total).min(99)
+    }
 }
 
 struct MavenViewWorker {
@@ -94,6 +193,9 @@ impl Default for MavenViewLoader {
             latest: HashMap::new(),
             workers: Vec::new(),
             generations: HashMap::new(),
+            progress: Arc::new(MavenProgress::default()),
+            log: Arc::new(MavenProcessLog::default()),
+            console: Arc::new(MavenConsole::default()),
         }
     }
 }
@@ -115,6 +217,11 @@ impl MavenViewLoader {
         let sender = self.sender.clone();
         let cancel = Arc::new(AtomicBool::new(false));
         let worker_cancel = Arc::clone(&cancel);
+        let progress = Arc::new(MavenProgress::default());
+        let worker_progress = Arc::clone(&progress);
+        let worker_log = Arc::clone(&self.log);
+        let console = Arc::new(MavenConsole::default());
+        let worker_console = Arc::clone(&console);
         let generation_token = self
             .generations
             .entry(root.clone())
@@ -130,7 +237,13 @@ impl MavenViewLoader {
                 let event = MavenViewEvent {
                     root: request.project.root.clone(),
                     generation: request.generation,
-                    result: load(request, Arc::clone(&worker_cancel)),
+                    result: load(
+                        request,
+                        Arc::clone(&worker_cancel),
+                        worker_progress,
+                        worker_log,
+                        worker_console,
+                    ),
                     cache_error: None,
                 };
                 let mut event = event;
@@ -168,6 +281,8 @@ impl MavenViewLoader {
             }
         }
         self.latest.insert(root.clone(), generation);
+        self.progress = progress;
+        self.console = console;
         self.workers.push(MavenViewWorker {
             root,
             cancel,
@@ -207,6 +322,18 @@ impl MavenViewLoader {
 
     pub fn has_workers(&self) -> bool {
         !self.workers.is_empty()
+    }
+
+    pub fn progress_percent(&self) -> usize {
+        self.progress.percent()
+    }
+
+    pub fn log_entries(&self) -> Vec<String> {
+        self.log.entries()
+    }
+
+    pub fn console_output(&self) -> String {
+        self.console.text()
     }
 }
 
@@ -339,6 +466,10 @@ struct Context {
     program: PathBuf,
     environment: Vec<(OsString, OsString)>,
     cancellation: Arc<AtomicBool>,
+    progress: Arc<MavenProgress>,
+    log: Arc<MavenProcessLog>,
+    console: Arc<MavenConsole>,
+    generation: u64,
     profiles: Vec<String>,
     scratch: Scratch,
     next_output: usize,
@@ -347,7 +478,13 @@ struct Context {
     plugin_goals: HashMap<(PathBuf, String), (String, Vec<String>)>,
 }
 
-fn load(request: MavenViewRequest, cancellation: Arc<AtomicBool>) -> Result<MavenView, String> {
+fn load(
+    request: MavenViewRequest,
+    cancellation: Arc<AtomicBool>,
+    progress: Arc<MavenProgress>,
+    log: Arc<MavenProcessLog>,
+    console: Arc<MavenConsole>,
+) -> Result<MavenView, String> {
     check_cancel(&cancellation)?;
     let root = request.project.root.clone();
     let profiles_user_modified = request.profiles_user_modified;
@@ -379,6 +516,10 @@ fn load(request: MavenViewRequest, cancellation: Arc<AtomicBool>) -> Result<Mave
         program,
         environment,
         cancellation,
+        progress,
+        log,
+        console,
+        generation: request.generation,
         profiles: request.profiles,
         scratch: Scratch::create()?,
         next_output: 0,
@@ -609,7 +750,15 @@ impl Context {
             .filter_map(|repository| repository.id.or(repository.url))
             .collect();
         let mut modules = Vec::new();
-        for entry in pom.modules.unwrap_or_default().entries {
+        let entries = pom.modules.unwrap_or_default().entries;
+        self.progress.discover(
+            entries
+                .iter()
+                .filter(|entry| !entry.trim().is_empty())
+                .count(),
+        );
+        self.progress.complete();
+        for entry in entries {
             self.check_cancel()?;
             let entry = entry.trim();
             if entry.is_empty() || entry.contains("${") {
@@ -710,6 +859,153 @@ impl Context {
             .join(format!("{}-{suffix}", self.next_output))
     }
 
+    #[cfg(unix)]
+    fn run(&self, args: &[OsString], operation: &str) -> Result<(), String> {
+        use portable_pty::{CommandBuilder, PtySize, native_pty_system};
+
+        self.check_cancel()?;
+        let pair = native_pty_system()
+            .openpty(PtySize::default())
+            .map_err(|error| format!("Cannot open Maven terminal: {error}"))?;
+        let mut reader = pair
+            .master
+            .try_clone_reader()
+            .map_err(|error| format!("Cannot read Maven terminal: {error}"))?;
+        let fd = pair
+            .master
+            .as_raw_fd()
+            .ok_or("Maven terminal has no file descriptor")?;
+        // SAFETY: fd belongs to the retained PTY master; fcntl only changes its flags.
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+        if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+            return Err(format!(
+                "Cannot configure Maven terminal: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        let mut command = CommandBuilder::new(&self.program);
+        command.args(args);
+        command.cwd(&self.root);
+        command.env("TERM", "dumb");
+        for (key, value) in &self.environment {
+            command.env(key, value);
+        }
+        #[cfg(target_os = "macos")]
+        command.env(
+            "JAVA_TOOL_OPTIONS",
+            background_java_options(std::env::var_os("JAVA_TOOL_OPTIONS")),
+        );
+        let mut child = pair.slave.spawn_command(command).map_err(|error| {
+            self.log.record(format!(
+                "reload {}: failed to start {operation}: {error}",
+                self.generation
+            ));
+            format!("Cannot launch Maven for {operation}: {error}")
+        })?;
+        drop(pair.slave);
+        let Some(pid) = child.process_id() else {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err("Maven terminal process has no PID".into());
+        };
+        self.log.record(format!(
+            "reload {}: started {operation}, pid={pid}, executable={}",
+            self.generation,
+            self.program.display()
+        ));
+        self.console
+            .append(format!("\n--- Maven {operation} (pid {pid}) ---\n").as_bytes());
+        let output = MavenConsole::default();
+        let mut buffer = [0; 8192];
+        let status = loop {
+            for _ in 0..16 {
+                match reader.read(&mut buffer) {
+                    Ok(0) => break,
+                    Ok(count) => {
+                        self.console.append(&buffer[..count]);
+                        output.append(&buffer[..count]);
+                    }
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                        ) || error.raw_os_error() == Some(libc::EIO) =>
+                    {
+                        break;
+                    }
+                    Err(error) => {
+                        cleanup_maven_group(pid);
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        return Err(format!("Cannot read Maven terminal: {error}"));
+                    }
+                }
+            }
+            if self.cancellation.load(Ordering::Acquire) {
+                cleanup_maven_group(pid);
+                let _ = child.kill();
+                let _ = child.wait();
+                self.log.record(format!(
+                    "reload {}: cancelled {operation}, pid={pid}",
+                    self.generation
+                ));
+                return Err("Maven view load cancelled".into());
+            }
+            match child.try_wait() {
+                Ok(Some(status)) => break status,
+                Ok(None) => thread::sleep(Duration::from_millis(25)),
+                Err(error) => {
+                    cleanup_maven_group(pid);
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(format!("Cannot wait for Maven {operation}: {error}"));
+                }
+            }
+        };
+        cleanup_maven_group(pid);
+        for _ in 0..128 {
+            match reader.read(&mut buffer) {
+                Ok(count) if count > 0 => {
+                    self.console.append(&buffer[..count]);
+                    output.append(&buffer[..count]);
+                }
+                _ => break,
+            }
+        }
+        self.log.record(format!(
+            "reload {}: finished {operation}, pid={pid}, status={status}",
+            self.generation
+        ));
+        self.check_cancel()?;
+        if status.success() {
+            return Ok(());
+        }
+        let text = output.text();
+        let lines: Vec<_> = text
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .collect();
+        let errors: Vec<_> = lines
+            .iter()
+            .copied()
+            .filter(|line| line.contains("[ERROR]"))
+            .take(12)
+            .collect();
+        let detail = if errors.is_empty() {
+            let tail: Vec<_> = lines.iter().rev().take(8).copied().collect();
+            if tail.is_empty() {
+                "No Maven diagnostics".to_owned()
+            } else {
+                tail.into_iter().rev().collect::<Vec<_>>().join("\n")
+            }
+        } else {
+            errors.join("\n")
+        };
+        Err(format!("Maven {operation} failed ({status}): {detail}"))
+    }
+
+    #[cfg(not(unix))]
     fn run(&self, args: &[OsString], operation: &str) -> Result<(), String> {
         self.check_cancel()?;
         let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
@@ -719,6 +1015,10 @@ impl Context {
             .map_err(|error| format!("Cannot create Maven output file: {error}"))?;
         let stderr_file = fs::File::create(&stderr_path)
             .map_err(|error| format!("Cannot create Maven error file: {error}"))?;
+        let mut stdout_reader = fs::File::open(&stdout_path)
+            .map_err(|error| format!("Cannot read Maven output file: {error}"))?;
+        let mut stderr_reader = fs::File::open(&stderr_path)
+            .map_err(|error| format!("Cannot read Maven error file: {error}"))?;
         let mut command = Command::new(&self.program);
         command
             .args(args)
@@ -727,6 +1027,11 @@ impl Context {
             .stdin(Stdio::null())
             .stdout(Stdio::from(stdout_file))
             .stderr(Stdio::from(stderr_file));
+        #[cfg(target_os = "macos")]
+        command.env(
+            "JAVA_TOOL_OPTIONS",
+            background_java_options(std::env::var_os("JAVA_TOOL_OPTIONS")),
+        );
         #[cfg(unix)]
         {
             use std::os::unix::process::CommandExt;
@@ -740,12 +1045,31 @@ impl Context {
                 });
             }
         }
-        let mut child = command
-            .spawn()
-            .map_err(|error| format!("Cannot launch Maven for {operation}: {error}"))?;
+        let mut child = command.spawn().map_err(|error| {
+            self.log.record(format!(
+                "reload {}: failed to start {operation}: {error}",
+                self.generation
+            ));
+            format!("Cannot launch Maven for {operation}: {error}")
+        })?;
+        self.log.record(format!(
+            "reload {}: started {operation}, pid={}, executable={}",
+            self.generation,
+            child.id(),
+            self.program.display()
+        ));
+        self.console
+            .append(format!("\n--- Maven {operation} (pid {}) ---\n", child.id()).as_bytes());
         let status = loop {
+            self.read_console(&mut stdout_reader);
+            self.read_console(&mut stderr_reader);
             if self.cancellation.load(Ordering::Acquire) {
                 terminate_maven(&mut child);
+                self.log.record(format!(
+                    "reload {}: cancelled {operation}, pid={}",
+                    self.generation,
+                    child.id()
+                ));
                 return Err("Maven view load cancelled".into());
             }
             match child.try_wait() {
@@ -753,15 +1077,27 @@ impl Context {
                 Ok(None) => thread::sleep(Duration::from_millis(25)),
                 Err(error) => {
                     terminate_maven(&mut child);
+                    self.log.record(format!(
+                        "reload {}: failed to wait for {operation}, pid={}: {error}",
+                        self.generation,
+                        child.id()
+                    ));
                     return Err(format!("Cannot wait for Maven {operation}: {error}"));
                 }
             }
         };
+        self.read_console(&mut stdout_reader);
+        self.read_console(&mut stderr_reader);
         // try_wait has already reaped the direct child. A wrapper may have left
         // descendants in its session's process group, so clear that group before the
         // metadata worker releases the app's close gate.
         #[cfg(unix)]
         cleanup_maven_group(child.id());
+        self.log.record(format!(
+            "reload {}: finished {operation}, pid={}, status={status}",
+            self.generation,
+            child.id()
+        ));
         self.check_cancel()?;
         if status.success() {
             return Ok(());
@@ -798,8 +1134,42 @@ impl Context {
         };
         Err(format!("Maven {operation} failed ({}): {detail}", status))
     }
+
+    #[cfg(not(unix))]
+    fn read_console(&self, file: &mut fs::File) {
+        let position = file.stream_position();
+        // shortcut: retain only the latest 128 KiB, add persistent logs if full history is needed.
+        if let (Ok(position), Ok(metadata)) = (position, file.metadata())
+            && metadata.len().saturating_sub(position) > 131_072
+        {
+            let _ = file.seek(SeekFrom::End(-131_072));
+        }
+        let mut buffer = [0; 8192];
+        for _ in 0..16 {
+            match file.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(count) => self.console.append(&buffer[..count]),
+                Err(error) => {
+                    self.console
+                        .append(format!("\nCannot read Maven console: {error}\n").as_bytes());
+                    break;
+                }
+            }
+        }
+    }
 }
 
+#[cfg(target_os = "macos")]
+fn background_java_options(existing: Option<OsString>) -> OsString {
+    let mut options = existing.unwrap_or_default();
+    if !options.is_empty() {
+        options.push(" ");
+    }
+    options.push("-Dapple.awt.UIElement=true");
+    options
+}
+
+#[cfg(not(unix))]
 fn terminate_maven(child: &mut std::process::Child) {
     #[cfg(unix)]
     cleanup_maven_group(child.id());
@@ -904,4 +1274,147 @@ fn lifecycle_tasks() -> Vec<MavenTask> {
         goal: phase.into(),
     })
     .collect()
+}
+
+#[cfg(test)]
+mod progress_tests {
+    use super::MavenProgress;
+
+    #[test]
+    fn progress_counts_discovered_and_completed_modules() {
+        let progress = MavenProgress::default();
+        assert_eq!(progress.percent(), 0);
+        progress.discover(2);
+        progress.complete();
+        assert_eq!(progress.percent(), 33);
+        progress.complete();
+        progress.complete();
+        assert_eq!(progress.percent(), 99);
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod background_process_tests {
+    use super::background_java_options;
+    use std::ffi::OsString;
+
+    #[test]
+    fn java_options_preserve_existing_settings_and_disable_foreground_activation() {
+        assert_eq!(
+            background_java_options(Some(OsString::from("-Xmx512m"))),
+            OsString::from("-Xmx512m -Dapple.awt.UIElement=true")
+        );
+        assert_eq!(
+            background_java_options(None),
+            OsString::from("-Dapple.awt.UIElement=true")
+        );
+    }
+}
+
+#[cfg(test)]
+mod process_log_tests {
+    use super::{MavenConsole, MavenProcessLog};
+
+    #[test]
+    fn process_log_retains_the_most_recent_entries() {
+        let log = MavenProcessLog::default();
+        for index in 0..205 {
+            log.record(format!("event {index}"));
+        }
+        let entries = log.entries();
+        assert_eq!(entries.len(), 200);
+        assert_eq!(entries[0], "event 5");
+        assert_eq!(entries[199], "event 204");
+    }
+
+    #[test]
+    fn console_keeps_recent_output_with_a_bounded_buffer() {
+        let console = MavenConsole::default();
+        console.append(&vec![b'a'; 131_072]);
+        console.append(b"end");
+        let output = console.text();
+        assert_eq!(output.len(), 131_072);
+        assert!(output.ends_with("end"));
+    }
+
+    #[test]
+    fn console_hides_terminal_control_sequences() {
+        let console = MavenConsole::default();
+        console.append(b"\x1b[0m[INFO] ready\x1b[31m!\x1b[0m\r\n");
+        assert_eq!(console.text(), "[INFO] ready!\n");
+    }
+}
+
+#[cfg(all(test, unix))]
+mod terminal_process_tests {
+    use super::*;
+
+    fn context(console: Arc<MavenConsole>, cancellation: Arc<AtomicBool>) -> Context {
+        Context {
+            root: std::env::temp_dir(),
+            program: PathBuf::from("/bin/sh"),
+            environment: Vec::new(),
+            cancellation,
+            progress: Arc::new(MavenProgress::default()),
+            log: Arc::new(MavenProcessLog::default()),
+            console,
+            generation: 1,
+            profiles: Vec::new(),
+            scratch: Scratch::create().unwrap(),
+            next_output: 0,
+            seen_modules: HashSet::new(),
+            profile_ids: HashMap::new(),
+            plugin_goals: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn maven_reload_process_has_a_background_terminal_and_streams_output() {
+        let console = Arc::new(MavenConsole::default());
+        let context = context(Arc::clone(&console), Arc::new(AtomicBool::new(false)));
+        context
+            .run(
+                &["-c".into(), "test -t 1 && printf terminal-ready".into()],
+                "test",
+            )
+            .unwrap();
+        assert!(console.text().contains("terminal-ready"));
+    }
+
+    #[test]
+    fn cancelling_terminal_process_stops_it_after_streaming_output() {
+        let console = Arc::new(MavenConsole::default());
+        let cancellation = Arc::new(AtomicBool::new(false));
+        let context = context(Arc::clone(&console), Arc::clone(&cancellation));
+        let worker = thread::spawn(move || {
+            context.run(&["-c".into(), "printf ready; sleep 30".into()], "test")
+        });
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !console.text().contains("ready") && std::time::Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        let streamed = console.text().contains("ready");
+        cancellation.store(true, Ordering::Release);
+        let result = worker.join().unwrap();
+        assert!(streamed);
+        assert_eq!(result.unwrap_err(), "Maven view load cancelled");
+    }
+
+    #[test]
+    fn terminal_failure_preserves_maven_diagnostics() {
+        let context = context(
+            Arc::new(MavenConsole::default()),
+            Arc::new(AtomicBool::new(false)),
+        );
+        let error = context
+            .run(
+                &[
+                    "-c".into(),
+                    "printf '[ERROR] failure detail\\n'; exit 7".into(),
+                ],
+                "test",
+            )
+            .unwrap_err();
+        assert!(error.contains("[ERROR] failure detail"));
+    }
 }

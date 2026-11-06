@@ -327,6 +327,7 @@ pub struct TerminalTool {
     pub message: String,
     size: PtySize,
     focus_next: bool,
+    maven_console_selected: bool,
 }
 impl Default for TerminalTool {
     fn default() -> Self {
@@ -338,6 +339,7 @@ impl Default for TerminalTool {
             message: "Open a terminal in the project directory".into(),
             size: PtySize::default(),
             focus_next: false,
+            maven_console_selected: false,
         }
     }
 }
@@ -462,6 +464,26 @@ fn keyboard_bytes(event: &egui::Event) -> Option<Vec<u8>> {
 }
 
 pub fn render(ui: &mut egui::Ui, state: &mut crate::app::AppState) {
+    ui.horizontal(|ui| {
+        ui.selectable_value(
+            &mut state.terminal.maven_console_selected,
+            false,
+            crate::i18n::ui_text(ui, "Terminal"),
+        );
+        ui.selectable_value(
+            &mut state.terminal.maven_console_selected,
+            true,
+            crate::i18n::ui_text(ui, "Maven reload console"),
+        );
+    });
+    if state.terminal.maven_console_selected {
+        egui::ScrollArea::both()
+            .stick_to_bottom(true)
+            .show(ui, |ui| {
+                ui.monospace(state.maven_view_loader.console_output());
+            });
+        return;
+    }
     let mut action = None;
     ui.horizontal(|ui| {
         if state.terminal.session.is_none()
