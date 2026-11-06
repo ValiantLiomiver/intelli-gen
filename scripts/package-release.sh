@@ -117,6 +117,7 @@ APP_VERSION="$(sed -n 's/^version = "\([^"]*\)"/\1/p' "${ROOT_DIR}/Cargo.toml")"
 [[ -n "$APP_VERSION" ]] || fail "could not read Intelli-gen version from Cargo.toml"
 mkdir -p "${MACOS_DIR}" "${RESOURCES_DIR}/jdtls" "${RESOURCES_DIR}/java-debug" "${RESOURCES_DIR}/licenses"
 cp "$APP_BINARY" "${MACOS_DIR}/intelli-gen"
+cp "${ROOT_DIR}/resources/branding/app-icon.icns" "${RESOURCES_DIR}/app-icon.icns"
 cp -R "${JDT_EXTRACT_DIR}/." "${RESOURCES_DIR}/jdtls/"
 cp "$DEBUG_PLUGIN" "${RESOURCES_DIR}/java-debug/"
 
@@ -129,6 +130,7 @@ cat > "${CONTENTS_DIR}/Info.plist" <<EOF
   <key>CFBundleExecutable</key><string>intelli-gen</string>
   <key>CFBundleIdentifier</key><string>dev.intelli-gen.workbench</string>
   <key>CFBundleName</key><string>Intelli-gen</string>
+  <key>CFBundleIconFile</key><string>app-icon</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>${APP_VERSION}</string>
   <key>CFBundleVersion</key><string>${APP_VERSION}</string>
