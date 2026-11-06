@@ -570,6 +570,22 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
             ui.spinner();
             ui.label(crate::i18n::ui_text(ui, "Saving preferences…"));
         }
+        if state.maven_loading {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label(crate::i18n::ui_text(ui, "Loading effective Maven model…"));
+                let percent = state.maven_view_loader.progress_percent();
+                ui.add(
+                    egui::ProgressBar::new(percent as f32 / 100.0)
+                        .desired_width(120.0)
+                        .text(format!("{percent}%")),
+                )
+                .on_hover_text(crate::i18n::ui_text(
+                    ui,
+                    "Completed modules / discovered modules; progress can change as modules are discovered",
+                ));
+            });
+        }
         ui.label(crate::i18n::message(ui.ctx(), &state.status));
         for error in [&state.settings_load_error, &state.settings_save_error]
             .into_iter()
@@ -1136,6 +1152,18 @@ fn render_maven_sidebar(ui: &mut egui::Ui, state: &mut AppState) {
                     crate::i18n::message(ui.ctx(), error),
                 );
             }
+            egui::CollapsingHeader::new(crate::i18n::ui_text(ui, "Maven reload process log")).show(
+                ui,
+                |ui| {
+                    egui::ScrollArea::vertical()
+                        .max_height(150.0)
+                        .show(ui, |ui| {
+                            for entry in state.maven_view_loader.log_entries() {
+                                ui.monospace(entry);
+                            }
+                        });
+                },
+            );
             let Some(root) = state.maven_view_root.as_ref() else {
                 return;
             };
