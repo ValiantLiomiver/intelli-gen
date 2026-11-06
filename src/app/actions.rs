@@ -526,17 +526,35 @@ pub fn open_project_dialog(state: &mut AppState) {
     }
 }
 
-pub fn open_file_dialog(state: &mut AppState) {
-    if state.quit_approved {
+pub fn open_file_dialog(state: &mut AppState, context: &eframe::egui::Context) {
+    if state.quit_approved || state.open_file_dialog_pending {
         return;
     }
     let mut dialog =
-        rfd::FileDialog::new().set_title(state.translator.text("Open file").into_owned());
+        rfd::AsyncFileDialog::new().set_title(state.translator.text("Open file").into_owned());
     if let Some(project) = &state.project {
         dialog = dialog.set_directory(&project.root);
     }
-    if let Some(path) = dialog.pick_file() {
-        state.enqueue(AppEvent::OpenFile(path));
+    let picker = dialog.pick_file();
+    let sender = state.open_file_dialog_sender.clone();
+    let context = context.clone();
+    match std::thread::Builder::new()
+        .name("open-file-dialog".into())
+        .spawn(move || {
+            let result = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map(|runtime| {
+                    runtime
+                        .block_on(picker)
+                        .map(|file| file.path().to_path_buf())
+                })
+                .map_err(|error| format!("Cannot run file dialog: {error}"));
+            let _ = sender.send(result);
+            context.request_repaint();
+        }) {
+        Ok(_) => state.open_file_dialog_pending = true,
+        Err(error) => state.last_error = Some(format!("Cannot start file dialog: {error}")),
     }
 }
 
@@ -1087,6 +1105,7 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                     | AppEvent::Error(_)
                     | AppEvent::SettingsSaved { .. }
                     | AppEvent::FinderRevealed(_)
+                    | AppEvent::OpenFileDialogCompleted(_)
             )
         {
             continue;
@@ -1460,6 +1479,16 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
             AppEvent::FinderRevealed(result) => {
                 if let Err(error) = result {
                     state.last_error = Some(error);
+                }
+            }
+            AppEvent::OpenFileDialogCompleted(result) => {
+                state.open_file_dialog_pending = false;
+                match result {
+                    Ok(Some(path)) if !state.quit_requested => {
+                        state.enqueue(AppEvent::OpenFile(path));
+                    }
+                    Ok(_) => {}
+                    Err(error) => state.last_error = Some(error),
                 }
             }
             AppEvent::OpenFile(path) => {
@@ -2302,7 +2331,7 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                 MavenAction::ToggleCollapsed => state.maven_collapsed = !state.maven_collapsed,
                 MavenAction::Reload { root } => {
                     if !state.quit_requested && state.maven_view_root.as_ref() == Some(&root) {
-                        reload_maven_view(state);
+                        refresh_maven_dependencies(state);
                     }
                 }
                 MavenAction::ToggleProfile { root, profile } => {
@@ -2967,6 +2996,7 @@ fn sync_maven_profiles(state: &mut AppState, view: &crate::project::maven_view::
 }
 
 fn reload_maven_view(state: &mut AppState) {
+    refresh_maven_dependencies(state);
     state.maven_generation = state.maven_generation.wrapping_add(1);
     state.maven_loading = false;
     state.maven_error = None;
@@ -2978,14 +3008,6 @@ fn reload_maven_view(state: &mut AppState) {
             .filter(|model| model.kind == ProjectKind::Maven)
             .ok_or("Open a Maven project first")?
             .clone();
-        if let Err(error) = state
-            .language
-            .refresh_maven_project(crate::project::maven_watch::project_pom_paths(&model))
-        {
-            // Java-language refresh is auxiliary; it must not block the Maven
-            // view refresh requested by the user or POM watcher.
-            state.language.summary = format!("Maven language refresh unavailable: {error}");
-        }
         let jdk = configured_maven_jdk(state, &project.root)?;
         let mut profiles: Vec<_> = state.maven_profiles.iter().cloned().collect();
         profiles.sort();
@@ -3004,6 +3026,20 @@ fn reload_maven_view(state: &mut AppState) {
             Err(error) => state.maven_error = Some(error),
         },
         Err(error) => state.maven_error = Some(error),
+    }
+}
+
+fn refresh_maven_dependencies(state: &mut AppState) {
+    let pom_paths = state
+        .project
+        .as_ref()
+        .and_then(|project| project.model.as_ref())
+        .filter(|model| model.kind == ProjectKind::Maven)
+        .map(crate::project::maven_watch::project_pom_paths);
+    if let Some(pom_paths) = pom_paths
+        && let Err(error) = state.language.refresh_maven_project(pom_paths)
+    {
+        state.language.summary = format!("Maven language refresh unavailable: {error}");
     }
 }
 

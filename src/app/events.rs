@@ -29,6 +29,7 @@ pub enum AppEvent {
     RefreshProjectTree(PathBuf),
     RevealInFinder(PathBuf),
     FinderRevealed(Result<(), String>),
+    OpenFileDialogCompleted(Result<Option<PathBuf>, String>),
     OpenFile(PathBuf),
     OpenFileAtLine(PathBuf, usize),
     OpenFileAtPosition(PathBuf, crate::java::lsp::Position),

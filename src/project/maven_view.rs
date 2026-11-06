@@ -730,7 +730,15 @@ impl Context {
         #[cfg(unix)]
         {
             use std::os::unix::process::CommandExt;
-            command.process_group(0);
+            // Maven may launch Java helpers; give them no controlling terminal to activate.
+            unsafe {
+                command.pre_exec(|| {
+                    if libc::setsid() == -1 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    Ok(())
+                });
+            }
         }
         let mut child = command
             .spawn()
@@ -750,7 +758,7 @@ impl Context {
             }
         };
         // try_wait has already reaped the direct child. A wrapper may have left
-        // descendants in its process group, so clear that group before the
+        // descendants in its session's process group, so clear that group before the
         // metadata worker releases the app's close gate.
         #[cfg(unix)]
         cleanup_maven_group(child.id());
@@ -802,7 +810,7 @@ fn terminate_maven(child: &mut std::process::Child) {
 #[cfg(unix)]
 fn cleanup_maven_group(pid: u32) {
     if pid > 1 {
-        // SAFETY: Maven was launched in a fresh process group with PID as PGID.
+        // SAFETY: Maven was launched in a fresh session with PID as PGID.
         // A missing group simply means its descendants have already exited.
         unsafe {
             libc::kill(-(pid as libc::pid_t), libc::SIGKILL);

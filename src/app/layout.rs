@@ -58,7 +58,7 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
                 }
                 if ui.button(translator.text("Open File…")).clicked() {
                     ui.close();
-                    actions::open_file_dialog(state);
+                    actions::open_file_dialog(state, ui.ctx());
                 }
                 if ui.add_enabled(state.project.is_some(), egui::Button::new(crate::i18n::ui_text(ui, "Go to File…    ⇧⌘O"))).clicked() {
                     state.enqueue(AppEvent::SearchEverywhereOpen(
@@ -480,7 +480,7 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
                 actions::open_project_dialog(state);
             }
             if ui.button(crate::i18n::ui_text(ui, "Open File")).clicked() {
-                actions::open_file_dialog(state);
+                actions::open_file_dialog(state, ui.ctx());
             }
             ui.separator();
             let build_available = state.project.as_ref()
@@ -835,23 +835,14 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
                         actions::open_project_dialog(state);
                     }
                     if ui.button(crate::i18n::ui_text(ui, "Open File…")).clicked() {
-                        actions::open_file_dialog(state);
+                        actions::open_file_dialog(state, ui.ctx());
                     }
                 });
                 if !state.settings.recent_projects.is_empty() {
                     ui.add_space(28.0);
                     ui.strong(crate::i18n::ui_text(ui, "Recent Projects"));
                     for path in state.settings.recent_projects.clone().into_iter().take(8) {
-                        let name = path
-                            .file_name()
-                            .unwrap_or(path.as_os_str())
-                            .to_string_lossy()
-                            .into_owned();
-                        if ui
-                            .button(name)
-                            .on_hover_text(path.display().to_string())
-                            .clicked()
-                        {
+                        if ui.button(path.display().to_string()).clicked() {
                             state.enqueue(AppEvent::OpenProject(path));
                         }
                     }
@@ -1104,7 +1095,7 @@ fn render_maven_sidebar(ui: &mut egui::Ui, state: &mut AppState) {
         if let Some(root) = &state.maven_view_root {
             if ui
                 .small_button("↻")
-                .on_hover_text(crate::i18n::ui_text(ui, "Reload Maven structure"))
+                .on_hover_text(crate::i18n::ui_text(ui, "Reload Maven dependencies"))
                 .clicked()
             {
                 actions.push(AppEvent::Maven(MavenAction::Reload { root: root.clone() }));
