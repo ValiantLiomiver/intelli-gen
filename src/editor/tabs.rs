@@ -233,6 +233,21 @@ mod completion_trigger_tests {
     use super::*;
 
     #[test]
+    fn character_navigation_requests_scroll_to_target_line() {
+        let document = Document {
+            path: PathBuf::from("Main.java"),
+            text: "first\nsecond".into(),
+            saved_text: String::new(),
+            cursor_line: 1,
+            cursor_column: 1,
+            revision: 0,
+        };
+        let mut tab = EditorTab::new(document);
+        tab.navigate_to_character_index(8);
+        assert_eq!(tab.pending_line, Some(2));
+    }
+
+    #[test]
     fn pasted_dot_triggers_completion() {
         let mut document = Document {
             path: PathBuf::from("/project/src/Main.java"),
@@ -664,8 +679,17 @@ impl EditorTab {
         self.active_snippet_tab_stop = None;
         self.snippet_tab_stops.clear();
         self.pending_selection = None;
-        self.pending_line = None;
-        self.pending_character_index = Some(index.min(self.document.text.chars().count()));
+        let index = index.min(self.document.text.chars().count());
+        self.pending_line = Some(
+            self.document
+                .text
+                .chars()
+                .take(index)
+                .filter(|c| *c == '\n')
+                .count()
+                + 1,
+        );
+        self.pending_character_index = Some(index);
     }
 
     pub fn restore_document_cursor(&mut self) {
@@ -2225,7 +2249,7 @@ fn render_references_popup(context: &egui::Context, state: &mut AppState) {
                 ui.set_min_width(300.0);
                 ui.set_max_width(460.0);
                 ui.horizontal(|ui| {
-                    ui.heading(crate::i18n::ui_text(ui, "References"));
+                    ui.heading(crate::i18n::ui_text(ui, &state.language.locations_title));
                     ui.add_space(8.0);
                     if ui.small_button("×").clicked() {
                         close = true;

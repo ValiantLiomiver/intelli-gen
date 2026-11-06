@@ -5658,7 +5658,10 @@ pub fn render(ui: &mut eframe::egui::Ui, state: &mut crate::app::AppState) {
             }
         }
     }
-    if !state.language.locations.is_empty() && state.language.locations_title != "References" {
+    if !state.language.locations.is_empty()
+        && state.language.locations_title != "References"
+        && state.language.locations_title != "Definitions"
+    {
         egui::CollapsingHeader::new(format!(
             "{} ({})",
             state.language.locations_title,
