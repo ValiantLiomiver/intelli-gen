@@ -4567,7 +4567,7 @@ impl LanguageTool {
         document: &Document,
         tab_size: usize,
         insert_spaces: bool,
-    ) {
+    ) -> Option<u64> {
         let position = document.lsp_position();
         let navigation_request_id = is_location_command(command).then(|| {
             self.next_location_request_id = self.next_location_request_id.wrapping_add(1).max(1);
@@ -4636,12 +4636,13 @@ impl LanguageTool {
             })
         })();
         match result {
-            Ok(()) => {}
+            Ok(()) => navigation_request_id,
             Err(error) => {
                 if is_location_command(command) {
                     self.pending_location_request = None;
                 }
                 self.summary = error.to_string();
+                None
             }
         }
     }
@@ -5657,7 +5658,7 @@ pub fn render(ui: &mut eframe::egui::Ui, state: &mut crate::app::AppState) {
             }
         }
     }
-    if !state.language.locations.is_empty() {
+    if !state.language.locations.is_empty() && state.language.locations_title != "References" {
         egui::CollapsingHeader::new(format!(
             "{} ({})",
             state.language.locations_title,

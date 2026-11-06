@@ -334,6 +334,135 @@ fn navigate_to_position(state: &mut AppState, path: PathBuf, position: crate::ja
     open_file_at_position(state, target.path, target.position);
 }
 
+fn request_symbol_navigation(
+    state: &mut AppState,
+    path: PathBuf,
+    character_index: usize,
+    anchor: egui::Pos2,
+) {
+    let Some(tab) = state.editor_tabs.iter_mut().find(|tab| tab.path == path) else {
+        return;
+    };
+    if tab
+        .path
+        .extension()
+        .is_none_or(|extension| extension != "java")
+    {
+        return;
+    }
+    tab.document
+        .set_cursor(character_index.min(tab.document.text.chars().count()));
+    let document = tab.document.clone();
+    let (tab_size, insert_spaces) = state.java_indent_settings(&path);
+    state.language.sync_documents(&state.editor_tabs);
+    let request_id = state.language.request(
+        crate::java::lsp::EditorCommand::Definition,
+        &document,
+        tab_size,
+        insert_spaces,
+    );
+    let Some((request_id, version)) =
+        request_id.zip(state.language.document_versions().get(&path).copied())
+    else {
+        return;
+    };
+    state.pending_symbol_navigation = Some(super::PendingSymbolNavigation {
+        generation: state.language.generation(),
+        request_id,
+        phase: super::SymbolNavigationPhase::Definition,
+        path,
+        version,
+        position: document.lsp_position(),
+        anchor,
+    });
+    state.references_popup_anchor = None;
+}
+
+fn finish_symbol_definition(
+    state: &mut AppState,
+    generation: u64,
+    request_id: u64,
+    path: PathBuf,
+    version: i64,
+    position: crate::java::lsp::Position,
+    locations: Vec<crate::java::lsp::Location>,
+) {
+    let matches_request = state
+        .pending_symbol_navigation
+        .as_ref()
+        .is_some_and(|pending| {
+            pending.phase == super::SymbolNavigationPhase::Definition
+                && pending.generation == generation
+                && pending.request_id == request_id
+                && pending.path == path
+                && pending.version == version
+                && pending.position == position
+        });
+    if !matches_request {
+        return;
+    }
+    let pending = state.pending_symbol_navigation.take().unwrap();
+    if locations.iter().any(|location| {
+        location.path == pending.path
+            && position_in_range(position, location.range.start, location.range.end)
+    }) {
+        state.references_popup_anchor = Some(pending.anchor);
+        let Some(document) = state
+            .editor_tabs
+            .iter()
+            .find(|tab| tab.path == pending.path)
+            .map(|tab| tab.document.clone())
+        else {
+            state.references_popup_anchor = None;
+            return;
+        };
+        let (tab_size, insert_spaces) = state.java_indent_settings(&pending.path);
+        state.language.sync_documents(&state.editor_tabs);
+        let request_id = state.language.request(
+            crate::java::lsp::EditorCommand::References,
+            &document,
+            tab_size,
+            insert_spaces,
+        );
+        let Some((request_id, version)) = request_id.zip(
+            state
+                .language
+                .document_versions()
+                .get(&pending.path)
+                .copied(),
+        ) else {
+            return;
+        };
+        state.pending_symbol_navigation = Some(super::PendingSymbolNavigation {
+            generation: state.language.generation(),
+            request_id,
+            phase: super::SymbolNavigationPhase::References,
+            path: pending.path,
+            version,
+            position,
+            anchor: pending.anchor,
+        });
+    } else if let Some(location) = locations.into_iter().next() {
+        state.references_popup_anchor = None;
+        navigate_to_position(state, location.path, location.range.start);
+    } else {
+        state.references_popup_anchor = None;
+        state.status = state
+            .translator
+            .text("No definition found for this symbol")
+            .into_owned();
+    }
+}
+
+fn position_in_range(
+    position: crate::java::lsp::Position,
+    start: crate::java::lsp::Position,
+    end: crate::java::lsp::Position,
+) -> bool {
+    let position = (position.line, position.character);
+    (start.line, start.character) <= position && position <= (end.line, end.character)
+}
+
 fn move_navigation_history(state: &mut AppState, backwards: bool) {
     let target = if backwards {
         state.navigation_back.pop()
@@ -964,6 +1093,8 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
         }
         match event {
             AppEvent::OpenProject(path) => {
+                state.pending_symbol_navigation = None;
+                state.references_popup_anchor = None;
                 cancel_pending_workspace_applies(
                     state,
                     "Project changed before the workspace edit completed",
@@ -1491,6 +1622,11 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
             AppEvent::OpenFileAtPosition(path, position) => {
                 navigate_to_position(state, path, position);
             }
+            AppEvent::NavigateSymbol {
+                path,
+                character_index,
+                screen_position,
+            } => request_symbol_navigation(state, path, character_index, screen_position),
             AppEvent::NavigateBack => move_navigation_history(state, true),
             AppEvent::NavigateForward => move_navigation_history(state, false),
             AppEvent::NavigateLastEditLocation => {
@@ -1716,6 +1852,8 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                 state.quit_requested = false;
             }
             AppEvent::RequestQuit => {
+                state.pending_symbol_navigation = None;
+                state.references_popup_anchor = None;
                 cancel_pending_workspace_applies(state, "The IDE is closing");
                 state.quit_requested = true;
                 state.search_everywhere.close();
@@ -1731,11 +1869,28 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                         state.settings.java_insert_spaces,
                     ));
                 state.language.sync_documents(&state.editor_tabs);
+                if command == crate::java::lsp::EditorCommand::References {
+                    state.pending_symbol_navigation = None;
+                    state.references_popup_anchor = Some(
+                        state
+                            .editor_caret_screen_pos
+                            .unwrap_or_else(|| context.content_rect().center()),
+                    );
+                } else if matches!(
+                    command,
+                    crate::java::lsp::EditorCommand::Definition
+                        | crate::java::lsp::EditorCommand::Declaration
+                        | crate::java::lsp::EditorCommand::Implementation
+                        | crate::java::lsp::EditorCommand::TypeDefinition
+                ) {
+                    state.pending_symbol_navigation = None;
+                    state.references_popup_anchor = None;
+                }
                 if let Some(tab) = state
                     .active_tab
                     .and_then(|index| state.editor_tabs.get(index))
                 {
-                    state
+                    let _ = state
                         .language
                         .request(command, &tab.document, tab_size, insert_spaces);
                 }
@@ -1880,6 +2035,32 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
             }
             AppEvent::Language(update) => {
                 let generation = update.generation;
+                let symbol_definition = match &update.event {
+                    crate::java::lsp::LanguageEvent::Definition {
+                        path,
+                        version,
+                        position,
+                        request_id: Some(request_id),
+                        locations,
+                    } => Some((
+                        *request_id,
+                        path.clone(),
+                        *version,
+                        *position,
+                        locations.clone(),
+                    )),
+                    _ => None,
+                };
+                let symbol_references = match &update.event {
+                    crate::java::lsp::LanguageEvent::References {
+                        path,
+                        version,
+                        position,
+                        request_id: Some(request_id),
+                        ..
+                    } => Some((*request_id, path.clone(), *version, *position)),
+                    _ => None,
+                };
                 let document_edits = match &update.event {
                     crate::java::lsp::LanguageEvent::DocumentEdits {
                         path,
@@ -1909,6 +2090,24 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                 let accepted = state.language.accepts_generation(generation);
                 state.language.receive(update);
                 if accepted {
+                    if let Some((request_id, path, version, position, locations)) =
+                        symbol_definition
+                    {
+                        finish_symbol_definition(
+                            state, generation, request_id, path, version, position, locations,
+                        );
+                    }
+                    if let Some((request_id, path, version, position)) = symbol_references
+                        && let Some(pending) = state.pending_symbol_navigation.as_ref()
+                        && pending.phase == super::SymbolNavigationPhase::References
+                        && pending.generation == generation
+                        && pending.request_id == request_id
+                        && pending.path == path
+                        && pending.version == version
+                        && pending.position == position
+                    {
+                        state.pending_symbol_navigation = None;
+                    }
                     if let Some((request_id, label, result)) = workspace_apply {
                         begin_workspace_apply(state, generation, request_id, label, result);
                     }
@@ -4966,6 +5165,8 @@ pub(crate) fn restart_language(state: &mut AppState) {
     if state.quit_requested {
         return;
     }
+    state.pending_symbol_navigation = None;
+    state.references_popup_anchor = None;
     cancel_pending_workspace_applies(state, "Java language session is restarting");
     state.pending_rename_request = None;
     state.pending_workspace_edits.clear();

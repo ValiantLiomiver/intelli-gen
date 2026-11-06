@@ -181,6 +181,9 @@ pub struct AppState {
     pub pending_language_restart: bool,
     pub pending_navigation: std::collections::HashMap<PathBuf, crate::java::lsp::Position>,
     pub(crate) problem_navigation: Option<problems::ProblemCursor>,
+    pub pending_symbol_navigation: Option<PendingSymbolNavigation>,
+    pub references_popup_anchor: Option<egui::Pos2>,
+    pub editor_caret_screen_pos: Option<egui::Pos2>,
     pub project_tree: Option<ProjectTree>,
     pub project_tree_error: Option<String>,
     pub new_java_class: Option<NewJavaClassDialog>,
@@ -298,6 +301,22 @@ pub struct PendingWorkspaceApply {
     pub label: String,
     pub open_revisions: HashMap<PathBuf, u64>,
     pub files: Vec<crate::java::lsp::WorkspaceFileEdits>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SymbolNavigationPhase {
+    Definition,
+    References,
+}
+
+pub struct PendingSymbolNavigation {
+    pub generation: u64,
+    pub request_id: u64,
+    pub phase: SymbolNavigationPhase,
+    pub path: PathBuf,
+    pub version: i64,
+    pub position: crate::java::lsp::Position,
+    pub anchor: egui::Pos2,
 }
 
 #[derive(Clone)]
@@ -471,6 +490,9 @@ impl IdeaLikeApp {
             pending_language_restart: false,
             pending_navigation: Default::default(),
             problem_navigation: None,
+            pending_symbol_navigation: None,
+            references_popup_anchor: None,
+            editor_caret_screen_pos: None,
             project_tree: None,
             project_tree_error: None,
             new_java_class: None,
