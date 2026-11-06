@@ -402,7 +402,9 @@ fn finish_symbol_definition(
         return;
     }
     let pending = state.pending_symbol_navigation.take().unwrap();
-    if locations.iter().any(|location| {
+    if locations.len() > 1 {
+        state.references_popup_anchor = Some(pending.anchor);
+    } else if locations.iter().any(|location| {
         location.path == pending.path
             && position_in_range(position, location.range.start, location.range.end)
     }) {
@@ -1889,6 +1891,20 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
             }
             AppEvent::EditorCompleted(completion) => editor_completed(state, completion),
             AppEvent::EditorCommand(command) => {
+                if command == crate::java::lsp::EditorCommand::Definition {
+                    if let Some(tab) = state
+                        .active_tab
+                        .and_then(|index| state.editor_tabs.get(index))
+                    {
+                        let path = tab.path.clone();
+                        let cursor = tab.document.character_index();
+                        let anchor = state
+                            .editor_caret_screen_pos
+                            .unwrap_or_else(|| context.content_rect().center());
+                        request_symbol_navigation(state, path, cursor, anchor);
+                    }
+                    continue;
+                }
                 let (tab_size, insert_spaces) = state
                     .active_tab
                     .and_then(|index| state.editor_tabs.get(index))
