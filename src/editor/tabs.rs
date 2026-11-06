@@ -955,36 +955,39 @@ impl EditorTab {
         insert_spaces: bool,
         semantic: Option<(&str, &[crate::java::lsp::SemanticHighlight])>,
         folding: Option<(&str, &[crate::java::lsp::FoldRegion])>,
-    ) -> (Option<super::GutterBreakpointAction>, Option<egui::Pos2>) {
+    ) -> (
+        Option<super::GutterBreakpointAction>,
+        Option<egui::Pos2>,
+        Option<(usize, egui::Pos2)>,
+    ) {
         if self.document.text.len() > PAGED_EDITOR_BYTES {
             self.active_snippet_tab_stop = None;
             self.snippet_tab_stops.clear();
             self.pending_selection = None;
-            return (
-                self.render_paged_editor(
-                    ui,
-                    allow_edits && !self.close_after_save,
-                    bookmarks,
-                    breakpoints,
-                    logpoints,
-                    disabled_breakpoints,
-                    breakpoint_status,
-                    current_line,
-                    diagnostics,
-                    test_class_line,
-                    test_methods,
-                    indent_size,
-                    continuation_indent_size,
-                    insert_spaces,
-                    semantic,
-                    folding,
-                ),
-                None,
+            let (toggled, symbol_click) = self.render_paged_editor(
+                ui,
+                allow_edits && !self.close_after_save,
+                bookmarks,
+                breakpoints,
+                logpoints,
+                disabled_breakpoints,
+                breakpoint_status,
+                current_line,
+                diagnostics,
+                test_class_line,
+                test_methods,
+                indent_size,
+                continuation_indent_size,
+                insert_spaces,
+                semantic,
+                folding,
             );
+            return (toggled, None, symbol_click);
         }
         self.page_end = 0;
         let mut toggled = None;
         let mut cursor_screen_pos = None;
+        let mut symbol_click = None;
         let editor_id = egui::Id::new(("source_editor", &self.path));
         if let Some((start, end)) = self.pending_selection.take() {
             let mut state =
@@ -1195,6 +1198,34 @@ impl EditorTab {
                             cursor_screen_pos = Some(cursor_rect.left_bottom());
                         }
                     }
+                    if java
+                        && let Some(pointer) = ui.input(|input| {
+                            let position = input.pointer.interact_pos()?;
+                            (input.pointer.button_clicked(egui::PointerButton::Middle)
+                                || (input.pointer.button_clicked(egui::PointerButton::Primary)
+                                    && input.modifiers.command))
+                                .then_some(position)
+                        })
+                        && output.text_clip_rect.contains(pointer)
+                    {
+                        let cursor = output.galley.cursor_from_pos(
+                            pointer - output.galley_pos
+                                + egui::vec2(output.galley.rect.left(), 0.0),
+                        );
+                        let index = usize::from(cursor.index);
+                        self.document.set_cursor(index);
+                        let mut text_state =
+                            egui::text_edit::TextEditState::load(ui.ctx(), editor_id)
+                                .unwrap_or_default();
+                        text_state
+                            .cursor
+                            .set_char_range(Some(egui::text::CCursorRange::one(
+                                egui::text::CCursor::new(index),
+                            )));
+                        text_state.store(ui.ctx(), editor_id);
+                        ui.memory_mut(|memory| memory.request_focus(editor_id));
+                        symbol_click = self.document.word_at_cursor().map(|_| (index, pointer));
+                    }
                 });
             });
         if let Some(line) = expand_fold {
@@ -1215,7 +1246,7 @@ impl EditorTab {
             self.active_snippet_tab_stop = None;
             self.snippet_tab_stops.clear();
         }
-        (toggled, cursor_screen_pos)
+        (toggled, cursor_screen_pos, symbol_click)
     }
 
     fn adjust_snippet_tab_stops(&mut self, previous_length: usize) {
@@ -1343,7 +1374,10 @@ impl EditorTab {
         insert_spaces: bool,
         semantic: Option<(&str, &[crate::java::lsp::SemanticHighlight])>,
         folding: Option<(&str, &[crate::java::lsp::FoldRegion])>,
-    ) -> Option<super::GutterBreakpointAction> {
+    ) -> (
+        Option<super::GutterBreakpointAction>,
+        Option<(usize, egui::Pos2)>,
+    ) {
         ui.colored_label(ui.visuals().warn_fg_color,
             crate::i18n::ui_text(ui, "Large file: editing is limited to the visible page. Save writes the complete document."));
         let mut target_cursor = self
@@ -1570,6 +1604,40 @@ impl EditorTab {
             })
             .inner
             .inner;
+        let symbol_click = if super::highlighter::SourceLanguage::for_path(&self.path)
+            == super::highlighter::SourceLanguage::Java
+        {
+            ui.input(|input| {
+                let pointer = input.pointer.interact_pos()?;
+                (input.pointer.button_clicked(egui::PointerButton::Middle)
+                    || (input.pointer.button_clicked(egui::PointerButton::Primary)
+                        && input.modifiers.command))
+                    .then_some(pointer)
+            })
+            .filter(|pointer| output.text_clip_rect.contains(*pointer))
+            .and_then(|pointer| {
+                let cursor = output.galley.cursor_from_pos(
+                    pointer - output.galley_pos + egui::vec2(output.galley.rect.left(), 0.0),
+                );
+                let index: usize = cursor.index.into();
+                let index = self.document.text[..self.page_start].chars().count() + index;
+                self.document.set_cursor(index);
+                let mut text_state =
+                    egui::text_edit::TextEditState::load(ui.ctx(), editor_id).unwrap_or_default();
+                text_state
+                    .cursor
+                    .set_char_range(Some(egui::text::CCursorRange::one(
+                        egui::text::CCursor::new(
+                            index - self.document.text[..self.page_start].chars().count(),
+                        ),
+                    )));
+                text_state.store(ui.ctx(), editor_id);
+                ui.memory_mut(|memory| memory.request_focus(editor_id));
+                self.document.word_at_cursor().map(|_| (index, pointer))
+            })
+        } else {
+            None
+        };
         if let Some((source, _)) = folding
             && source.get(self.page_start..self.page_start.saturating_add(page.len()))
                 == Some(page.as_str())
@@ -1631,7 +1699,7 @@ impl EditorTab {
                 self.page_cursor = Some(page_cursor);
             }
         }
-        toggled
+        (toggled, symbol_click)
     }
 }
 
@@ -1778,6 +1846,7 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
     let mut run_test_class_action = None;
     let mut run_test_method_action = None;
     let mut completion_popup_action = None;
+    let mut symbol_navigation_action = None;
     let mut hover_popup_dismissed = false;
     let mut last_edit_location = None;
     let mut bookmarks_adjusted = false;
@@ -1903,7 +1972,7 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
         } else {
             &[]
         };
-        let (toggled, completion_position) = tab.render_editor(
+        let (toggled, completion_position, symbol_click) = tab.render_editor(
             ui,
             !state.quit_approved,
             &bookmark_lines,
@@ -1950,6 +2019,14 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
             }
         }
         let path = tab.path.clone();
+        state.editor_caret_screen_pos = completion_position;
+        if let Some((character_index, screen_position)) = symbol_click {
+            symbol_navigation_action = Some(AppEvent::NavigateSymbol {
+                path: path.clone(),
+                character_index,
+                screen_position,
+            });
+        }
         if let Some(position) = completion_position {
             let caret = tab.document.lsp_position();
             let completion_is_current = state.language.completion.as_ref().is_some_and(
@@ -2126,6 +2203,77 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
     }
     if let Some(action) = run_test_method_action {
         state.enqueue(AppEvent::Build(action));
+    }
+    if let Some(event) = symbol_navigation_action {
+        state.enqueue(event);
+    }
+    render_references_popup(ui.ctx(), state);
+}
+
+fn render_references_popup(context: &egui::Context, state: &mut AppState) {
+    let Some(anchor) = state.references_popup_anchor else {
+        return;
+    };
+    let mut close = context.input(|input| input.key_pressed(egui::Key::Escape));
+    let mut target = None;
+    let response = egui::Area::new(egui::Id::new("java_references_popup"))
+        .order(egui::Order::Foreground)
+        .fixed_pos(anchor + egui::vec2(8.0, 12.0))
+        .constrain(true)
+        .show(context, |ui| {
+            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                ui.set_min_width(300.0);
+                ui.set_max_width(460.0);
+                ui.horizontal(|ui| {
+                    ui.heading(crate::i18n::ui_text(ui, "References"));
+                    ui.add_space(8.0);
+                    if ui.small_button("×").clicked() {
+                        close = true;
+                    }
+                });
+                if state.language.locations.is_empty() {
+                    ui.label(crate::i18n::ui_text(ui, "No file-backed references found"));
+                } else {
+                    egui::ScrollArea::vertical()
+                        .max_height(260.0)
+                        .show(ui, |ui| {
+                            for location in &state.language.locations {
+                                let label = format!(
+                                    "{}:{}:{}",
+                                    location
+                                        .path
+                                        .file_name()
+                                        .unwrap_or_default()
+                                        .to_string_lossy(),
+                                    location.range.start.line + 1,
+                                    location.range.start.character + 1
+                                );
+                                if ui
+                                    .selectable_label(false, label)
+                                    .on_hover_text(location.path.display().to_string())
+                                    .clicked()
+                                {
+                                    target = Some((location.path.clone(), location.range.start));
+                                }
+                            }
+                        });
+                }
+            });
+        });
+    if context.input(|input| input.pointer.any_click())
+        && !response
+            .response
+            .rect
+            .contains(context.input(|input| input.pointer.interact_pos().unwrap_or_default()))
+    {
+        close = true;
+    }
+    if close {
+        state.references_popup_anchor = None;
+    }
+    if let Some((path, position)) = target {
+        state.references_popup_anchor = None;
+        state.enqueue(AppEvent::OpenFileAtPosition(path, position));
     }
 }
 

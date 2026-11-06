@@ -32,6 +32,11 @@ pub enum AppEvent {
     OpenFile(PathBuf),
     OpenFileAtLine(PathBuf, usize),
     OpenFileAtPosition(PathBuf, crate::java::lsp::Position),
+    NavigateSymbol {
+        path: PathBuf,
+        character_index: usize,
+        screen_position: eframe::egui::Pos2,
+    },
     NavigateBack,
     NavigateForward,
     NavigateLastEditLocation,
