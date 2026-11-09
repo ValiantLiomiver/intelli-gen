@@ -663,6 +663,7 @@ pub fn render(ui: &mut eframe::egui::Ui, state: &mut crate::app::AppState) {
                 );
                 if focus_expression {
                     response.request_focus();
+                    response.scroll_to_me(Some(egui::Align::Center));
                 }
                 let evaluate = ui
                     .add_enabled(
@@ -693,6 +694,49 @@ pub fn render(ui: &mut eframe::egui::Ui, state: &mut crate::app::AppState) {
         });
     for action in actions {
         state.enqueue(AppEvent::Debugger(action));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use eframe::egui;
+
+    #[test]
+    fn focusing_expression_scrolls_debugger_into_view() {
+        let context = egui::Context::default();
+        let mut app = crate::app::IdeaLikeApp::new_with_context(context.clone(), None);
+        let mut scroll_id = None;
+        let mut frame = |request_focus: bool| {
+            app.state.debugger.inspector.focus_expression_requested = request_focus;
+            let mut output = context.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(800.0, 180.0),
+                    )),
+                    ..Default::default()
+                },
+                |root| {
+                    egui::CentralPanel::default().show(root, |ui| {
+                        scroll_id =
+                            Some(ui.make_persistent_id(egui::IdSalt::new("debug_contents")));
+                        render(ui, &mut app.state);
+                    });
+                },
+            );
+            output.textures_delta.clear();
+        };
+        frame(false);
+        frame(true);
+        for _ in 0..10 {
+            frame(false);
+        }
+        let state = egui::scroll_area::State::load(&context, scroll_id.unwrap()).unwrap();
+        assert!(
+            state.offset().y > 0.0,
+            "expression must be scrolled into view"
+        );
     }
 }
 

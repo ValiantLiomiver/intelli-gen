@@ -291,7 +291,38 @@ step into/out, conditional logpoint output, cancellation, and worker cleanup.
 The server resolved `smoke` rather than the deliberately incorrect model name
 `directory-fallback`.
 
-For this test, use the same `smoke` fixture with an Eclipse `.project` declaring
+It also passed on 2026-11-09 against the current Rust worker and packaged Java
+tools with an Eclipse fixture and JDK 25, including all three debug sessions.
+On the same date, a native accessibility smoke check launched the current debug
+build and opened a disposable Gradle project from the recent-project list. The
+project status, tree, and window title confirmed the result. A separate native
+smoke check opened a disposable Java file, edited it through accessibility,
+saved it from the File menu, and verified the resulting bytes on disk. A native
+debug smoke check created a run configuration, stopped at a source breakpoint,
+displayed the main stack frame, evaluated `1 + 2` as `3`, continued, and
+observed `43` in the console. A second native session stepped into `add` at
+line 8, out to line 4, and over to line 5 before continuing to output `42`.
+A further session selected GraalVM 23 in the run configuration while the
+project default was Corretto 8; evaluation inside the stopped debuggee returned
+`"23"` for `java.specification.version`.
+The native Run flow also built the Gradle 6.7 fixture with the project JDK 8,
+then launched it with the configuration's JDK 23 and displayed `42`.
+With an edited file, Cancel kept the buffer dirty and disk unchanged; Save and
+Run saved the file, built it, and displayed the updated output `77`.
+A separate native Maven smoke check built a disposable project offline through
+its wrapper, confirmed `Main.class` on disk, then saved an intentional compiler
+error and navigated from the Build diagnostic to line 3. JDT LS reported the
+file as outside an imported Java project until Maven refresh was requested;
+after refresh it reported the undefined method as a semantic error. The
+Maven sidebar also loaded its profiles, lifecycle, and plugin sections.
+A native unsaved-file check confirmed that Cancel retains the dirty buffer,
+Save and Close writes the disposable file, and Discard closes its tab without
+changing disk contents. The Go to Line dialog also accepted `3:3` and moved the
+caret there. These modal buttons expose non-empty bounds to macOS accessibility.
+
+For this test, use the `Main.java` with the `add` helper shown in the Maven
+fixture below, compiled into `bin/` with debug information. Use an Eclipse
+`smoke` fixture with a `.project` declaring
 `org.eclipse.jdt.core.javanature` and a `.classpath` with the source root, JRE
 container, and `bin` output directory. Set `INTELLI_GEN_DAP_PROJECT` to the fixture,
 `INTELLI_GEN_JAVA_HOME` to a Java 25+ JDK home, and
@@ -326,6 +357,7 @@ with installed Gradle 6.7.1 and Corretto JDK 8, offline and with an isolated Gra
 user home. It invokes the production build worker for Build, Test, and Clean, checks
 successful completion events and selected JDK reporting, confirms compilation of
 `custom/app/src/main/java/Main.java`, and checks that Clean removes its `.class`.
+It passed again on 2026-11-09 against the current Rust worker.
 The fixture's settings include `:app` with
 `project(':app').projectDir = file('custom/app')`; its module applies the Java
 plugin and uses only local JUnit/Hamcrest JARs for its test dependencies.

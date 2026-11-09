@@ -248,10 +248,7 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
                     state.translator = translator;
                     state.localization_error = error;
                     ui.ctx().send_viewport_cmd(egui::ViewportCommand::Title(
-                        state
-                            .translator
-                            .text("Intelli-gen — Java Workbench")
-                            .into_owned(),
+                        state.window_title(),
                     ));
                     state.enqueue(AppEvent::SettingsChanged);
                 }
@@ -821,48 +818,50 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
 
     egui::CentralPanel::default().show(ui, |ui| {
         if state.editor_tabs.is_empty() {
-            ui.vertical_centered(|ui| {
-                ui.add_space(36.0);
-                if state.project.is_some() {
-                    ui.heading(crate::i18n::ui_text(ui, "No file open"));
-                    ui.label(crate::i18n::ui_text(
-                        ui,
-                        "Choose a source file from the project tree or open another project.",
-                    ));
-                } else {
-                    ui.heading(crate::i18n::ui_text(ui, "Java Workbench"));
-                    ui.label(crate::i18n::ui_text(
-                        ui,
-                        "Create a Java project or open an existing Maven or Gradle workspace.",
-                    ));
-                }
-                ui.add_space(12.0);
-                ui.horizontal(|ui| {
-                    if ui
-                        .button(crate::i18n::ui_text(ui, "New Java Project…"))
-                        .clicked()
-                    {
-                        state.enqueue(AppEvent::NewJavaProjectOpen);
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                ui.vertical_centered(|ui| {
+                    ui.add_space(36.0);
+                    if state.project.is_some() {
+                        ui.heading(crate::i18n::ui_text(ui, "No file open"));
+                        ui.label(crate::i18n::ui_text(
+                            ui,
+                            "Choose a source file from the project tree or open another project.",
+                        ));
+                    } else {
+                        ui.heading(crate::i18n::ui_text(ui, "Java Workbench"));
+                        ui.label(crate::i18n::ui_text(
+                            ui,
+                            "Create a Java project or open an existing Maven or Gradle workspace.",
+                        ));
                     }
-                    if ui
-                        .button(crate::i18n::ui_text(ui, "Open Project…"))
-                        .clicked()
-                    {
-                        actions::open_project_dialog(state);
-                    }
-                    if ui.button(crate::i18n::ui_text(ui, "Open File…")).clicked() {
-                        actions::open_file_dialog(state, ui.ctx());
-                    }
-                });
-                if !state.settings.recent_projects.is_empty() {
-                    ui.add_space(28.0);
-                    ui.strong(crate::i18n::ui_text(ui, "Recent Projects"));
-                    for path in state.settings.recent_projects.clone().into_iter().take(8) {
-                        if ui.button(path.display().to_string()).clicked() {
-                            state.enqueue(AppEvent::OpenProject(path));
+                    ui.add_space(12.0);
+                    ui.horizontal(|ui| {
+                        if ui
+                            .button(crate::i18n::ui_text(ui, "New Java Project…"))
+                            .clicked()
+                        {
+                            state.enqueue(AppEvent::NewJavaProjectOpen);
+                        }
+                        if ui
+                            .button(crate::i18n::ui_text(ui, "Open Project…"))
+                            .clicked()
+                        {
+                            actions::open_project_dialog(state);
+                        }
+                        if ui.button(crate::i18n::ui_text(ui, "Open File…")).clicked() {
+                            actions::open_file_dialog(state, ui.ctx());
+                        }
+                    });
+                    if !state.settings.recent_projects.is_empty() {
+                        ui.add_space(28.0);
+                        ui.strong(crate::i18n::ui_text(ui, "Recent Projects"));
+                        for path in state.settings.recent_projects.clone().into_iter().take(8) {
+                            if ui.button(path.display().to_string()).clicked() {
+                                state.enqueue(AppEvent::OpenProject(path));
+                            }
                         }
                     }
-                }
+                })
             });
         } else {
             crate::editor::tabs::render(ui, state);
@@ -951,7 +950,7 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
     if let Some(dialog) = state.new_java_class.as_mut() {
         let mut create = false;
         let mut cancel = false;
-        egui::Modal::new(egui::Id::unique("new_java_class_modal")).show(ui.ctx(), |ui| {
+        super::show_modal(ui.ctx(), egui::Id::unique("new_java_class_modal"), |ui| {
             ui.heading(crate::i18n::ui_text(ui, "New Java Class"));
             ui.label(dialog.directory.display().to_string());
             ui.add(
@@ -990,15 +989,20 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
         let mut create = false;
         let mut cancel = false;
         let mut choose_parent = false;
-        egui::Modal::new(egui::Id::unique("new_java_project_modal")).show(ui.ctx(), |ui| {
+        super::show_modal(ui.ctx(), egui::Id::unique("new_java_project_modal"), |ui| {
             ui.heading(crate::i18n::ui_text(ui, "New Java Project"));
             ui.horizontal(|ui| {
                 ui.label(crate::i18n::ui_text(ui, "Location"));
                 ui.label(dialog.parent.display().to_string());
                 choose_parent = ui.button(crate::i18n::ui_text(ui, "Choose…")).clicked();
             });
-            ui.add(egui::TextEdit::singleline(&mut dialog.name).hint_text(crate::i18n::ui_text(ui, "Project name")));
-            ui.add(egui::TextEdit::singleline(&mut dialog.package).hint_text(crate::i18n::ui_text(ui, "Java package (optional, e.g. com.example)")));
+            ui.add(
+                egui::TextEdit::singleline(&mut dialog.name)
+                    .hint_text(crate::i18n::ui_text(ui, "Project name")),
+            );
+            ui.add(egui::TextEdit::singleline(&mut dialog.package).hint_text(
+                crate::i18n::ui_text(ui, "Java package (optional, e.g. com.example)"),
+            ));
             egui::ComboBox::from_id_salt("new_java_project_kind")
                 .selected_text(dialog.kind.to_string())
                 .show_ui(ui, |ui| {
@@ -1006,7 +1010,12 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
                     ui.selectable_value(&mut dialog.kind, ProjectKind::Gradle, "Gradle");
                 });
             ui.horizontal(|ui| {
-                create = ui.add_enabled(!dialog.name.trim().is_empty(), egui::Button::new(crate::i18n::ui_text(ui, "Create"))).clicked();
+                create = ui
+                    .add_enabled(
+                        !dialog.name.trim().is_empty(),
+                        egui::Button::new(crate::i18n::ui_text(ui, "Create")),
+                    )
+                    .clicked();
                 cancel = ui.button(crate::i18n::ui_text(ui, "Cancel")).clicked();
             });
             ui.small(crate::i18n::ui_text(ui, "Creates a Java 8 starter project locally. No tools or dependencies are downloaded."));
@@ -1036,7 +1045,7 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
     if let Some(dialog) = state.rename_symbol.as_mut() {
         let mut confirm = false;
         let mut cancel = false;
-        egui::Modal::new(egui::Id::unique("rename_symbol_modal")).show(ui.ctx(), |ui| {
+        super::show_modal(ui.ctx(), egui::Id::unique("rename_symbol_modal"), |ui| {
             ui.heading(crate::i18n::ui_text(ui, "Rename Java Symbol"));
             ui.label(crate::i18n::ui_format(
                 ui,
@@ -1079,23 +1088,27 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
         let file_count = pending.save_paths.len();
         let mut confirm = false;
         let mut cancel = false;
-        egui::Modal::new(egui::Id::new("run_save_confirmation_modal")).show(ui.ctx(), |ui| {
-            ui.heading(crate::i18n::ui_text(
-                ui,
-                "Save project files before running?",
-            ));
-            ui.label(crate::i18n::ui_format(
-                ui,
-                "{count} open project file(s) have unsaved changes.",
-                &[("count", &file_count.to_string())],
-            ));
-            ui.horizontal(|ui| {
-                confirm = ui
-                    .button(crate::i18n::ui_text(ui, "Save and Run"))
-                    .clicked();
-                cancel = ui.button(crate::i18n::ui_text(ui, "Cancel")).clicked();
-            });
-        });
+        super::show_modal(
+            ui.ctx(),
+            egui::Id::new("run_save_confirmation_modal"),
+            |ui| {
+                ui.heading(crate::i18n::ui_text(
+                    ui,
+                    "Save project files before running?",
+                ));
+                ui.label(crate::i18n::ui_format(
+                    ui,
+                    "{count} open project file(s) have unsaved changes.",
+                    &[("count", &file_count.to_string())],
+                ));
+                ui.horizontal(|ui| {
+                    confirm = ui
+                        .button(crate::i18n::ui_text(ui, "Save and Run"))
+                        .clicked();
+                    cancel = ui.button(crate::i18n::ui_text(ui, "Cancel")).clicked();
+                });
+            },
+        );
         if confirm {
             state.enqueue(AppEvent::Run(super::events::RunAction::ConfirmSaveAndRun));
         } else if cancel {
@@ -1500,6 +1513,81 @@ fn render_maven_task(
 #[cfg(test)]
 mod build_menu_tests {
     use super::*;
+
+    #[test]
+    fn window_title_tracks_the_workspace_and_language() {
+        let context = egui::Context::default();
+        let mut app = crate::app::IdeaLikeApp::new_with_context(context, None);
+        app.state.translator =
+            crate::i18n::Translator::load(crate::i18n::LanguagePreference::English, None).0;
+        assert_eq!(app.state.window_title(), "Intelli-gen — Java Workbench");
+        app.state.project = Some(crate::project::Project {
+            root: "/workspace/demo".into(),
+            kind: crate::project::ProjectKind::Gradle,
+            display_name: "demo".into(),
+            model: None,
+            discovery_error: None,
+        });
+        assert_eq!(app.state.window_title(), "Intelli-gen — demo");
+        app.state.translator =
+            crate::i18n::Translator::load(crate::i18n::LanguagePreference::Italian, None).0;
+        assert_eq!(app.state.window_title(), "Intelli-gen — demo");
+    }
+
+    #[test]
+    fn welcome_recent_projects_can_be_scrolled_in_a_short_window() {
+        let context = egui::Context::default();
+        context.global_style_mut(|style| style.animation_time = 0.0);
+        let mut app = crate::app::IdeaLikeApp::new_with_context(context.clone(), None);
+        app.state.settings = crate::settings::UserSettings::default();
+        app.state.settings.recent_projects = (0..8)
+            .map(|i| std::path::PathBuf::from(format!("/recent/project-{i}")))
+            .collect();
+        app.state.settings.show_tool_window = true;
+        let mut render_frame = |events| {
+            let mut output = context.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(800.0, 450.0),
+                    )),
+                    events,
+                    ..Default::default()
+                },
+                |ui| render(ui, &mut app.state),
+            );
+            output.textures_delta.clear();
+            output
+        };
+        render_frame(Vec::new());
+        render_frame(vec![
+            egui::Event::PointerMoved(egui::pos2(500.0, 150.0)),
+            egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point,
+                delta: egui::vec2(0.0, -500.0),
+                phase: egui::TouchPhase::Move,
+                source: egui::MouseWheelSource::Trackpad,
+                modifiers: egui::Modifiers::NONE,
+            },
+        ]);
+        for _ in 0..10 {
+            render_frame(Vec::new());
+        }
+        let output = render_frame(Vec::new());
+        let mut positions = Vec::new();
+        for shape in &output.shapes {
+            text_positions(&shape.shape, "/recent/project-7", &mut positions);
+        }
+        assert!(
+            positions.iter().any(|position| position.y < 220.0),
+            "{positions:?}"
+        );
+        render_frame(click(positions[0]));
+        assert!(app.state.events.iter().any(|event| matches!(
+            event,
+            AppEvent::OpenProject(path) if path == std::path::Path::new("/recent/project-7")
+        )));
+    }
 
     fn frame(
         context: &egui::Context,

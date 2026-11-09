@@ -1058,6 +1058,11 @@ fn test_source_line(stack_trace: &str, class_name: &str) -> Option<usize> {
     let source_name = class_name.rsplit('.').next()?.split('$').next()?;
     let marker = format!("({source_name}.java:");
     stack_trace.lines().find_map(|line| {
+        let frame = line.trim().strip_prefix("at ")?.split('(').next()?;
+        let frame_class = frame.rsplit_once('.')?.0.rsplit('/').next()?;
+        if frame_class.split('$').next() != class_name.split('$').next() {
+            return None;
+        }
         let start = line.find(&marker)? + marker.len();
         let digits: String = line[start..]
             .chars()
@@ -1065,6 +1070,17 @@ fn test_source_line(stack_trace: &str, class_name: &str) -> Option<usize> {
             .collect();
         digits.parse::<usize>().ok().filter(|line| *line > 0)
     })
+}
+
+#[cfg(test)]
+mod test_source_line_tests {
+    use super::test_source_line;
+
+    #[test]
+    fn ignores_frames_from_same_named_class_in_another_package() {
+        let trace = "at other.ExampleTest.helper(ExampleTest.java:10)\n    at app.ExampleTest.fails(ExampleTest.java:42)";
+        assert_eq!(test_source_line(trace, "app.ExampleTest"), Some(42));
+    }
 }
 
 async fn read_output(

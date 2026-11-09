@@ -22,7 +22,7 @@ impl GoToLine {
         }
         let mut chosen = None;
         let mut close = false;
-        egui::Modal::new(egui::Id::new("go_to_line_modal")).show(ctx, |ui| {
+        super::show_modal(ctx, egui::Id::new("go_to_line_modal"), |ui| {
             ui.set_min_width(360.0);
             ui.heading(crate::i18n::ui_text(ui, "Go to Line:Column"));
             let response = ui

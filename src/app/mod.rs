@@ -22,6 +22,74 @@ use crate::project::{Project, maven_cache::MavenCacheLoader, tree::ProjectTree};
 use crate::settings::UserSettings;
 use events::AppEvent;
 
+pub(crate) fn show_modal<T>(
+    context: &egui::Context,
+    id: egui::Id,
+    content: impl FnOnce(&mut egui::Ui) -> T,
+) -> egui::ModalResponse<T> {
+    let mut modal_id = None;
+    let result = egui::Modal::new(id).show(context, |ui| {
+        modal_id = ui
+            .stack()
+            .iter()
+            .find(|frame| frame.kind() == Some(egui::UiKind::Modal))
+            .map(|frame| frame.unique_id);
+        content(ui)
+    });
+    if let Some(modal_id) = modal_id {
+        let rect = result.response.rect;
+        context.accesskit_node_builder(modal_id, |node| {
+            node.set_bounds(egui::accesskit::Rect {
+                x0: rect.min.x.into(),
+                y0: rect.min.y.into(),
+                x1: rect.max.x.into(),
+                y1: rect.max.y.into(),
+            });
+        });
+    }
+    result
+}
+
+#[cfg(test)]
+mod modal_accessibility_tests {
+    use eframe::egui;
+
+    #[test]
+    fn modal_dialog_has_accessible_bounds() {
+        let context = egui::Context::default();
+        context.enable_accesskit();
+        let mut found = false;
+        for _ in 0..3 {
+            let mut output = context.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(800.0, 600.0),
+                    )),
+                    ..Default::default()
+                },
+                |_ui| {
+                    super::show_modal(&context, egui::Id::unique("test_modal"), |ui| {
+                        ui.label("Unsaved changes");
+                        ui.button("Cancel");
+                    });
+                },
+            );
+            if let Some(update) = output.platform_output.accesskit_update.take() {
+                for (_, node) in update.nodes {
+                    if node.role() == egui::accesskit::Role::Dialog {
+                        let bounds = node.bounds().expect("dialog bounds");
+                        assert!(bounds.x1 > bounds.x0 && bounds.y1 > bounds.y0);
+                        found = true;
+                    }
+                }
+            }
+            output.textures_delta.clear();
+        }
+        assert!(found, "dialog must appear in accessibility tree");
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ActivePanel {
     #[default]
@@ -352,6 +420,16 @@ pub struct PendingRenameRequest {
 }
 
 impl AppState {
+    fn window_title(&self) -> String {
+        match &self.project {
+            Some(project) => format!("Intelli-gen — {}", project.display_name),
+            None => self
+                .translator
+                .text("Intelli-gen — Java Workbench")
+                .into_owned(),
+        }
+    }
+
     pub fn set_active_panel(&mut self, panel: ActivePanel) {
         if self.active_panel != panel {
             self.last_tool_window = Some(self.active_panel);

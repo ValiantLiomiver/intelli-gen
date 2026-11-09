@@ -2312,7 +2312,7 @@ pub fn close_prompt(context: &egui::Context, state: &mut AppState) {
     let saving = tab.saving;
     let closing = tab.close_after_save;
     let mut decision = None;
-    egui::Modal::new(egui::Id::new("unsaved_document")).show(context, |ui| {
+    crate::app::show_modal(context, egui::Id::new("unsaved_document"), |ui| {
         ui.heading(crate::i18n::ui_text(ui, "Save changes before closing?"));
         ui.label(path.display().to_string());
         ui.label(if saving {

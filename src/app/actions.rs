@@ -1219,6 +1219,7 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                 state.maven_project_generation = state.maven_project_generation.wrapping_add(1);
                 state.project_tree_loading = false;
                 state.project = Some(project);
+                context.send_viewport_cmd(egui::ViewportCommand::Title(state.window_title()));
                 if let Some(path) = startup_file {
                     state.enqueue(AppEvent::OpenFile(path));
                 }
@@ -2347,7 +2348,7 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                 MavenAction::ToggleCollapsed => state.maven_collapsed = !state.maven_collapsed,
                 MavenAction::Reload { root } => {
                     if !state.quit_requested && state.maven_view_root.as_ref() == Some(&root) {
-                        refresh_maven_dependencies(state);
+                        reload_maven_view(state);
                     }
                 }
                 MavenAction::ToggleProfile { root, profile } => {
@@ -2614,11 +2615,15 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                     continue;
                 }
                 state.maven_cache_loading = false;
+                if state.maven_view.is_some() && !state.maven_loading && state.maven_error.is_none()
+                {
+                    continue;
+                }
                 match result {
                     Ok(Some(cached)) => {
+                        let use_cached = state.maven_view.is_none();
                         if state.maven_view.is_none() {
                             state.maven_view = Some(cached.view);
-                            state.maven_error = None;
                         }
                         if let Some(view) = state.maven_view.clone() {
                             sync_maven_profiles(state, &view);
@@ -2630,7 +2635,8 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                                     Some(&current),
                                 ) =>
                             {
-                                if !state.maven_loading {
+                                if use_cached && !state.maven_loading && state.maven_error.is_none()
+                                {
                                     reload_maven_view(state);
                                 }
                             }
@@ -3007,6 +3013,7 @@ fn sync_maven_profiles(state: &mut AppState, view: &crate::project::maven_view::
 }
 
 fn reload_maven_view(state: &mut AppState) {
+    state.maven_view_loader.cancel();
     refresh_maven_dependencies(state);
     state.maven_generation = state.maven_generation.wrapping_add(1);
     state.maven_loading = false;
@@ -3152,24 +3159,126 @@ fn configured_maven_jdk(
     state: &AppState,
     root: &std::path::Path,
 ) -> Result<crate::java::jdk::JdkInstallation, String> {
-    let id = state
-        .settings
-        .project_jdk_id(root)
-        .or(state.settings.default_jdk_id.as_deref())
-        .ok_or("Choose a JDK in Settings or Project Structure")?;
-    state
-        .settings
-        .jdks
-        .iter()
-        .find(|jdk| jdk.id == id)
-        .cloned()
-        .ok_or_else(|| format!("Selected JDK {id} is no longer registered; select a replacement"))
+    state.settings.selected_jdk(root, None).cloned()
 }
 
 #[cfg(test)]
 mod maven_cache_tests {
     use super::{cached_maven_view_is_stale, maven_pom_event_is_current};
+    use eframe::egui;
     use std::path::Path;
+
+    #[test]
+    fn manual_reload_attempts_to_load_the_maven_model() {
+        let context = egui::Context::default();
+        let mut app = crate::app::IdeaLikeApp::new_with_context(context.clone(), None);
+        app.state.settings = crate::settings::UserSettings::default();
+        let root = std::path::PathBuf::from("/workspace/maven");
+        app.state.project = Some(crate::project::Project {
+            root: root.clone(),
+            kind: crate::project::ProjectKind::Maven,
+            display_name: "maven".into(),
+            model: Some(crate::project::ProjectModel {
+                root: root.clone(),
+                name: "maven".into(),
+                kind: crate::project::ProjectKind::Maven,
+                modules: Vec::new(),
+                wrapper: None,
+            }),
+            discovery_error: None,
+        });
+        app.state.maven_view_root = Some(root.clone());
+        app.state.maven_cache_generation = 5;
+        app.state.maven_cache_loading = true;
+        app.state.maven_generation = 1;
+        app.state
+            .maven_view_loader
+            .start(crate::project::maven_view::MavenViewRequest {
+                project: app.state.project.as_ref().unwrap().model.clone().unwrap(),
+                executable: None,
+                jdk: crate::java::jdk::JdkInstallation::unavailable(Path::new("/missing-jdk")),
+                profiles: Vec::new(),
+                profiles_user_modified: false,
+                generation: 1,
+            })
+            .unwrap();
+        app.state.enqueue(crate::app::events::AppEvent::Maven(
+            crate::app::events::MavenAction::Reload { root },
+        ));
+        super::process_events(&context, &mut app.state);
+        assert_eq!(app.state.maven_generation, 2);
+        assert_eq!(
+            app.state.maven_error.as_deref(),
+            Some("Choose a JDK in Settings or Project Structure")
+        );
+        app.state
+            .enqueue(crate::app::events::AppEvent::MavenCacheLoaded {
+                root: std::path::PathBuf::from("/workspace/maven"),
+                generation: 5,
+                result: Ok(Some(
+                    serde_json::from_value(serde_json::json!({
+                        "root": "/workspace/maven",
+                        "pom_fingerprint": "old",
+                        "view": {"profiles": [], "root_module": {
+                            "name": "cached", "relative_path": null, "lifecycle": [],
+                            "plugins": [], "dependencies": [], "repositories": [], "modules": []
+                        }}
+                    }))
+                    .unwrap(),
+                )),
+                current_pom_fingerprint: Ok("new".into()),
+            });
+        super::process_events(&context, &mut app.state);
+        assert!(!app.state.maven_cache_loading);
+        assert_eq!(
+            app.state.maven_view.as_ref().unwrap().root_module.name,
+            "cached"
+        );
+        assert_eq!(
+            app.state.maven_generation, 2,
+            "failed manual refresh must not be retried by stale cache"
+        );
+        assert_eq!(
+            app.state.maven_error.as_deref(),
+            Some("Choose a JDK in Settings or Project Structure")
+        );
+        app.state.maven_error = None;
+        app.state.maven_cache_loading = true;
+        app.state
+            .enqueue(crate::app::events::AppEvent::MavenCacheLoaded {
+                root: std::path::PathBuf::from("/workspace/maven"),
+                generation: 5,
+                result: Err("obsolete cache error".into()),
+                current_pom_fingerprint: Ok("new".into()),
+            });
+        super::process_events(&context, &mut app.state);
+        assert!(!app.state.maven_cache_loading);
+        assert!(app.state.maven_cache_error.is_none());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while app.state.maven_view_loader.has_workers() {
+            assert!(
+                app.state.maven_view_loader.poll().is_empty(),
+                "superseded reload must be cancelled"
+            );
+            assert!(
+                std::time::Instant::now() < deadline,
+                "worker did not finish"
+            );
+            std::thread::yield_now();
+        }
+    }
+
+    #[test]
+    fn maven_rejects_an_unavailable_configured_jdk() {
+        let context = egui::Context::default();
+        let mut app = crate::app::IdeaLikeApp::new_with_context(context, None);
+        app.state.settings = crate::settings::UserSettings::default();
+        let jdk = crate::java::jdk::JdkInstallation::unavailable(Path::new("/missing-jdk"));
+        app.state.settings.default_jdk_id = Some(jdk.id.clone());
+        app.state.settings.jdks.push(jdk);
+        let error = super::configured_maven_jdk(&app.state, Path::new("/workspace")).unwrap_err();
+        assert!(error.contains("marked unavailable"), "{error}");
+    }
 
     #[test]
     fn no_cache_does_not_trigger_automatic_maven_resolution() {
@@ -3206,6 +3315,76 @@ mod maven_cache_tests {
             Path::new("/same"),
             4
         ));
+    }
+}
+
+#[cfg(test)]
+mod run_build_tests {
+    use super::*;
+
+    #[test]
+    fn run_build_uses_project_jdk_and_preserves_launch_override() {
+        let context = egui::Context::default();
+        let mut app = crate::app::IdeaLikeApp::new_with_context(context, None);
+        app.state.settings = crate::settings::UserSettings::default();
+        let root = PathBuf::from("/workspace/project");
+        let mut build_jdk =
+            crate::java::jdk::JdkInstallation::unavailable(Path::new("/project-jdk"));
+        build_jdk.valid = true;
+        let mut run_jdk = crate::java::jdk::JdkInstallation::unavailable(Path::new("/run-jdk"));
+        run_jdk.valid = true;
+        app.state.settings.default_jdk_id = Some(build_jdk.id.clone());
+        app.state.settings.jdks = vec![build_jdk, run_jdk.clone()];
+        app.state.settings.gradle_executable = Some("/missing-gradle".into());
+        let model = crate::project::ProjectModel {
+            root: root.clone(),
+            name: "project".into(),
+            kind: ProjectKind::Gradle,
+            modules: Vec::new(),
+            wrapper: None,
+        };
+        app.state.project = Some(crate::project::Project {
+            root: root.clone(),
+            kind: ProjectKind::Gradle,
+            display_name: "project".into(),
+            model: Some(model.clone()),
+            discovery_error: None,
+        });
+        let mut config = crate::java::run_config::RunConfiguration::new(&root);
+        config.main_class = "Main".into();
+        config.jdk_id = Some(run_jdk.id.clone());
+        app.state.run.selected = Some(config.id.clone());
+        app.state.run.configurations.push(config.clone());
+        app.state.pending_run = Some(super::super::PendingRun {
+            root,
+            project_generation: app.state.project_open_generation,
+            configuration_generation: app.state.run_configuration_generation,
+            model,
+            config,
+            jdk: run_jdk,
+            stage: super::super::PendingRunStage::Building,
+            save_paths: Default::default(),
+        });
+        start_pending_run_build(&mut app.state);
+        assert!(
+            app.state.build.selected_jdk.contains("/project-jdk"),
+            "{}",
+            app.state.build.selected_jdk
+        );
+        assert_eq!(
+            app.state.pending_run.as_ref().unwrap().jdk.home,
+            Path::new("/run-jdk")
+        );
+        app.state.build.reset();
+        app.state.settings.default_jdk_id = None;
+        start_pending_run_build(&mut app.state);
+        assert!(app.state.build.selected_jdk.contains("/run-jdk"));
+        app.state.build.reset();
+        app.state.settings.default_jdk_id = Some(app.state.settings.jdks[0].id.clone());
+        app.state.settings.jdks[0].valid = false;
+        start_pending_run_build(&mut app.state);
+        assert!(app.state.pending_run.is_none());
+        assert!(app.state.run.summary.contains("marked unavailable"));
     }
 }
 
@@ -3390,11 +3569,25 @@ fn start_pending_run_build(state: &mut AppState) {
         crate::project::ProjectKind::Gradle => state.settings.gradle_executable.clone(),
         crate::project::ProjectKind::Unknown => None,
     };
+    let build_jdk = if state.settings.project_jdk_id(&pending.root).is_none()
+        && state.settings.default_jdk_id.is_none()
+    {
+        pending.jdk.clone()
+    } else {
+        match state.settings.selected_jdk(&pending.root, None) {
+            Ok(jdk) => jdk.clone(),
+            Err(error) => {
+                state.pending_run = None;
+                state.run.summary = format!("Build could not start: {error}");
+                return;
+            }
+        }
+    };
     let request = crate::java::build::BuildRequest {
         gradle_offline: state.settings.gradle_offline,
         project: pending.model.clone(),
         task: crate::java::build::BuildTask::Build,
-        jdk: pending.jdk.clone(),
+        jdk: build_jdk,
         module: None,
         test_task: None,
         test_filter: None,
