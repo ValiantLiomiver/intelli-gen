@@ -33,6 +33,7 @@ struct TreeEntry {
     name: String,
     directory: bool,
     symlink: bool,
+    java_kind: Option<JavaKind>,
     children: Option<Vec<TreeEntry>>,
     loading_request: Option<u64>,
     error: Option<String>,
@@ -526,6 +527,226 @@ fn checked_directory(workspace: &Path, path: &Path) -> Result<PathBuf, ProjectEr
     })
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum JavaKind {
+    Class,
+    Abstract,
+    Interface,
+    Enum,
+}
+
+#[derive(Clone, Copy)]
+enum TreeIcon {
+    Source,
+    Resources,
+    TestRoot,
+    Java(JavaKind),
+}
+
+fn folder_kind(path: &Path) -> Option<TreeIcon> {
+    let parent = path.parent()?;
+    if path.file_name()? == "test" && parent.file_name()? == "src" {
+        return Some(TreeIcon::TestRoot);
+    }
+    if !["main", "test"]
+        .iter()
+        .any(|name| parent.file_name().is_some_and(|p| p == *name))
+        || parent.parent()?.file_name()? != "src"
+    {
+        return None;
+    }
+    match path.file_name()?.to_str()? {
+        "java" => Some(TreeIcon::Source),
+        "resources" => Some(TreeIcon::Resources),
+        _ => None,
+    }
+}
+
+fn is_test_path(path: &Path) -> bool {
+    path.ancestors().any(|p| {
+        p.file_name().is_some_and(|n| n == "test")
+            && p.parent()
+                .and_then(Path::file_name)
+                .is_some_and(|n| n == "src")
+    })
+}
+
+// shortcut: lexical scanning does not resolve Java Unicode escapes; use a Java parser if needed.
+fn java_kind(source: &str, filename: &str) -> Option<JavaKind> {
+    let name = filename.strip_suffix(".java")?;
+    let bytes = source.as_bytes();
+    let mut tokens = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i..].starts_with(b"//") {
+            i += 2;
+            while i < bytes.len() && bytes[i] != b'\n' {
+                i += 1;
+            }
+        } else if bytes[i..].starts_with(b"/*") {
+            i += 2;
+            while i + 1 < bytes.len() && &bytes[i..i + 2] != b"*/" {
+                i += 1;
+            }
+            i = (i + 2).min(bytes.len());
+        } else if bytes[i..].starts_with(b"\"\"\"") {
+            i += 3;
+            while i + 2 < bytes.len() && &bytes[i..i + 3] != b"\"\"\"" {
+                if bytes[i] == b'\\' {
+                    i += 1;
+                }
+                i += 1;
+            }
+            i = (i + 3).min(bytes.len());
+        } else if bytes[i] == b'"' || bytes[i] == b'\'' {
+            let quote = bytes[i];
+            i += 1;
+            while i < bytes.len() {
+                if bytes[i] == b'\\' {
+                    i = (i + 2).min(bytes.len());
+                } else if bytes[i] == quote {
+                    i += 1;
+                    break;
+                } else {
+                    i += 1;
+                }
+            }
+        } else if bytes[i].is_ascii_alphanumeric()
+            || bytes[i] == b'_'
+            || bytes[i] == b'$'
+            || bytes[i] >= 128
+        {
+            let start = i;
+            i += 1;
+            while i < bytes.len()
+                && (bytes[i].is_ascii_alphanumeric()
+                    || bytes[i] == b'_'
+                    || bytes[i] == b'$'
+                    || bytes[i] >= 128)
+            {
+                i += 1;
+            }
+            if let Some(token) = source.get(start..i) {
+                tokens.push(token);
+            }
+        } else {
+            if matches!(bytes[i], b'{' | b'}' | b';' | b'@' | b'(' | b')') {
+                tokens.push(&source[i..i + 1]);
+            }
+            i += 1;
+        }
+    }
+    let mut depth = 0usize;
+    let mut abstract_modifier = false;
+    let mut parentheses = 0usize;
+    for (index, token) in tokens.iter().enumerate() {
+        match *token {
+            "(" => {
+                parentheses += 1;
+            }
+            ")" => {
+                parentheses = parentheses.saturating_sub(1);
+            }
+            _ if parentheses > 0 => {}
+            "{" => {
+                depth += 1;
+                abstract_modifier = false;
+            }
+            "}" => {
+                depth = depth.saturating_sub(1);
+                abstract_modifier = false;
+            }
+            ";" if depth == 0 => abstract_modifier = false,
+            "abstract" if depth == 0 => abstract_modifier = true,
+            "class" | "interface" | "enum"
+                if depth == 0 && tokens.get(index + 1) == Some(&name) =>
+            {
+                return Some(match *token {
+                    "interface" => JavaKind::Interface,
+                    "enum" => JavaKind::Enum,
+                    _ if abstract_modifier => JavaKind::Abstract,
+                    _ => JavaKind::Class,
+                });
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn paint_tree_icon(ui: &egui::Ui, row: egui::Rect, icon: TreeIcon, test: bool) {
+    let painter = ui.painter();
+    let center = egui::pos2(row.left() + 11.0, row.center().y);
+    if test {
+        painter.rect_filled(
+            egui::Rect::from_center_size(center, egui::vec2(18.0, 18.0)),
+            4.0,
+            egui::Color32::from_rgb(35, 80, 51),
+        );
+    }
+    match icon {
+        TreeIcon::Source | TreeIcon::Resources | TreeIcon::TestRoot => {
+            let color = if test {
+                egui::Color32::from_rgb(111, 199, 116)
+            } else if matches!(icon, TreeIcon::Source) {
+                egui::Color32::from_rgb(75, 157, 225)
+            } else {
+                egui::Color32::from_rgb(150, 160, 171)
+            };
+            let tab =
+                egui::Rect::from_min_size(center + egui::vec2(-7.0, -6.0), egui::vec2(7.0, 4.0));
+            let body =
+                egui::Rect::from_min_size(center + egui::vec2(-7.0, -3.5), egui::vec2(14.0, 9.0));
+            painter.rect_filled(tab, 1.0, color);
+            painter.rect_filled(body, 1.5, color);
+            if matches!(icon, TreeIcon::Resources) {
+                for y in [0.0, 2.0, 4.0] {
+                    painter.line_segment(
+                        [center + egui::vec2(1.0, y), center + egui::vec2(6.0, y)],
+                        egui::Stroke::new(1.0, egui::Color32::WHITE),
+                    );
+                }
+            }
+        }
+        TreeIcon::Java(kind) => {
+            let (letter, color) = match kind {
+                JavaKind::Class | JavaKind::Abstract => {
+                    ("C", egui::Color32::from_rgb(91, 184, 237))
+                }
+                JavaKind::Interface => ("I", egui::Color32::from_rgb(111, 199, 116)),
+                JavaKind::Enum => ("E", egui::Color32::from_rgb(190, 139, 228)),
+            };
+            let color = if test {
+                egui::Color32::from_rgb(144, 224, 153)
+            } else {
+                color
+            };
+            if kind == JavaKind::Abstract {
+                for n in 0..8 {
+                    let a = n as f32 * std::f32::consts::TAU / 8.0;
+                    let b = a + 0.48;
+                    painter.line_segment(
+                        [
+                            center + egui::vec2(a.cos(), a.sin()) * 7.0,
+                            center + egui::vec2(b.cos(), b.sin()) * 7.0,
+                        ],
+                        egui::Stroke::new(1.1, color),
+                    );
+                }
+            } else {
+                painter.circle_stroke(center, 7.0, egui::Stroke::new(1.1, color));
+            }
+            painter.text(
+                center,
+                egui::Align2::CENTER_CENTER,
+                letter,
+                egui::FontId::proportional(10.0),
+                color,
+            );
+        }
+    }
+}
+
 fn read_entries(workspace: &Path, root: &Path) -> Result<Vec<TreeEntry>, ProjectError> {
     let resolved = checked_directory(workspace, root)?;
     let directory = fs::read_dir(&resolved).map_err(|source| ProjectError {
@@ -542,6 +763,7 @@ fn read_entries(workspace: &Path, root: &Path) -> Result<Vec<TreeEntry>, Project
                     name: "Unreadable entry".into(),
                     directory: false,
                     symlink: false,
+                    java_kind: None,
                     children: None,
                     loading_request: None,
                     error: Some(error.to_string()),
@@ -553,15 +775,25 @@ fn read_entries(workspace: &Path, root: &Path) -> Result<Vec<TreeEntry>, Project
         if EXCLUDED.iter().any(|excluded| name == *excluded) {
             continue;
         }
-        let (directory, symlink, error) = match entry.file_type() {
-            Ok(kind) => (kind.is_dir(), kind.is_symlink(), None),
-            Err(error) => (false, false, Some(error.to_string())),
+        let (directory, symlink, regular_file, error) = match entry.file_type() {
+            Ok(kind) => (kind.is_dir(), kind.is_symlink(), kind.is_file(), None),
+            Err(error) => (false, false, false, Some(error.to_string())),
         };
         entries.push(TreeEntry {
             path: entry.path(),
             name: name.to_string_lossy().into_owned(),
             directory,
             symlink,
+            java_kind: if regular_file
+                && !symlink
+                && entry.path().extension().is_some_and(|ext| ext == "java")
+            {
+                fs::read_to_string(entry.path())
+                    .ok()
+                    .and_then(|source| java_kind(&source, &name.to_string_lossy()))
+            } else {
+                None
+            },
             children: None,
             loading_request: None,
             error,
@@ -742,10 +974,15 @@ fn render_entries(
         if entry.directory {
             let id = ui.make_persistent_id(&entry.path);
             let is_maven_module = maven_modules.iter().any(|module| module.root == entry.path);
+            let icon = folder_kind(&entry.path);
             let label = if is_maven_module {
                 egui::RichText::new(format!("📦 {}", entry.name)).strong()
             } else {
-                egui::RichText::new(&entry.name)
+                egui::RichText::new(if icon.is_some() {
+                    format!("     {}", entry.name)
+                } else {
+                    entry.name.clone()
+                })
             };
             let header = egui::collapsing_header::CollapsingState::load_with_default_open(
                 ui.ctx(),
@@ -799,6 +1036,14 @@ fn render_entries(
                     );
                 }
             });
+            if let Some(icon) = icon.filter(|_| !is_maven_module) {
+                paint_tree_icon(
+                    ui,
+                    header_response.inner.rect,
+                    icon,
+                    is_test_path(&entry.path),
+                );
+            }
             if toggle_response.clicked() {
                 *focused_path = Some(entry.path.clone());
                 *focus_pending = true;
@@ -829,12 +1074,25 @@ fn render_entries(
             } else {
                 entry.name.clone()
             };
+            let label = if entry.java_kind.is_some() {
+                format!("     {label}")
+            } else {
+                label
+            };
             let response = ui
                 .add(
                     egui::Button::selectable(focused_path.as_ref() == Some(&entry.path), label)
                         .wrap_mode(egui::TextWrapMode::Truncate),
                 )
                 .on_hover_text(entry.path.display().to_string());
+            if let Some(kind) = entry.java_kind {
+                paint_tree_icon(
+                    ui,
+                    response.rect,
+                    TreeIcon::Java(kind),
+                    is_test_path(&entry.path),
+                );
+            }
             if focused_path.as_ref() == Some(&entry.path) && *focus_pending {
                 response.request_focus();
                 *focus_pending = false;
@@ -856,4 +1114,263 @@ struct VisibleProjectEntry {
     path: PathBuf,
     name: String,
     collapsing_id: Option<egui::Id>,
+}
+
+#[cfg(test)]
+mod icon_tests {
+    use super::*;
+    #[test]
+    fn icons_emit_expected_shapes() {
+        let ctx = egui::Context::default();
+        for (icon, circles, lines, texts) in [
+            (TreeIcon::Source, 0, 0, 0),
+            (TreeIcon::Resources, 0, 3, 0),
+            (TreeIcon::Java(JavaKind::Class), 1, 0, 1),
+            (TreeIcon::Java(JavaKind::Interface), 1, 0, 1),
+            (TreeIcon::Java(JavaKind::Enum), 1, 0, 1),
+            (TreeIcon::Java(JavaKind::Abstract), 0, 8, 1),
+        ] {
+            let mut output = ctx.run_ui(egui::RawInput::default(), |root| {
+                egui::CentralPanel::default().show(root, |ui| {
+                    paint_tree_icon(
+                        ui,
+                        egui::Rect::from_min_size(egui::pos2(20.0, 20.0), egui::vec2(100.0, 20.0)),
+                        icon,
+                        false,
+                    );
+                });
+            });
+            output.textures_delta.clear();
+            assert_eq!(
+                output
+                    .shapes
+                    .iter()
+                    .filter(|s| matches!(s.shape, egui::Shape::Circle(_)))
+                    .count(),
+                circles
+            );
+            assert_eq!(
+                output
+                    .shapes
+                    .iter()
+                    .filter(|s| matches!(s.shape, egui::Shape::LineSegment { .. }))
+                    .count(),
+                lines
+            );
+            assert_eq!(
+                output
+                    .shapes
+                    .iter()
+                    .filter(|s| matches!(s.shape, egui::Shape::Text(_)))
+                    .count(),
+                texts
+            );
+        }
+    }
+
+    #[test]
+    fn test_icons_have_green_background_and_foreground() {
+        let ctx = egui::Context::default();
+        let mut output = ctx.run_ui(egui::RawInput::default(), |root| {
+            egui::CentralPanel::default().show(root, |ui| {
+                paint_tree_icon(
+                    ui,
+                    egui::Rect::from_min_size(egui::pos2(20.0, 20.0), egui::vec2(100.0, 20.0)),
+                    TreeIcon::Java(JavaKind::Enum),
+                    true,
+                );
+            });
+        });
+        output.textures_delta.clear();
+        assert!(output.shapes.iter().any(|s| matches!(&s.shape, egui::Shape::Rect(r) if r.fill == egui::Color32::from_rgb(35, 80, 51))));
+        assert!(output.shapes.iter().any(|s| matches!(&s.shape, egui::Shape::Circle(c) if c.stroke.color == egui::Color32::from_rgb(144, 224, 153))));
+    }
+
+    #[test]
+    fn tree_rows_render_source_and_java_icons() {
+        let ctx = egui::Context::default();
+        let mut entries = vec![
+            TreeEntry {
+                path: PathBuf::from("src/main/java"),
+                name: "java".into(),
+                directory: true,
+                symlink: false,
+                java_kind: None,
+                children: None,
+                loading_request: None,
+                error: None,
+            },
+            TreeEntry {
+                path: PathBuf::from("src/main/resources"),
+                name: "resources".into(),
+                directory: true,
+                symlink: false,
+                java_kind: None,
+                children: None,
+                loading_request: None,
+                error: None,
+            },
+            TreeEntry {
+                path: PathBuf::from("Foo.java"),
+                name: "Foo.java".into(),
+                directory: false,
+                symlink: false,
+                java_kind: Some(JavaKind::Class),
+                children: None,
+                loading_request: None,
+                error: None,
+            },
+            TreeEntry {
+                path: PathBuf::from("Bar.java"),
+                name: "Bar.java".into(),
+                directory: false,
+                symlink: false,
+                java_kind: Some(JavaKind::Abstract),
+                children: None,
+                loading_request: None,
+                error: None,
+            },
+            TreeEntry {
+                path: PathBuf::from("I.java"),
+                name: "I.java".into(),
+                directory: false,
+                symlink: false,
+                java_kind: Some(JavaKind::Interface),
+                children: None,
+                loading_request: None,
+                error: None,
+            },
+            TreeEntry {
+                path: PathBuf::from("E.java"),
+                name: "E.java".into(),
+                directory: false,
+                symlink: false,
+                java_kind: Some(JavaKind::Enum),
+                children: None,
+                loading_request: None,
+                error: None,
+            },
+        ];
+        let mut output = ctx.run_ui(egui::RawInput::default(), |root| {
+            egui::CentralPanel::default().show(root, |ui| {
+                render_entries(
+                    ui,
+                    Path::new("."),
+                    &mut entries,
+                    &[],
+                    &mut vec![],
+                    &mut None,
+                    &mut false,
+                    &mut vec![],
+                    &mut false,
+                );
+            });
+        });
+        output.textures_delta.clear();
+        assert_eq!(
+            output
+                .shapes
+                .iter()
+                .filter(|s| matches!(s.shape, egui::Shape::Circle(_)))
+                .count(),
+            3
+        );
+        assert_eq!(
+            output
+                .shapes
+                .iter()
+                .filter(|s| matches!(s.shape, egui::Shape::LineSegment { .. }))
+                .count(),
+            11
+        );
+    }
+
+    #[test]
+    fn directory_loading_classifies_java_files() {
+        let root = std::env::temp_dir().join(format!(
+            "intelli-gen-icon-test-{}-{}",
+            std::process::id(),
+            NEXT_TREE_REQUEST.fetch_add(1, Ordering::Relaxed)
+        ));
+        let dir = root.join("src/main/java");
+        fs::create_dir_all(&dir).unwrap();
+        for (name, source) in [
+            ("A.java", "class A {}"),
+            ("B.java", "abstract class B {}"),
+            ("C.java", "interface C {}"),
+            ("D.java", "enum D {}"),
+            ("other.txt", "class other {}"),
+        ] {
+            fs::write(dir.join(name), source).unwrap();
+        }
+        let root = fs::canonicalize(root).unwrap();
+        let dir = root.join("src/main/java");
+        let entries = read_visible_entries(&root, &dir).unwrap();
+        for (name, kind) in [
+            ("A.java", Some(JavaKind::Class)),
+            ("B.java", Some(JavaKind::Abstract)),
+            ("C.java", Some(JavaKind::Interface)),
+            ("D.java", Some(JavaKind::Enum)),
+            ("other.txt", None),
+        ] {
+            assert_eq!(
+                entries
+                    .iter()
+                    .find(|entry| entry.name == name)
+                    .unwrap()
+                    .java_kind,
+                kind
+            );
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn recognizes_source_folders_and_java_declarations() {
+        assert!(matches!(
+            folder_kind(Path::new("module/src/main/java")),
+            Some(TreeIcon::Source)
+        ));
+        assert!(matches!(
+            folder_kind(Path::new("module/src/main/resources")),
+            Some(TreeIcon::Resources)
+        ));
+        assert!(folder_kind(Path::new("other/main/java")).is_none());
+        assert!(matches!(
+            folder_kind(Path::new("module/src/test")),
+            Some(TreeIcon::TestRoot)
+        ));
+        assert!(matches!(
+            folder_kind(Path::new("module/src/test/java")),
+            Some(TreeIcon::Source)
+        ));
+        assert!(matches!(
+            folder_kind(Path::new("module/src/test/resources")),
+            Some(TreeIcon::Resources)
+        ));
+        assert!(is_test_path(Path::new("module/src/test/java/Foo.java")));
+        assert!(!is_test_path(Path::new("module/src/main/java/Foo.java")));
+        assert!(!is_test_path(Path::new("module/src/testdata/Foo.java")));
+        assert_eq!(
+            java_kind("// class Foo {}\n public abstract class Foo {}", "Foo.java"),
+            Some(JavaKind::Abstract)
+        );
+        assert_eq!(
+            java_kind("interface Foo {}", "Foo.java"),
+            Some(JavaKind::Interface)
+        );
+        assert_eq!(java_kind("enum Foo {}", "Foo.java"), Some(JavaKind::Enum));
+        assert_eq!(
+            java_kind(
+                "abstract @SuppressWarnings({\"x\", \"y\"}) class Foo {}",
+                "Foo.java"
+            ),
+            Some(JavaKind::Abstract)
+        );
+        assert_eq!(
+            java_kind("class Other { class Foo {} } class Foo {}", "Foo.java"),
+            Some(JavaKind::Class)
+        );
+        assert_eq!(java_kind("class Other { class Foo {} }", "Foo.java"), None);
+    }
 }
