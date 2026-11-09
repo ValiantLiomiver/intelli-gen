@@ -540,6 +540,9 @@ enum TreeIcon {
     Source,
     Resources,
     TestRoot,
+    Package,
+    Maven,
+    Gradle,
     Java(JavaKind),
 }
 
@@ -547,6 +550,9 @@ fn folder_kind(path: &Path) -> Option<TreeIcon> {
     let parent = path.parent()?;
     if path.file_name()? == "test" && parent.file_name()? == "src" {
         return Some(TreeIcon::TestRoot);
+    }
+    if path.file_name()? != "java" && is_java_package_context(path) {
+        return Some(TreeIcon::Package);
     }
     if !["main", "test"]
         .iter()
@@ -707,6 +713,36 @@ fn paint_tree_icon(ui: &egui::Ui, row: egui::Rect, icon: TreeIcon, test: bool) {
                     );
                 }
             }
+        }
+        TreeIcon::Package => {
+            let color = if test {
+                egui::Color32::from_rgb(144, 224, 153)
+            } else {
+                egui::Color32::from_rgb(207, 166, 92)
+            };
+            let top =
+                egui::Rect::from_min_size(center + egui::vec2(-6.0, -6.0), egui::vec2(12.0, 12.0));
+            painter.rect_stroke(
+                top,
+                2.0,
+                egui::Stroke::new(1.5, color),
+                egui::StrokeKind::Middle,
+            );
+            painter.circle_filled(center, 2.0, color);
+        }
+        TreeIcon::Maven | TreeIcon::Gradle => {
+            let (letter, color) = match icon {
+                TreeIcon::Maven => ('M', egui::Color32::from_rgb(220, 91, 61)),
+                _ => ('G', egui::Color32::from_rgb(76, 145, 89)),
+            };
+            painter.circle_filled(center, 8.0, color);
+            painter.text(
+                center,
+                egui::Align2::CENTER_CENTER,
+                letter,
+                egui::FontId::proportional(11.0),
+                egui::Color32::WHITE,
+            );
         }
         TreeIcon::Java(kind) => {
             let (letter, color) = match kind {
@@ -1074,7 +1110,9 @@ fn render_entries(
             } else {
                 entry.name.clone()
             };
-            let label = if entry.java_kind.is_some() {
+            let has_icon = entry.java_kind.is_some()
+                || matches!(entry.name.as_str(), "pom.xml" | "build.gradle");
+            let label = if has_icon {
                 format!("     {label}")
             } else {
                 label
@@ -1085,13 +1123,13 @@ fn render_entries(
                         .wrap_mode(egui::TextWrapMode::Truncate),
                 )
                 .on_hover_text(entry.path.display().to_string());
-            if let Some(kind) = entry.java_kind {
-                paint_tree_icon(
-                    ui,
-                    response.rect,
-                    TreeIcon::Java(kind),
-                    is_test_path(&entry.path),
-                );
+            let icon = match entry.name.as_str() {
+                "pom.xml" => Some(TreeIcon::Maven),
+                "build.gradle" => Some(TreeIcon::Gradle),
+                _ => entry.java_kind.map(TreeIcon::Java),
+            };
+            if let Some(icon) = icon {
+                paint_tree_icon(ui, response.rect, icon, is_test_path(&entry.path));
             }
             if focused_path.as_ref() == Some(&entry.path) && *focus_pending {
                 response.request_focus();
