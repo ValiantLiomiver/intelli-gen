@@ -208,9 +208,18 @@ impl FindReplace {
                 self.invalidate_pending();
                 self.visible = false;
             }
-            FindAction::Next | FindAction::Previous => {
+            FindAction::Next
+            | FindAction::Previous
+            | FindAction::Replace
+            | FindAction::ReplaceAll => {
+                let replacing = matches!(action, FindAction::Replace | FindAction::ReplaceAll);
                 let Some(tab) = tab else {
-                    self.status = "Open a file to search".into();
+                    self.status = if replacing {
+                        "Open a file to replace text"
+                    } else {
+                        "Open a file to search"
+                    }
+                    .into();
                     return;
                 };
                 if self.query.is_empty() {
@@ -220,36 +229,7 @@ impl FindReplace {
                 if self.pending {
                     return;
                 }
-                let previous = matches!(action, FindAction::Previous);
-                self.start_work(tab, action, previous);
-            }
-            FindAction::Replace => {
-                let Some(tab) = tab else {
-                    self.status = "Open a file to replace text".into();
-                    return;
-                };
-                if self.query.is_empty() {
-                    self.status = "Enter text to find".into();
-                    return;
-                }
-                if self.pending {
-                    return;
-                }
-                self.start_work(tab, action, false);
-            }
-            FindAction::ReplaceAll => {
-                let Some(tab) = tab else {
-                    self.status = "Open a file to replace text".into();
-                    return;
-                };
-                if self.query.is_empty() {
-                    self.status = "Enter text to find".into();
-                    return;
-                }
-                if self.pending {
-                    return;
-                }
-                self.start_work(tab, action, false);
+                self.start_work(tab, action, matches!(action, FindAction::Previous));
             }
         }
     }

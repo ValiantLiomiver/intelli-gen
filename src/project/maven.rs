@@ -7,6 +7,14 @@ use serde::Deserialize;
 use super::discovery::{descriptor_exists, normalize};
 use super::{ProjectError, ProjectModule};
 
+pub(crate) fn valid_profile_id(id: &str) -> bool {
+    !id.is_empty()
+        && !id.starts_with(['!', '-', '?'])
+        && !id
+            .chars()
+            .any(|ch| ch == ',' || ch.is_control() || ch.is_whitespace())
+}
+
 #[derive(Default, Deserialize)]
 struct Pom {
     #[serde(default)]

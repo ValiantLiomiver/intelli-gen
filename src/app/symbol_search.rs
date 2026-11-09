@@ -118,7 +118,7 @@ fn matching_symbols<'a>(
     }
 }
 
-fn kind_name(kind: u64) -> &'static str {
+pub(super) fn kind_name(kind: u64) -> &'static str {
     match kind {
         5 => "class",
         6 => "method",

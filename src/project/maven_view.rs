@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use crate::java::jdk::JdkInstallation;
 
 use super::maven_cache::{MavenViewCache, fingerprint_poms};
-use super::{ProjectKind, ProjectModel};
+use super::{ProjectKind, ProjectModel, maven::valid_profile_id, resolve_program_path};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct MavenView {
@@ -337,38 +337,23 @@ impl MavenViewLoader {
     }
 }
 
+#[cfg(not(unix))]
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
-struct Scratch(PathBuf);
+struct Scratch(super::ScratchDirectory);
 impl Scratch {
     fn create() -> Result<Self, String> {
-        for _ in 0..16 {
-            let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-            let timestamp = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos();
-            let path = std::env::temp_dir().join(format!(
-                "intelli-gen-maven-{}-{timestamp}-{sequence}",
-                std::process::id()
-            ));
-            match fs::create_dir(&path) {
-                Ok(()) => return Ok(Self(path)),
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
-                Err(error) => {
-                    return Err(format!(
-                        "Cannot create Maven scratch directory {}: {error}",
-                        path.display()
-                    ));
-                }
-            }
-        }
-        Err("Cannot allocate a unique Maven scratch directory".into())
-    }
-}
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
+        super::ScratchDirectory::create(
+            "maven",
+            |path, error| {
+                format!(
+                    "Cannot create Maven scratch directory {}: {error}",
+                    path.display()
+                )
+            },
+            "Cannot allocate a unique Maven scratch directory",
+        )
+        .map(Self)
     }
 }
 
@@ -500,13 +485,7 @@ fn load(
         .wrapper
         .or(request.executable)
         .ok_or("No Maven wrapper. Configure the Maven executable in Settings.")?;
-    let program = if program.is_absolute() {
-        program
-    } else if program.components().count() > 1 {
-        root.join(program)
-    } else {
-        program
-    };
+    let program = resolve_program_path(&root, &program);
     let environment = request
         .jdk
         .child_environment()
@@ -1200,14 +1179,6 @@ fn check_cancel(cancellation: &AtomicBool) -> Result<(), String> {
     } else {
         Ok(())
     }
-}
-
-fn valid_profile_id(id: &str) -> bool {
-    !id.is_empty()
-        && !id.starts_with(['!', '-', '?'])
-        && !id
-            .chars()
-            .any(|ch| ch == ',' || ch.is_control() || ch.is_whitespace())
 }
 
 fn profile_definitions(directory: &Path) -> Result<Vec<MavenProfile>, String> {

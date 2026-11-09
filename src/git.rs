@@ -167,13 +167,19 @@ fn relative_path(path: &Path) -> Result<&Path, GitError> {
     Ok(path)
 }
 
+fn head_tree(repo: &Repository) -> Result<Option<git2::Tree<'_>>, GitError> {
+    match repo.head() {
+        Ok(head) => Ok(Some(head.peel_to_tree()?)),
+        Err(error) if matches!(error.code(), ErrorCode::UnbornBranch | ErrorCode::NotFound) => {
+            Ok(None)
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
 fn diff(repo: &Repository, path: &Path) -> Result<String, GitError> {
     let path = relative_path(path)?;
-    let tree = match repo.head() {
-        Ok(head) => Some(head.peel_to_tree()?),
-        Err(error) if matches!(error.code(), ErrorCode::UnbornBranch | ErrorCode::NotFound) => None,
-        Err(error) => return Err(error.into()),
-    };
+    let tree = head_tree(repo)?;
     let mut text = String::new();
     for staged in [true, false] {
         text.push_str(if staged {
@@ -234,11 +240,7 @@ fn stage(repo: &Repository, path: &Path) -> Result<(), GitError> {
 fn unstage(repo: &Repository, path: &Path) -> Result<(), GitError> {
     let path = relative_path(path)?;
     let mut index = repo.index()?;
-    let tree = match repo.head() {
-        Ok(head) => Some(head.peel_to_tree()?),
-        Err(error) if matches!(error.code(), ErrorCode::UnbornBranch | ErrorCode::NotFound) => None,
-        Err(error) => return Err(error.into()),
-    };
+    let tree = head_tree(repo)?;
     // Rebuild exactly one index entry, avoiding glob/pathspec interpretation.
     let entry = match tree.as_ref().map(|tree| tree.get_path(path)) {
         Some(Ok(entry)) => Some(entry),

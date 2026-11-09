@@ -839,12 +839,12 @@ async fn launch(
     let (status, cancelled) = tokio::select! {
         result = child.wait() => (result, false),
         _ = cancel.changed() => {
-            kill_group(pid);
+            crate::java::kill_process_group(pid);
             let _ = child.start_kill();
             (child.wait().await, true)
         }
     };
-    kill_group(pid);
+    crate::java::kill_process_group(pid);
     for mut task in [out, err] {
         if tokio::time::timeout(Duration::from_millis(300), &mut task)
             .await
@@ -943,18 +943,6 @@ async fn emit_utf8(
         }
     }
 }
-fn kill_group(pid: Option<u32>) {
-    #[cfg(unix)]
-    if let Some(pid) = pid.filter(|pid| *pid > 1) {
-        // SAFETY: the child was placed in its own process group at spawn.
-        unsafe {
-            libc::kill(-(pid as libc::pid_t), libc::SIGKILL);
-        }
-    }
-    #[cfg(not(unix))]
-    let _ = pid;
-}
-
 pub struct ConfigurationEditor {
     pub config: RunConfiguration,
     pub program_args: String,
@@ -1032,6 +1020,19 @@ pub struct RunTool {
     active: Option<RunHandle>,
     retiring: Vec<RunHandle>,
 }
+
+const MAX_RUN_OUTPUT_BYTES: usize = 1_048_576;
+
+fn trim_run_output(output: &mut String) {
+    if output.len() > MAX_RUN_OUTPUT_BYTES {
+        let mut boundary = output.len() - MAX_RUN_OUTPUT_BYTES;
+        while !output.is_char_boundary(boundary) {
+            boundary += 1;
+        }
+        output.drain(..boundary);
+    }
+}
+
 impl RunTool {
     pub fn begin_project_load(&mut self) {
         self.cancel();
@@ -1165,13 +1166,7 @@ impl RunTool {
         self.output.push_str("> ");
         self.output.push_str(line);
         self.output.push('\n');
-        if self.output.len() > 1_048_576 {
-            let mut boundary = self.output.len() - 1_048_576;
-            while !self.output.is_char_boundary(boundary) {
-                boundary += 1;
-            }
-            self.output.drain(..boundary);
-        }
+        trim_run_output(&mut self.output);
         self.input_error = None;
         Ok(())
     }
@@ -1207,13 +1202,7 @@ impl RunTool {
                 }
             }
         }
-        if self.output.len() > 1_048_576 {
-            let mut boundary = self.output.len() - 1_048_576;
-            while !self.output.is_char_boundary(boundary) {
-                boundary += 1;
-            }
-            self.output.drain(..boundary);
-        }
+        trim_run_output(&mut self.output);
         if let Some(result) = done {
             if let Err(error) = result {
                 self.summary = error.to_string();

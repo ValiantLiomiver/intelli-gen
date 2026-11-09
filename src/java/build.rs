@@ -12,7 +12,7 @@ use tokio::sync::{mpsc, watch};
 
 use super::diagnostics::{self, BuildDiagnostic};
 use super::jdk::JdkInstallation;
-use crate::project::{ProjectKind, ProjectModel};
+use crate::project::{ProjectKind, ProjectModel, maven::valid_profile_id};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BuildTask {
@@ -660,21 +660,7 @@ fn build_program(project: &ProjectModel, executable: Option<&Path>) -> Result<Pa
             project.kind
         ))
     })?;
-    Ok(if program.is_absolute() {
-        program.to_path_buf()
-    } else if program.components().count() > 1 {
-        project.root.join(program)
-    } else {
-        program.to_path_buf()
-    })
-}
-
-fn valid_profile_id(id: &str) -> bool {
-    !id.is_empty()
-        && !id.starts_with(['!', '-', '?'])
-        && !id
-            .chars()
-            .any(|ch| ch == ',' || ch.is_control() || ch.is_whitespace())
+    Ok(crate::project::resolve_program_path(&project.root, program))
 }
 
 /// Return a reactor-relative path without allowing lexical traversal outside it.
@@ -788,7 +774,7 @@ async fn run(
         ));
         let status = if *cancellation.borrow() {
             cancelled = true;
-            terminate_group(pid);
+            crate::java::kill_process_group(pid);
             let _ = child.start_kill();
             child.wait().await
         } else {
@@ -796,14 +782,14 @@ async fn run(
                 status = child.wait() => status,
                 _ = cancellation.changed() => {
                     cancelled = true;
-                    terminate_group(pid);
+                    crate::java::kill_process_group(pid);
                     let _ = child.start_kill();
                     child.wait().await
                 }
             }
         };
         // Tool subprocesses must not keep pipe readers or single-use daemons alive.
-        terminate_group(pid);
+        crate::java::kill_process_group(pid);
         let mut output = output;
         let mut errors = errors;
         if tokio::time::timeout(Duration::from_secs(2), async {
@@ -1079,18 +1065,6 @@ fn test_source_line(stack_trace: &str, class_name: &str) -> Option<usize> {
             .collect();
         digits.parse::<usize>().ok().filter(|line| *line > 0)
     })
-}
-
-fn terminate_group(pid: Option<u32>) {
-    #[cfg(unix)]
-    if let Some(pid) = pid.filter(|pid| *pid > 1) {
-        // SAFETY: this child was launched in a new process group with its own PID.
-        unsafe {
-            libc::kill(-(pid as libc::pid_t), libc::SIGKILL);
-        }
-    }
-    #[cfg(not(unix))]
-    let _ = pid;
 }
 
 async fn read_output(

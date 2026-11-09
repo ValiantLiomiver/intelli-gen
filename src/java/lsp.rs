@@ -1892,12 +1892,12 @@ async fn run(
     let exit_status = match exit {
         Ok(Ok(status)) => Some(status),
         _ => {
-            kill_group(pid);
+            crate::java::kill_process_group(pid);
             let _ = child.start_kill();
             child.wait().await.ok()
         }
     };
-    kill_group(pid);
+    crate::java::kill_process_group(pid);
     reader.abort();
     let _ = reader.await;
     let mut stderr = stderr;
@@ -2028,18 +2028,6 @@ fn create_directory_symlink(_source: &Path, _link: &Path) -> std::io::Result<()>
         std::io::ErrorKind::Unsupported,
         "directory symbolic links are unsupported on this platform",
     ))
-}
-
-fn kill_group(pid: Option<u32>) {
-    #[cfg(unix)]
-    if let Some(pid) = pid.filter(|pid| *pid > 1) {
-        // SAFETY: this PID identifies the process group created by our launcher.
-        unsafe {
-            libc::kill(-(pid as libc::pid_t), libc::SIGKILL);
-        }
-    }
-    #[cfg(not(unix))]
-    let _ = pid;
 }
 
 struct Pending {

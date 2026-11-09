@@ -105,7 +105,7 @@ impl FileStructure {
                             let indent = "  ".repeat(symbol.depth.min(16));
                             let label = format!(
                                 "{indent}{}  {}  :{}",
-                                kind_name(symbol.kind),
+                                super::symbol_search::kind_name(symbol.kind),
                                 symbol.name,
                                 symbol.location.range.start.line + 1
                             );
@@ -122,22 +122,5 @@ impl FileStructure {
             });
         self.visible = open && !close;
         chosen
-    }
-}
-
-fn kind_name(kind: u64) -> &'static str {
-    match kind {
-        5 => "class",
-        6 => "method",
-        7 => "property",
-        8 => "field",
-        9 => "constructor",
-        10 => "enum",
-        11 => "interface",
-        12 => "function",
-        13 => "variable",
-        23 => "struct",
-        26 => "type",
-        _ => "symbol",
     }
 }

@@ -12,6 +12,8 @@ use crate::project::tree::EXCLUDED;
 use eframe::egui;
 use globset::{Glob, GlobSetBuilder};
 
+const MAX_SEARCH_FILE_BYTES: u64 = 16 * 1024 * 1024;
+
 #[derive(Clone, Debug, Default)]
 pub struct SearchQuery {
     pub text: String,
@@ -292,26 +294,9 @@ fn search(
     query: &SearchQuery,
     cancelled: impl Fn() -> bool,
 ) -> Result<SearchResults, String> {
-    let mut builder = GlobSetBuilder::new();
-    for glob in &query.file_globs {
-        builder.add(Glob::new(glob).map_err(|error| format!("Invalid file glob: {error}"))?);
-    }
-    let globs = builder.build().map_err(|error| error.to_string())?;
+    let globs = compile_globs(query)?;
     let mut results = SearchResults::default();
-    let mut walker = ignore::WalkBuilder::new(root);
-    walker
-        .hidden(false)
-        .require_git(false)
-        .follow_links(false)
-        .filter_entry(|entry| {
-            if entry.depth() == 0 {
-                return true;
-            }
-            !EXCLUDED
-                .iter()
-                .any(|excluded| entry.file_name() == *excluded)
-        });
-    const MAX_FILE: u64 = 16 * 1024 * 1024;
+    let walker = project_walker(root);
     for entry in walker.build() {
         if cancelled() {
             break;
@@ -332,8 +317,8 @@ fn search(
         }
         let mut bytes = Vec::new();
         let read = std::fs::File::open(entry.path())
-            .and_then(|file| file.take(MAX_FILE + 1).read_to_end(&mut bytes));
-        if read.is_err() || bytes.len() as u64 > MAX_FILE || bytes.contains(&0) {
+            .and_then(|file| file.take(MAX_SEARCH_FILE_BYTES + 1).read_to_end(&mut bytes));
+        if read.is_err() || bytes.len() as u64 > MAX_SEARCH_FILE_BYTES || bytes.contains(&0) {
             results.skipped += 1;
             continue;
         }
@@ -380,11 +365,7 @@ fn preview_replacements(
     let root = root
         .canonicalize()
         .map_err(|error| format!("Cannot open project {}: {error}", root.display()))?;
-    let mut builder = GlobSetBuilder::new();
-    for glob in &query.file_globs {
-        builder.add(Glob::new(glob).map_err(|error| format!("Invalid file glob: {error}"))?);
-    }
-    let globs = builder.build().map_err(|error| error.to_string())?;
+    let globs = compile_globs(query)?;
     let mut buffers: HashMap<_, _> = open_documents
         .into_iter()
         .filter(|document| document.path.starts_with(&root))
@@ -393,20 +374,7 @@ fn preview_replacements(
     let mut results = ReplaceSearchResults::default();
     let mut total_bytes = 0usize;
     let mut preview_lines = 0usize;
-    let mut walker = ignore::WalkBuilder::new(&root);
-    walker
-        .hidden(false)
-        .require_git(false)
-        .follow_links(false)
-        .filter_entry(|entry| {
-            if entry.depth() == 0 {
-                return true;
-            }
-            !EXCLUDED
-                .iter()
-                .any(|excluded| entry.file_name() == *excluded)
-        });
-    const MAX_FILE: u64 = 16 * 1024 * 1024;
+    let walker = project_walker(&root);
     for entry in walker.build() {
         if cancelled() {
             return Ok(results);
@@ -442,8 +410,8 @@ fn preview_replacements(
         } else {
             let mut bytes = Vec::new();
             let read = std::fs::File::open(&path)
-                .and_then(|file| file.take(MAX_FILE + 1).read_to_end(&mut bytes));
-            if read.is_err() || bytes.len() as u64 > MAX_FILE || bytes.contains(&0) {
+                .and_then(|file| file.take(MAX_SEARCH_FILE_BYTES + 1).read_to_end(&mut bytes));
+            if read.is_err() || bytes.len() as u64 > MAX_SEARCH_FILE_BYTES || bytes.contains(&0) {
                 results.skipped += 1;
                 continue;
             }
@@ -455,7 +423,7 @@ fn preview_replacements(
                 }
             }
         };
-        if text.len() > MAX_FILE as usize || text.as_bytes().contains(&0) {
+        if text.len() > MAX_SEARCH_FILE_BYTES as usize || text.as_bytes().contains(&0) {
             results.skipped += 1;
             continue;
         }
@@ -502,6 +470,29 @@ fn preview_replacements(
         });
     }
     Ok(results)
+}
+
+fn compile_globs(query: &SearchQuery) -> Result<globset::GlobSet, String> {
+    let mut builder = GlobSetBuilder::new();
+    for glob in &query.file_globs {
+        builder.add(Glob::new(glob).map_err(|error| format!("Invalid file glob: {error}"))?);
+    }
+    builder.build().map_err(|error| error.to_string())
+}
+
+fn project_walker(root: &Path) -> ignore::WalkBuilder {
+    let mut walker = ignore::WalkBuilder::new(root);
+    walker
+        .hidden(false)
+        .require_git(false)
+        .follow_links(false)
+        .filter_entry(|entry| {
+            entry.depth() == 0
+                || !EXCLUDED
+                    .iter()
+                    .any(|excluded| entry.file_name() == *excluded)
+        });
+    walker
 }
 
 pub fn render(ui: &mut egui::Ui, state: &mut crate::app::AppState) {

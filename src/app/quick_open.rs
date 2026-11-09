@@ -3,6 +3,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, mpsc};
 use std::thread::{self, JoinHandle};
 
+use crate::project::tree::EXCLUDED;
 use eframe::egui;
 
 struct Entry {
@@ -396,10 +397,9 @@ fn index_files(
         .hidden(false)
         .require_git(false)
         .filter_entry(|entry| {
-            !matches!(
-                entry.file_name().to_str(),
-                Some(".git" | "target" | "build" | ".gradle")
-            )
+            !EXCLUDED
+                .iter()
+                .any(|excluded| entry.file_name() == *excluded)
         });
     let mut files = Vec::new();
     let mut warning = None;

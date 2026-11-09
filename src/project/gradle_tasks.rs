@@ -5,12 +5,12 @@ use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
-use super::{ProjectKind, ProjectModel};
+use super::{ProjectKind, ProjectModel, resolve_program_path};
 use crate::java::jdk::JdkInstallation;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -95,13 +95,7 @@ impl GradleTaskLoader {
             .as_deref()
             .or(executable.as_deref())
             .ok_or("No Gradle wrapper. Configure the Gradle executable in Settings.")?;
-        let program = if program.is_absolute() {
-            program.to_path_buf()
-        } else if program.components().count() > 1 {
-            project.root.join(program)
-        } else {
-            program.to_path_buf()
-        };
+        let program = resolve_program_path(&project.root, program);
         let environment = jdk.child_environment().map_err(|error| error.to_string())?;
         let root = project.root.clone();
         let worker_root = root.clone();
@@ -180,36 +174,15 @@ impl Drop for GradleTaskLoader {
     }
 }
 
-struct Scratch(PathBuf);
+struct Scratch(super::ScratchDirectory);
 impl Scratch {
     fn create() -> Result<Self, String> {
-        static NEXT: AtomicU64 = AtomicU64::new(0);
-        for _ in 0..16 {
-            let id = NEXT.fetch_add(1, Ordering::Relaxed);
-            let stamp = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos();
-            let path = std::env::temp_dir().join(format!(
-                "intelli-gen-gradle-{}-{stamp}-{id}",
-                std::process::id()
-            ));
-            match fs::create_dir(&path) {
-                Ok(()) => return Ok(Self(path)),
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
-                Err(error) => {
-                    return Err(format!(
-                        "Cannot create Gradle task scratch directory: {error}"
-                    ));
-                }
-            }
-        }
-        Err("Cannot allocate a unique Gradle task scratch directory".into())
-    }
-}
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
+        super::ScratchDirectory::create(
+            "gradle",
+            |_, error| format!("Cannot create Gradle task scratch directory: {error}"),
+            "Cannot allocate a unique Gradle task scratch directory",
+        )
+        .map(Self)
     }
 }
 

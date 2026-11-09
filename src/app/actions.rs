@@ -2468,12 +2468,7 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                 }
                 super::events::GradleAction::Cancel { root } => {
                     if state.gradle_task_root.as_ref() == Some(&root) && state.gradle_task_loading {
-                        state.gradle_task_loader.cancel();
-                        state.gradle_task_generation = state.gradle_task_generation.wrapping_add(1);
-                        state.gradle_task_loading = false;
-                        state.gradle_task_loaded = false;
-                        state.gradle_tasks.clear();
-                        state.gradle_task_error = None;
+                        clear_gradle_task_state(state);
                     }
                 }
                 super::events::GradleAction::SelectProject { root, project_path } => {
@@ -3060,12 +3055,7 @@ fn refresh_maven_dependencies(state: &mut AppState) {
 }
 
 fn reload_gradle_tasks(state: &mut AppState) {
-    state.gradle_task_loader.cancel();
-    state.gradle_task_generation = state.gradle_task_generation.wrapping_add(1);
-    state.gradle_task_loading = false;
-    state.gradle_task_loaded = false;
-    state.gradle_tasks.clear();
-    state.gradle_task_error = None;
+    clear_gradle_task_state(state);
     let request = (|| -> Result<_, String> {
         let project = state
             .project
@@ -3107,6 +3097,15 @@ fn reload_gradle_tasks(state: &mut AppState) {
         },
         Err(error) => state.gradle_task_error = Some(error),
     }
+}
+
+fn clear_gradle_task_state(state: &mut AppState) {
+    state.gradle_task_loader.cancel();
+    state.gradle_task_generation = state.gradle_task_generation.wrapping_add(1);
+    state.gradle_task_loading = false;
+    state.gradle_task_loaded = false;
+    state.gradle_tasks.clear();
+    state.gradle_task_error = None;
 }
 
 fn retire_maven_watcher(state: &mut AppState) {
