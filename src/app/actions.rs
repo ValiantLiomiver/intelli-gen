@@ -2641,7 +2641,13 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                                 }
                             }
                             Ok(_) => {}
-                            Err(error) => state.maven_cache_error = Some(error),
+                            Err(error) => {
+                                state.maven_cache_error = Some(error);
+                                if use_cached && !state.maven_loading && state.maven_error.is_none()
+                                {
+                                    reload_maven_view(state);
+                                }
+                            }
                         }
                     }
                     Ok(None) => {
@@ -3169,6 +3175,50 @@ mod maven_cache_tests {
     use std::path::Path;
 
     #[test]
+    fn unverifiable_cached_view_attempts_one_refresh() {
+        let context = egui::Context::default();
+        let mut app = crate::app::IdeaLikeApp::new_with_context(context.clone(), None);
+        app.state.settings = crate::settings::UserSettings::default();
+        let root = std::path::PathBuf::from("/workspace/maven");
+        app.state.project = Some(crate::project::Project {
+            root: root.clone(),
+            kind: crate::project::ProjectKind::Maven,
+            display_name: "maven".into(),
+            discovery_error: None,
+            model: Some(crate::project::ProjectModel {
+                root: root.clone(),
+                name: "maven".into(),
+                kind: crate::project::ProjectKind::Maven,
+                modules: Vec::new(),
+                wrapper: None,
+            }),
+        });
+        app.state.maven_view_root = Some(root.clone());
+        app.state.maven_cache_generation = 5;
+        app.state.enqueue(crate::app::events::AppEvent::MavenCacheLoaded {
+            root, generation: 5,
+            result: Ok(Some(serde_json::from_value(serde_json::json!({
+                "root": "/workspace/maven", "pom_fingerprint": "old", "default_profiles": true,
+                "view": {"profiles": [], "root_module": {"name": "cached", "relative_path": null,
+                    "lifecycle": [], "plugins": [], "dependencies": [], "repositories": [], "modules": []}}
+            })).unwrap())),
+            current_pom_fingerprint: Err("unresolved module".into()),
+        });
+        super::process_events(&context, &mut app.state);
+        assert_eq!(
+            app.state.maven_generation, 1,
+            "unverifiable cache must trigger a refresh"
+        );
+        assert!(app.state.maven_error.is_some());
+        assert!(app.state.maven_view.is_some());
+        super::process_events(&context, &mut app.state);
+        assert_eq!(
+            app.state.maven_generation, 1,
+            "failed refresh must not be retried repeatedly"
+        );
+    }
+
+    #[test]
     fn manual_reload_attempts_to_load_the_maven_model() {
         let context = egui::Context::default();
         let mut app = crate::app::IdeaLikeApp::new_with_context(context.clone(), None);
@@ -3385,6 +3435,46 @@ mod run_build_tests {
         start_pending_run_build(&mut app.state);
         assert!(app.state.pending_run.is_none());
         assert!(app.state.run.summary.contains("marked unavailable"));
+    }
+}
+
+#[cfg(test)]
+mod editor_save_tests {
+    use super::*;
+
+    #[test]
+    fn failed_save_clears_saving_status_and_keeps_unsaved_edits() {
+        let context = egui::Context::default();
+        let mut app = crate::app::IdeaLikeApp::new_with_context(context, None);
+        let path = PathBuf::from("/project/Main.java");
+        let document = crate::editor::Document {
+            path: path.clone(),
+            text: "edited".into(),
+            saved_text: "original".into(),
+            cursor_line: 1,
+            cursor_column: 1,
+            revision: 1,
+        };
+        let mut tab = EditorTab::new(document);
+        tab.saving = true;
+        app.state.editor_tabs.push(tab);
+        app.state.status = format!("Saving {}…", path.display());
+        editor_completed(
+            &mut app.state,
+            EditorCompletion::Saved {
+                path: path.clone(),
+                saved_path: path,
+                snapshot: "edited".into(),
+                result: Err("File changed on disk".into()),
+            },
+        );
+        assert_eq!(app.state.status, "Save failed");
+        assert_eq!(
+            app.state.last_error.as_deref(),
+            Some("File changed on disk")
+        );
+        assert!(!app.state.editor_tabs[0].saving);
+        assert!(app.state.editor_tabs[0].document.is_dirty());
     }
 }
 
@@ -3710,6 +3800,7 @@ fn save_file(state: &mut AppState, path: &std::path::Path) -> bool {
         }
         Err(error) => {
             tab.close_after_save = false;
+            state.status = "Save failed".into();
             state.last_error = Some(error.clone());
             false
         }
@@ -4852,6 +4943,7 @@ fn editor_completed(state: &mut AppState, completion: EditorCompletion) {
                 }
                 Err(error) => {
                     tab.close_after_save = false;
+                    state.status = "Save failed".into();
                     if state
                         .pending_run
                         .as_ref()

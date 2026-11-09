@@ -144,6 +144,14 @@ This confirms the Java execution module is shipped. JetBrains documents running
 Java tests from editor gutters in [Performing tests](https://www.jetbrains.com/help/idea/performing-tests.html);
 the package inventory itself does not establish that runtime behavior.
 
+On 2026-11-09, REA successfully analyzed the IntelliJ launcher with Ghidra
+12.1.4 (Evidence
+`ev_1c72833e4e7877bfdf75f14de3b68893e8818feb9cf7420c01a6b75fb005eb2a`,
+SHA-256 `2f9ff57814cc03916bcecca2b05122534793214d4243f7e565e4735c8e1b0785`).
+The overview reports 2,578 identified procedures and 3,541 defined strings;
+these inventories may be incomplete and do not establish Java IDE behavior.
+This succeeded after an earlier environment blocked Ghidra's child process.
+
 REA inventoried `intellij.java.frontback.impl.jar` from this IntelliJ build
 (Evidence `ev_0e742228001339686e30c3744db137582b30a1e4b386bdb2b6b9e03e99d23ae5`,
 SHA-256 `4ed9b0d1abce05031a1521e5ba594f5be706adeac49b483d867f2f0e8d6e72ce`).
@@ -293,6 +301,7 @@ The server resolved `smoke` rather than the deliberately incorrect model name
 
 It also passed on 2026-11-09 against the current Rust worker and packaged Java
 tools with an Eclipse fixture and JDK 25, including all three debug sessions.
+The worker test was repeated successfully against commit `09627ce`.
 On the same date, a native accessibility smoke check launched the current debug
 build and opened a disposable Gradle project from the recent-project list. The
 project status, tree, and window title confirmed the result. A separate native
@@ -319,6 +328,9 @@ A native unsaved-file check confirmed that Cancel retains the dirty buffer,
 Save and Close writes the disposable file, and Discard closes its tab without
 changing disk contents. The Go to Line dialog also accepted `3:3` and moved the
 caret there. These modal buttons expose non-empty bounds to macOS accessibility.
+A native save-conflict check confirmed that an external change present before
+Save remains on disk, the editor retains its unsaved buffer, and the error is
+reported without leaving the status as “Saving”.
 
 For this test, use the `Main.java` with the `add` helper shown in the Maven
 fixture below, compiled into `bin/` with debug information. Use an Eclipse
@@ -358,6 +370,7 @@ user home. It invokes the production build worker for Build, Test, and Clean, ch
 successful completion events and selected JDK reporting, confirms compilation of
 `custom/app/src/main/java/Main.java`, and checks that Clean removes its `.class`.
 It passed again on 2026-11-09 against the current Rust worker.
+The same offline worker test also passed against commit `09627ce`.
 The fixture's settings include `:app` with
 `project(':app').projectDir = file('custom/app')`; its module applies the Java
 plugin and uses only local JUnit/Hamcrest JARs for its test dependencies.
@@ -369,8 +382,8 @@ temporary directory and run
 `cargo test live_gradle_worker_builds_and_cleans_remapped_module -- --ignored`.
 It executes Clean, so use only a disposable fixture. The test expects two JUnit tests, one deliberately failing. It checks exit code
 `1`, totals of two tests / one passed / one failed, and the failed method’s source
-path and line parsed from the XML report. The native Build panel remains
-unverified.
+path and line parsed from the XML report. The native Build panel is covered
+separately by the Maven build/diagnostic smoke check above.
 
 For the extended Gradle fixture, place locally installed `junit-4.13.jar` and
 `hamcrest-core-1.3.jar` in `custom/app/lib/` and declare
@@ -395,6 +408,7 @@ checks one passing and one failing JUnit test plus its source location, and
 verifies that Clean removes the compiled class. The Maven fixture provides an
 executable `mvnw` that invokes the installed Maven with `--offline`; the
 configured Maven path is deliberately nonexistent to verify wrapper precedence.
+It passed again on 2026-11-09 with Corretto JDK 8 and a disposable reactor.
 
 Set `INTELLI_GEN_MAVEN_PROJECT` to this disposable reactor and
 `INTELLI_GEN_BUILD_JAVA_HOME` to its JDK, then run
@@ -405,6 +419,20 @@ jar 3.3.0, Surefire 2.22.1, and clean 3.2.0. The module uses local system-scoped
 `junit:junit:4.13` and `org.hamcrest:hamcrest-core:1.3` JARs. These coordinates are
 needed for Surefire to select JUnit 4. All plugin dependencies and the JUnit 4
 provider must already exist in the local Maven cache; the test downloads nothing.
+
+The optional `real_maven_profile_refresh_preserves_default_cache` test passed on
+2026-11-09 with Maven 3.9.9 and JDK 23. It uses the production Maven view worker
+to load a default reactor, activate an `extra` profile that adds a module, and
+confirm that the default view remains in the cache. To repeat it, use a fresh
+disposable reactor with an offline `mvnw` and that profile, set
+`INTELLI_GEN_PROFILE_MAVEN_PROJECT` and `INTELLI_GEN_BUILD_JAVA_HOME`, then run
+`cargo test real_maven_profile_refresh_preserves_default_cache -- --ignored`.
+The POM watcher and cache fingerprint include literal module paths declared in
+Maven profiles. Paths containing Maven property expressions cannot be resolved
+statically: new cache writes are disabled and those module POMs require a manual
+refresh. An existing cached view may still be shown with a fingerprint error.
+Profile module discovery stays inside the reactor root; an external module also
+disables the cache fingerprint.
 
 The live language/debug worker test also passed with a minimal Maven project
 containing only a POM and conventional Java sources, without an Eclipse

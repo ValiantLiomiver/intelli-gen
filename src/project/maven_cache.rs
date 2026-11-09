@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
 use std::fs::{self, OpenOptions};
 use std::hash::{Hash, Hasher};
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -21,6 +21,8 @@ pub struct CachedMavenView {
     root: PathBuf,
     pub view: MavenView,
     pub pom_fingerprint: String,
+    #[serde(default)]
+    default_profiles: bool,
 }
 
 pub struct MavenViewCache {
@@ -146,10 +148,22 @@ impl MavenViewCache {
                 path.display()
             ));
         }
+        if !cached.default_profiles {
+            return Ok(None);
+        }
         Ok(Some(cached))
     }
 
-    pub fn save(&self, root: &Path, view: &MavenView, pom_fingerprint: &str) -> Result<(), String> {
+    pub fn save(
+        &self,
+        root: &Path,
+        view: &MavenView,
+        pom_fingerprint: &str,
+        default_profiles: bool,
+    ) -> Result<(), String> {
+        if !default_profiles {
+            return Ok(());
+        }
         let canonical_root = root
             .canonicalize()
             .map_err(|error| format!("Cannot resolve Maven cache project root: {error}"))?;
@@ -164,6 +178,7 @@ impl MavenViewCache {
             root: canonical_root,
             view: view.clone(),
             pom_fingerprint: pom_fingerprint.to_owned(),
+            default_profiles: true,
         };
         let data = serde_json::to_vec(&cached)
             .map_err(|error| format!("Cannot serialize Maven cache: {error}"))?;
@@ -190,10 +205,25 @@ impl MavenViewCache {
         self.directory
             .join(format!("{:016x}.json", hasher.finish()))
     }
+
+    #[cfg(test)]
+    pub(crate) fn exists_for_test(&self, root: &Path) -> bool {
+        self.path_for(&root.canonicalize().unwrap()).exists()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn remove_for_test(&self, root: &Path) {
+        let path = self.path_for(&root.canonicalize().unwrap());
+        let _ = fs::remove_file(path);
+    }
 }
 
 pub fn fingerprint_poms(model: &ProjectModel) -> Result<String, String> {
-    let mut paths = vec![model.root.join("pom.xml")];
+    let mut paths = Vec::new();
+    let unresolved = super::maven::profile_pom_paths(&model.root, &mut paths)?;
+    if unresolved {
+        return Err("Cannot fingerprint Maven modules with property-based paths".into());
+    }
     paths.extend(
         model
             .modules
@@ -213,7 +243,7 @@ pub fn fingerprint_pom_paths(root: &Path, paths: &[PathBuf]) -> Result<String, S
         path.strip_prefix(root)
             .unwrap_or(path.as_path())
             .hash(&mut hasher);
-        match fs::read(&path) {
+        match read_regular_pom(&path) {
             Ok(contents) => contents.hash(&mut hasher),
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 "<missing-pom>".hash(&mut hasher);
@@ -227,6 +257,26 @@ pub fn fingerprint_pom_paths(root: &Path, paths: &[PathBuf]) -> Result<String, S
         }
     }
     Ok(format!("{:016x}", hasher.finish()))
+}
+
+pub(crate) fn read_regular_pom(path: &Path) -> io::Result<Vec<u8>> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NONBLOCK);
+    }
+    let mut file = options.open(path)?;
+    if !file.metadata()?.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "not a regular file",
+        ));
+    }
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
+    Ok(bytes)
 }
 
 #[cfg(test)]
@@ -291,7 +341,7 @@ mod tests {
         let root = temp_root("round-trip");
         let cache = super::MavenViewCache::at(root.join("cache"));
         let view = sample_view("cached-project");
-        cache.save(&root, &view, "fingerprint-1").unwrap();
+        cache.save(&root, &view, "fingerprint-1", true).unwrap();
 
         let cached = cache.load(&root).unwrap().unwrap();
         assert_eq!(cached.pom_fingerprint, "fingerprint-1");
@@ -308,7 +358,9 @@ mod tests {
         let first = temp_root("first");
         let second = temp_root("second");
         let cache = super::MavenViewCache::at(first.join("cache"));
-        cache.save(&first, &sample_view("first"), "one").unwrap();
+        cache
+            .save(&first, &sample_view("first"), "one", true)
+            .unwrap();
 
         assert!(cache.load(&second).unwrap().is_none());
 
@@ -321,6 +373,39 @@ mod tests {
         let root = temp_root("missing");
         let cache = super::MavenViewCache::at(root.join("cache"));
         assert!(cache.load(&root).unwrap().is_none());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn legacy_cache_without_profile_identity_is_not_reused() {
+        let root = temp_root("legacy-profiles");
+        let cache = super::MavenViewCache::at(root.join("cache"));
+        cache
+            .save(&root, &sample_view("custom-profile"), "same-pom", true)
+            .unwrap();
+        let path = cache.path_for(&root.canonicalize().unwrap());
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        value.as_object_mut().unwrap().remove("default_profiles");
+        fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+        assert!(cache.load(&root).unwrap().is_none());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn custom_profile_resolution_preserves_default_profile_cache() {
+        let root = temp_root("custom-profiles");
+        let cache = super::MavenViewCache::at(root.join("cache"));
+        cache
+            .save(&root, &sample_view("default"), "same-pom", true)
+            .unwrap();
+        cache
+            .save(&root, &sample_view("custom"), "same-pom", false)
+            .unwrap();
+        assert_eq!(
+            cache.load(&root).unwrap().unwrap().view.root_module.name,
+            "default"
+        );
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -358,6 +443,90 @@ mod tests {
         fs::write(module.join("pom.xml"), "<project>changed</project>").unwrap();
         assert_ne!(first, fingerprint_poms(&project).unwrap());
 
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn pom_fingerprint_tracks_modules_declared_in_profiles() {
+        let root = temp_root("profile-module");
+        let module = root.join("extra");
+        fs::create_dir_all(&module).unwrap();
+        fs::write(root.join("pom.xml"), "<project><profiles><profile><id>extra</id><modules><module>extra</module></modules></profile></profiles></project>").unwrap();
+        fs::write(
+            module.join("pom.xml"),
+            "<project><name>before</name></project>",
+        )
+        .unwrap();
+        let project = model(&root, Vec::new());
+        let before = fingerprint_poms(&project).unwrap();
+        fs::write(
+            module.join("pom.xml"),
+            "<project><name>after</name></project>",
+        )
+        .unwrap();
+        assert_ne!(before, fingerprint_poms(&project).unwrap());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn property_based_profile_module_disables_the_cache_fingerprint() {
+        let root = temp_root("profile-property");
+        fs::write(root.join("pom.xml"), "<project><profiles><profile><id>extra</id><modules><module>${module.path}</module></modules></profile></profiles></project>").unwrap();
+        assert!(
+            fingerprint_poms(&model(&root, Vec::new()))
+                .unwrap_err()
+                .contains("property-based")
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn profile_module_may_reference_the_pom_file() {
+        let root = temp_root("profile-pom-file");
+        let module = root.join("extra");
+        fs::create_dir_all(&module).unwrap();
+        fs::write(root.join("pom.xml"), "<project><profiles><profile><id>extra</id><modules><module>extra/pom.xml</module></modules></profile></profiles></project>").unwrap();
+        fs::write(
+            module.join("pom.xml"),
+            "<project><name>before</name></project>",
+        )
+        .unwrap();
+        let project = model(&root, Vec::new());
+        let before = fingerprint_poms(&project).unwrap();
+        fs::write(
+            module.join("pom.xml"),
+            "<project><name>after</name></project>",
+        )
+        .unwrap();
+        assert_ne!(before, fingerprint_poms(&project).unwrap());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn special_file_in_profile_is_rejected_without_reading_it() {
+        let root = temp_root("profile-fifo");
+        let module = root.join("extra");
+        fs::create_dir_all(&module).unwrap();
+        fs::write(root.join("pom.xml"), "<project><profiles><profile><modules><module>extra</module></modules></profile></profiles></project>").unwrap();
+        let fifo = module.join("pom.xml");
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(&fifo)
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            fingerprint_poms(&model(&root, Vec::new()))
+                .unwrap_err()
+                .contains("not a regular file")
+        );
+        assert!(
+            super::fingerprint_pom_paths(&root, &[fifo])
+                .unwrap_err()
+                .contains("not a regular file")
+        );
         fs::remove_dir_all(root).unwrap();
     }
 

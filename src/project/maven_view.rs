@@ -233,6 +233,7 @@ impl MavenViewLoader {
             .name("maven-view".into())
             .spawn(move || {
                 let cache_project = request.project.clone();
+                let default_profiles = !request.profiles_user_modified;
                 let fingerprint_before = fingerprint_poms(&cache_project);
                 let event = MavenViewEvent {
                     root: request.project.root.clone(),
@@ -256,7 +257,9 @@ impl MavenViewLoader {
                                 && !worker_cancel.load(Ordering::Acquire) =>
                         {
                             MavenViewCache::for_user()
-                                .and_then(|cache| cache.save(&cache_project.root, view, &after))
+                                .and_then(|cache| {
+                                    cache.save(&cache_project.root, view, &after, default_profiles)
+                                })
                                 .err()
                         }
                         (Ok(_), Ok(_))
@@ -499,7 +502,11 @@ fn load(
         log,
         console,
         generation: request.generation,
-        profiles: request.profiles,
+        profiles: if profiles_user_modified {
+            request.profiles
+        } else {
+            Vec::new()
+        },
         scratch: Scratch::create()?,
         next_output: 0,
         seen_modules: HashSet::new(),
@@ -1387,5 +1394,65 @@ mod terminal_process_tests {
             )
             .unwrap_err();
         assert!(error.contains("[ERROR] failure detail"));
+    }
+}
+
+#[cfg(all(test, unix))]
+mod profile_cache_smoke_test {
+    use super::*;
+
+    #[test]
+    #[ignore = "requires a disposable INTELLI_GEN_PROFILE_MAVEN_PROJECT with an extra profile and INTELLI_GEN_BUILD_JAVA_HOME"]
+    fn real_maven_profile_refresh_preserves_default_cache() {
+        let root = PathBuf::from(std::env::var_os("INTELLI_GEN_PROFILE_MAVEN_PROJECT").unwrap());
+        let jdk_home = PathBuf::from(std::env::var_os("INTELLI_GEN_BUILD_JAVA_HOME").unwrap());
+        let model = ProjectModel::discover(&root).unwrap();
+        let jdk = crate::java::jdk::JdkCatalog::add(&jdk_home).unwrap();
+        let cache = MavenViewCache::for_user().unwrap();
+        assert!(
+            !cache.exists_for_test(&root),
+            "use a fresh disposable project"
+        );
+        let mut loader = MavenViewLoader::default();
+        let mut resolve = |generation, profiles: Vec<String>, profiles_user_modified| {
+            loader
+                .start(MavenViewRequest {
+                    project: model.clone(),
+                    executable: None,
+                    jdk: jdk.clone(),
+                    profiles,
+                    profiles_user_modified,
+                    generation,
+                })
+                .unwrap();
+            let deadline = std::time::Instant::now() + Duration::from_secs(90);
+            loop {
+                if let Some(event) = loader.poll().into_iter().next() {
+                    assert!(event.cache_error.is_none(), "{:?}", event.cache_error);
+                    break event.result.unwrap();
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "Maven refresh timed out"
+                );
+                thread::sleep(Duration::from_millis(30));
+            }
+        };
+        let default_view = resolve(1, Vec::new(), false);
+        let default_cache = cache.load(&root).unwrap().unwrap();
+        let refreshed_default = resolve(2, vec!["extra".into()], false);
+        assert_eq!(
+            refreshed_default.root_module.modules.len(),
+            default_view.root_module.modules.len(),
+            "old default selections must not be passed to the next Maven refresh"
+        );
+        let custom_view = resolve(3, vec!["extra".into()], true);
+        assert!(custom_view.root_module.modules.len() > default_view.root_module.modules.len());
+        let retained = cache.load(&root).unwrap().unwrap();
+        assert_eq!(
+            serde_json::to_value(retained.view).unwrap(),
+            serde_json::to_value(default_cache.view).unwrap()
+        );
+        cache.remove_for_test(&root);
     }
 }

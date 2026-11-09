@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
@@ -21,6 +21,20 @@ struct Pom {
     modules: Option<Modules>,
     #[serde(default, rename = "artifactId")]
     artifact_id: Option<String>,
+    #[serde(default)]
+    profiles: Option<Profiles>,
+}
+
+#[derive(Default, Deserialize)]
+struct Profiles {
+    #[serde(default, rename = "profile")]
+    entries: Vec<Profile>,
+}
+
+#[derive(Default, Deserialize)]
+struct Profile {
+    #[serde(default)]
+    modules: Option<Modules>,
 }
 
 /// Maven Debug Server uses the artifact ID as its project name when evaluating
@@ -43,6 +57,141 @@ pub fn artifact_id(root: &Path) -> Result<Option<String>, ProjectError> {
 struct Modules {
     #[serde(default, rename = "module")]
     entries: Vec<String>,
+}
+
+/// Discover literal module POMs, including those declared by inactive profiles.
+/// Property-based module paths require Maven's effective model and are reported.
+pub(crate) fn profile_pom_paths(root: &Path, paths: &mut Vec<PathBuf>) -> Result<bool, String> {
+    let canonical_root = root.canonicalize().map_err(|e| e.to_string())?;
+    let mut pending = vec![root.join("pom.xml")];
+    let mut visited = HashSet::new();
+    let mut unresolved = false;
+    let mut first_error = None;
+    while let Some(path) = pending.pop() {
+        let parent_inside = path
+            .ancestors()
+            .find_map(|part| part.canonicalize().ok())
+            .is_some_and(|ancestor| ancestor.starts_with(&canonical_root));
+        if !parent_inside {
+            first_error.get_or_insert_with(|| {
+                format!(
+                    "Maven module {} is outside the reactor root",
+                    path.display()
+                )
+            });
+            continue;
+        }
+        paths.push(path.clone());
+        let identity = match path.canonicalize() {
+            Ok(identity) => identity,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                first_error.get_or_insert_with(|| {
+                    format!("Cannot inspect Maven module {}: {error}", path.display())
+                });
+                continue;
+            }
+        };
+        if !identity.starts_with(&canonical_root) {
+            first_error.get_or_insert_with(|| {
+                format!(
+                    "Maven module {} is outside the reactor root",
+                    path.display()
+                )
+            });
+            continue;
+        }
+        if !visited.insert(identity) {
+            continue;
+        }
+        let bytes = match super::maven_cache::read_regular_pom(&path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                first_error.get_or_insert_with(|| {
+                    format!("Cannot read Maven POM {}: {error}", path.display())
+                });
+                continue;
+            }
+        };
+        let xml = match String::from_utf8(bytes) {
+            Ok(xml) => xml,
+            Err(error) => {
+                first_error.get_or_insert_with(|| {
+                    format!("Cannot decode Maven POM {}: {error}", path.display())
+                });
+                continue;
+            }
+        };
+        let pom: Pom = match quick_xml::de::from_str(&xml) {
+            Ok(pom) => pom,
+            Err(error) => {
+                first_error.get_or_insert_with(|| {
+                    format!("Cannot parse Maven POM {}: {error}", path.display())
+                });
+                continue;
+            }
+        };
+        if let Err(error) = require_complete_document(&xml, &path) {
+            first_error.get_or_insert_with(|| error.to_string());
+            continue;
+        }
+        let entries = pom
+            .modules
+            .into_iter()
+            .flat_map(|modules| modules.entries)
+            .chain(
+                pom.profiles
+                    .into_iter()
+                    .flat_map(|profiles| profiles.entries)
+                    .flat_map(|profile| {
+                        profile
+                            .modules
+                            .into_iter()
+                            .flat_map(|modules| modules.entries)
+                    }),
+            );
+        for entry in entries {
+            let name = entry.trim();
+            if name.is_empty() || name.contains("${") {
+                unresolved = true;
+                continue;
+            }
+            let module = normalize(&path.parent().unwrap_or(root).join(name));
+            if !module.starts_with(root) {
+                first_error.get_or_insert_with(|| {
+                    format!(
+                        "Maven module {} is outside the reactor root",
+                        module.display()
+                    )
+                });
+                continue;
+            }
+            let is_pom = match fs::metadata(&module) {
+                Ok(metadata) => metadata.is_file(),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => module
+                    .extension()
+                    .is_some_and(|extension| extension == "xml"),
+                Err(error) => {
+                    first_error.get_or_insert_with(|| {
+                        format!("Cannot inspect Maven module {}: {error}", module.display())
+                    });
+                    continue;
+                }
+            };
+            pending.push(if is_pom {
+                module
+            } else {
+                module.join("pom.xml")
+            });
+        }
+    }
+    paths.sort();
+    paths.dedup();
+    match first_error {
+        Some(error) => Err(error),
+        None => Ok(unresolved),
+    }
 }
 
 /// Read explicitly declared reactor modules only; no Maven process is launched.

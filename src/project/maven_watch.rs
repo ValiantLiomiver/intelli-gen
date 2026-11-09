@@ -6,10 +6,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::{self, JoinHandle, Thread};
 use std::time::{Duration, Instant, SystemTime};
 
-use super::{
-    ProjectModel,
-    maven_cache::{fingerprint_pom_paths, fingerprint_poms},
-};
+use super::{ProjectModel, maven_cache::fingerprint_pom_paths};
 
 #[derive(Clone, Debug)]
 pub struct MavenPomEvent {
@@ -140,10 +137,11 @@ fn watch(
 ) {
     const CONTENT_CHECK_INTERVAL: Duration = Duration::from_secs(5);
     pom_paths.push(root.join("pom.xml"));
+    let _ = super::maven::profile_pom_paths(&root, &mut pom_paths);
     pom_paths.sort();
     pom_paths.dedup();
     let mut previous = metadata_snapshot(&pom_paths).ok();
-    let mut previous_content = fingerprint_pom_paths(&root, &pom_paths).ok();
+    let mut previous_content = content_snapshot(&root, &pom_paths);
     let mut last_content_check = Instant::now();
     let _ = ready.send(());
     let mut changed_at = None;
@@ -163,19 +161,25 @@ fn watch(
         }
         if last_content_check.elapsed() >= CONTENT_CHECK_INTERVAL {
             last_content_check = Instant::now();
-            if let Ok(fingerprint) = fingerprint_pom_paths(&root, &pom_paths)
-                && previous_content.as_ref() != Some(&fingerprint)
-            {
-                previous_content = Some(fingerprint);
+            let fingerprint = content_snapshot(&root, &pom_paths);
+            if previous_content != fingerprint {
+                previous_content = fingerprint;
                 changed_at = Some(Instant::now());
             }
         }
         if changed_at.is_some_and(|changed| changed.elapsed() >= debounce) {
             let model = ProjectModel::discover(&root).map_err(|error| error.to_string());
             if let Ok(model) = &model {
-                pom_paths = project_pom_paths(model);
+                let mut discovered = project_pom_paths(model);
+                if super::maven::profile_pom_paths(&root, &mut discovered).is_ok() {
+                    pom_paths = discovered;
+                } else {
+                    pom_paths.extend(discovered);
+                }
+                pom_paths.sort();
+                pom_paths.dedup();
                 previous = metadata_snapshot(&pom_paths).ok();
-                previous_content = fingerprint_poms(model).ok();
+                previous_content = content_snapshot(&root, &pom_paths);
             }
             let _ = sender.send(MavenPomEvent {
                 root: root.clone(),
@@ -187,11 +191,28 @@ fn watch(
     }
 }
 
+fn content_snapshot(
+    root: &std::path::Path,
+    paths: &[PathBuf],
+) -> Vec<(PathBuf, Result<String, String>)> {
+    let mut paths = paths.to_vec();
+    paths.sort();
+    paths.dedup();
+    paths
+        .into_iter()
+        .map(|path| {
+            let result = fingerprint_pom_paths(root, std::slice::from_ref(&path));
+            (path, result)
+        })
+        .collect()
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct PomMetadata {
     path: PathBuf,
     modified: Option<SystemTime>,
     length: Option<u64>,
+    error: Option<String>,
 }
 
 fn metadata_snapshot(paths: &[PathBuf]) -> Result<Vec<PomMetadata>, String> {
@@ -201,21 +222,27 @@ fn metadata_snapshot(paths: &[PathBuf]) -> Result<Vec<PomMetadata>, String> {
     paths
         .into_iter()
         .map(|path| match fs::metadata(&path) {
-            Ok(metadata) => Ok(PomMetadata {
-                path,
-                modified: Some(
-                    metadata
-                        .modified()
-                        .map_err(|error| format!("Cannot inspect POM timestamp: {error}"))?,
-                ),
-                length: Some(metadata.len()),
-            }),
+            Ok(metadata) => {
+                let modified = metadata.modified();
+                Ok(PomMetadata {
+                    path,
+                    modified: modified.as_ref().ok().copied(),
+                    length: Some(metadata.len()),
+                    error: modified.err().map(|error| error.to_string()),
+                })
+            }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(PomMetadata {
                 path,
                 modified: None,
                 length: None,
+                error: None,
             }),
-            Err(error) => Err(format!("Cannot inspect Maven POM metadata: {error}")),
+            Err(error) => Ok(PomMetadata {
+                path,
+                modified: None,
+                length: None,
+                error: Some(error.to_string()),
+            }),
         })
         .collect()
 }
@@ -254,6 +281,38 @@ mod tests {
         )
         .unwrap();
         root
+    }
+
+    #[test]
+    fn inaccessible_pom_does_not_prevent_observing_other_paths() {
+        let root = project_root("metadata-error");
+        let obstacle = root.join("not-a-directory");
+        fs::write(&obstacle, "file").unwrap();
+        let paths = vec![root.join("pom.xml"), obstacle.join("pom.xml")];
+        let snapshot = super::metadata_snapshot(&paths).unwrap();
+        assert_eq!(snapshot.len(), 2);
+        assert!(
+            snapshot
+                .iter()
+                .any(|item| item.path == root.join("pom.xml") && item.length.is_some())
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn content_check_continues_when_one_pom_is_unreadable() {
+        let root = project_root("content-error");
+        let obstacle = root.join("not-a-directory");
+        fs::write(&obstacle, "file").unwrap();
+        let paths = vec![root.join("pom.xml"), obstacle.join("pom.xml")];
+        let before = super::content_snapshot(&root, &paths);
+        fs::write(
+            root.join("pom.xml"),
+            "<project><name>changed</name></project>",
+        )
+        .unwrap();
+        assert_ne!(before, super::content_snapshot(&root, &paths));
+        fs::remove_dir_all(root).unwrap();
     }
 
     fn wait_ready(watcher: &MavenPomWatcher) {
@@ -331,6 +390,104 @@ mod tests {
         wait_ready(&watcher);
         watcher.cancel();
         assert!(!watcher.has_worker());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn profile_module_pom_change_triggers_reload() {
+        let root = project_root("profile-module");
+        let module = root.join("extra");
+        fs::create_dir_all(&module).unwrap();
+        fs::write(root.join("pom.xml"), "<project><profiles><profile><id>extra</id><modules><module>extra</module></modules></profile></profiles></project>").unwrap();
+        let pom = module.join("pom.xml");
+        fs::write(&pom, "<project><name>before</name></project>").unwrap();
+        let mut watcher = MavenPomWatcher::start_with_timing(
+            root.clone(),
+            vec![root.join("pom.xml")],
+            1,
+            Duration::from_millis(10),
+            Duration::from_millis(30),
+        )
+        .unwrap();
+        wait_ready(&watcher);
+        fs::write(&pom, "<project><name>after-longer</name></project>").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while watcher.poll().is_empty() {
+            assert!(
+                Instant::now() < deadline,
+                "profile module POM change was not detected"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        watcher.cancel();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn repairing_a_malformed_profile_module_triggers_reload() {
+        let root = project_root("profile-invalid");
+        let module = root.join("extra");
+        fs::create_dir_all(&module).unwrap();
+        fs::write(root.join("pom.xml"), "<project><profiles><profile><modules><module>extra</module></modules></profile></profiles></project>").unwrap();
+        let pom = module.join("pom.xml");
+        fs::write(&pom, "<project>").unwrap();
+        let mut watcher = MavenPomWatcher::start_with_timing(
+            root.clone(),
+            vec![root.join("pom.xml")],
+            1,
+            Duration::from_millis(10),
+            Duration::from_millis(30),
+        )
+        .unwrap();
+        wait_ready(&watcher);
+        fs::write(&pom, "<project><name>repaired</name></project>").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while watcher.poll().is_empty() {
+            assert!(
+                Instant::now() < deadline,
+                "repair of profile module POM was not detected"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        watcher.cancel();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn removed_profile_module_does_not_block_future_root_changes() {
+        let root = project_root("profile-removed");
+        let module = root.join("extra");
+        fs::create_dir_all(&module).unwrap();
+        fs::write(module.join("pom.xml"), "<project/>").unwrap();
+        let pom = root.join("pom.xml");
+        fs::write(&pom, "<project><profiles><profile><modules><module>extra</module></modules></profile></profiles></project>").unwrap();
+        let mut watcher = MavenPomWatcher::start_with_timing(
+            root.clone(),
+            vec![pom.clone()],
+            1,
+            Duration::from_millis(10),
+            Duration::from_millis(30),
+        )
+        .unwrap();
+        wait_ready(&watcher);
+        fs::write(&pom, "<project><profiles><profile><modules><module>${unknown}</module></modules></profile></profiles></project>").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while watcher.poll().is_empty() {
+            assert!(Instant::now() < deadline, "module removal not detected");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        fs::remove_dir_all(&module).unwrap();
+        fs::write(&module, "not a directory").unwrap();
+        fs::write(&pom, "<project><name>another change</name></project>").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while watcher.poll().is_empty() {
+            assert!(
+                Instant::now() < deadline,
+                "stale module prevented subsequent reload"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        watcher.cancel();
         fs::remove_dir_all(root).unwrap();
     }
 
