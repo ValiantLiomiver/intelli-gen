@@ -2578,6 +2578,7 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                 generation,
                 result,
                 cache_error,
+                cache_candidate,
             } => {
                 if state.maven_view_root.as_ref() != Some(&root)
                     || generation != state.maven_generation
@@ -2598,10 +2599,32 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                             state.maven_selected_module = None;
                         }
                         let watcher_error = watch_resolved_maven_poms(state, &root, &view);
+                        if let Some((canonical_root, fingerprint)) = cache_candidate
+                            && let Err(error) = state.maven_view_loader.publish_cache(
+                                root.clone(),
+                                generation,
+                                canonical_root,
+                                view.clone(),
+                                fingerprint,
+                            )
+                        {
+                            state.maven_cache_error = Some(error);
+                        }
                         state.maven_view = Some(view);
                         state.maven_error = watcher_error;
                     }
                     Err(error) => state.maven_error = Some(error),
+                }
+            }
+            AppEvent::MavenCacheWriteFailed {
+                root,
+                generation,
+                error,
+            } => {
+                if state.maven_view_root.as_ref() == Some(&root)
+                    && generation == state.maven_generation
+                {
+                    state.maven_cache_error = Some(error);
                 }
             }
             AppEvent::MavenCacheLoaded {
@@ -3225,6 +3248,49 @@ mod maven_cache_tests {
     use super::{cached_maven_view_is_stale, maven_pom_event_is_current};
     use eframe::egui;
     use std::path::Path;
+
+    #[test]
+    fn superseded_maven_result_never_starts_a_cache_writer() {
+        let context = egui::Context::default();
+        let mut app = crate::app::IdeaLikeApp::new_with_context(context.clone(), None);
+        let root = std::path::PathBuf::from("/workspace/maven");
+        app.state.maven_view_root = Some(root.clone());
+        app.state.maven_generation = 2;
+        let view = serde_json::from_value(serde_json::json!({
+            "profiles": [], "root_module": {"name":"old", "relative_path":null, "lifecycle":[],
+                "plugins":[], "dependencies":[], "repositories":[], "modules":[]}
+        }))
+        .unwrap();
+        app.state
+            .enqueue(crate::app::events::AppEvent::MavenViewCompleted {
+                root: root.clone(),
+                generation: 1,
+                result: Ok(view),
+                cache_error: None,
+                cache_candidate: Some((root, "old".into())),
+            });
+        super::process_events(&context, &mut app.state);
+        assert!(!app.state.maven_view_loader.has_workers());
+        assert!(app.state.maven_view.is_none());
+    }
+
+    #[test]
+    fn obsolete_cache_write_error_does_not_replace_current_error() {
+        let context = egui::Context::default();
+        let mut app = crate::app::IdeaLikeApp::new_with_context(context.clone(), None);
+        let root = std::path::PathBuf::from("/workspace/maven");
+        app.state.maven_view_root = Some(root.clone());
+        app.state.maven_generation = 2;
+        app.state.maven_cache_error = Some("current".into());
+        app.state
+            .enqueue(crate::app::events::AppEvent::MavenCacheWriteFailed {
+                root,
+                generation: 1,
+                error: "obsolete".into(),
+            });
+        super::process_events(&context, &mut app.state);
+        assert_eq!(app.state.maven_cache_error.as_deref(), Some("current"));
+    }
 
     #[test]
     fn resolved_maven_paths_include_nested_modules_without_escaping_root() {

@@ -736,6 +736,14 @@ impl eframe::App for IdeaLikeApp {
                 generation: event.generation,
                 result: event.result,
                 cache_error: event.cache_error,
+                cache_candidate: event.cache_candidate,
+            });
+        }
+        for (root, generation, error) in self.state.maven_view_loader.poll_cache_errors() {
+            self.state.enqueue(AppEvent::MavenCacheWriteFailed {
+                root,
+                generation,
+                error,
             });
         }
         for event in self.state.gradle_task_loader.poll() {

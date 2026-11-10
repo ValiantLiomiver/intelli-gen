@@ -434,6 +434,10 @@ fingerprinted statically, so new cache writes are disabled; an existing cached
 view may still be shown with a fingerprint error.
 Profile module discovery stays inside the reactor root; an external module also
 disables the cache fingerprint.
+Only a Maven result accepted for the current project and refresh can schedule a
+cache write. Accepted writes run off the UI thread and are ordered per project
+within one IDE process. Separate IDE processes do not coordinate cache writes;
+the fingerprint covers POM files, not Maven or JDK settings.
 
 The optional `real_maven_resolves_property_module_and_records_its_pom` test
 passed with Maven 3.9.9 and JDK 23 on a disposable reactor whose `extra` profile

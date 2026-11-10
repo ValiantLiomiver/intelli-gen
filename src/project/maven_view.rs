@@ -75,6 +75,24 @@ pub struct MavenViewEvent {
     pub generation: u64,
     pub result: Result<MavenView, String>,
     pub cache_error: Option<String>,
+    pub cache_candidate: Option<(PathBuf, String)>,
+}
+
+#[derive(Default)]
+struct CachePublicationOrder {
+    latest: AtomicU64,
+    lock: Mutex<()>,
+}
+
+impl CachePublicationOrder {
+    fn accept(&self) -> u64 {
+        self.latest.fetch_add(1, Ordering::AcqRel).wrapping_add(1)
+    }
+
+    fn publish<T>(&self, sequence: u64, operation: impl FnOnce() -> T) -> Option<T> {
+        let _guard = self.lock.lock().unwrap_or_else(|error| error.into_inner());
+        (self.latest.load(Ordering::Acquire) == sequence).then(operation)
+    }
 }
 
 pub struct MavenViewLoader {
@@ -82,7 +100,10 @@ pub struct MavenViewLoader {
     receiver: Receiver<MavenViewEvent>,
     latest: HashMap<PathBuf, u64>,
     workers: Vec<MavenViewWorker>,
-    generations: HashMap<PathBuf, Arc<AtomicU64>>,
+    cache_orders: HashMap<PathBuf, Arc<CachePublicationOrder>>,
+    cache_workers: Vec<JoinHandle<()>>,
+    cache_error_sender: Sender<(PathBuf, u64, String)>,
+    cache_error_receiver: Receiver<(PathBuf, u64, String)>,
     progress: Arc<MavenProgress>,
     log: Arc<MavenProcessLog>,
     console: Arc<MavenConsole>,
@@ -189,12 +210,16 @@ struct MavenViewWorker {
 impl Default for MavenViewLoader {
     fn default() -> Self {
         let (sender, receiver) = mpsc::channel();
+        let (cache_error_sender, cache_error_receiver) = mpsc::channel();
         Self {
             sender,
             receiver,
             latest: HashMap::new(),
             workers: Vec::new(),
-            generations: HashMap::new(),
+            cache_orders: HashMap::new(),
+            cache_workers: Vec::new(),
+            cache_error_sender,
+            cache_error_receiver,
             progress: Arc::new(MavenProgress::default()),
             log: Arc::new(MavenProcessLog::default()),
             console: Arc::new(MavenConsole::default()),
@@ -224,13 +249,6 @@ impl MavenViewLoader {
         let worker_log = Arc::clone(&self.log);
         let console = Arc::new(MavenConsole::default());
         let worker_console = Arc::clone(&console);
-        let generation_token = self
-            .generations
-            .entry(root.clone())
-            .or_insert_with(|| Arc::new(AtomicU64::new(0)))
-            .clone();
-        generation_token.store(generation, Ordering::Release);
-        let worker_generation = Arc::clone(&generation_token);
         let worker = thread::Builder::new()
             .name("maven-view".into())
             .spawn(move || {
@@ -248,34 +266,28 @@ impl MavenViewLoader {
                         worker_console,
                     ),
                     cache_error: None,
+                    cache_candidate: None,
                 };
                 let mut event = event;
-                if let Ok(view) = &event.result {
-                    event.cache_error = match (fingerprint_before, fingerprint_poms(&cache_project))
-                    {
-                        (Ok(before), Ok(after))
-                            if before == after
-                                && worker_generation.load(Ordering::Acquire) == generation
-                                && !worker_cancel.load(Ordering::Acquire) =>
-                        {
-                            MavenViewCache::for_user()
-                                .and_then(|cache| {
-                                    cache.save(&cache_project.root, view, &after, default_profiles)
-                                })
-                                .err()
+                if event.result.is_ok() && !worker_cancel.load(Ordering::Acquire) {
+                    match (fingerprint_before, fingerprint_poms(&cache_project)) {
+                        (Ok(before), Ok(after)) if before == after && default_profiles => {
+                            match cache_project.root.canonicalize() {
+                                Ok(root) => event.cache_candidate = Some((root, after)),
+                                Err(error) => {
+                                    event.cache_error = Some(format!(
+                                        "Cannot resolve Maven cache project root: {error}"
+                                    ))
+                                }
+                            }
                         }
-                        (Ok(_), Ok(_))
-                            if worker_generation.load(Ordering::Acquire) != generation
-                                || worker_cancel.load(Ordering::Acquire) =>
-                        {
-                            None
-                        }
-                        (Ok(_), Ok(_)) => Some(
+                        (Ok(before), Ok(after)) if before == after => {}
+                        (Ok(_), Ok(_)) => event.cache_error = Some(
                             "POM files changed while Maven was resolving; result was not cached"
                                 .into(),
                         ),
-                        (Err(error), _) | (_, Err(error)) => Some(error),
-                    };
+                        (Err(error), _) | (_, Err(error)) => event.cache_error = Some(error),
+                    }
                 }
                 let _ = sender.send(event);
             })
@@ -299,9 +311,6 @@ impl MavenViewLoader {
     /// Signal every worker. `poll` joins workers after their Maven children exit.
     pub fn cancel(&mut self) {
         self.latest.clear();
-        for generation in self.generations.values() {
-            generation.fetch_add(1, Ordering::AcqRel);
-        }
         for worker in &self.workers {
             worker.cancel.store(true, Ordering::Release);
         }
@@ -322,11 +331,50 @@ impl MavenViewLoader {
                 index += 1;
             }
         }
+        let mut index = 0;
+        while index < self.cache_workers.len() {
+            if self.cache_workers[index].is_finished() {
+                let _ = self.cache_workers.swap_remove(index).join();
+            } else {
+                index += 1;
+            }
+        }
         events
     }
 
+    pub fn publish_cache(
+        &mut self,
+        root: PathBuf,
+        generation: u64,
+        canonical_root: PathBuf,
+        view: MavenView,
+        fingerprint: String,
+    ) -> Result<(), String> {
+        let order = Arc::clone(self.cache_orders.entry(canonical_root.clone()).or_default());
+        let sequence = order.accept();
+        let sender = self.cache_error_sender.clone();
+        let worker = thread::Builder::new()
+            .name("maven-cache-write".into())
+            .spawn(move || {
+                let result = order.publish(sequence, || {
+                    MavenViewCache::for_user()
+                        .and_then(|cache| cache.save(&canonical_root, &view, &fingerprint, true))
+                });
+                if let Some(Err(error)) = result {
+                    let _ = sender.send((root, generation, error));
+                }
+            })
+            .map_err(|error| format!("Cannot start Maven cache writer: {error}"))?;
+        self.cache_workers.push(worker);
+        Ok(())
+    }
+
+    pub fn poll_cache_errors(&mut self) -> Vec<(PathBuf, u64, String)> {
+        self.cache_error_receiver.try_iter().collect()
+    }
+
     pub fn has_workers(&self) -> bool {
-        !self.workers.is_empty()
+        !self.workers.is_empty() || !self.cache_workers.is_empty()
     }
 
     pub fn progress_percent(&self) -> usize {
@@ -1289,6 +1337,78 @@ mod progress_tests {
     }
 }
 
+#[cfg(test)]
+mod cache_publication_tests {
+    use super::*;
+
+    #[test]
+    fn cancelled_result_waiting_for_acceptance_never_starts_cache_write() {
+        let mut loader = MavenViewLoader::default();
+        let root = PathBuf::from("/workspace/project");
+        loader.latest.insert(root.clone(), 1);
+        let view = serde_json::from_value(serde_json::json!({
+            "profiles": [], "root_module": {"name":"old", "relative_path":null, "lifecycle":[],
+                "plugins":[], "dependencies":[], "repositories":[], "modules":[]}
+        }))
+        .unwrap();
+        loader
+            .sender
+            .send(MavenViewEvent {
+                root: root.clone(),
+                generation: 1,
+                result: Ok(view),
+                cache_error: None,
+                cache_candidate: Some((root, "old".into())),
+            })
+            .unwrap();
+        loader.cancel();
+        assert!(loader.poll().is_empty());
+        assert!(!loader.has_workers());
+    }
+
+    #[test]
+    fn accepted_newer_publication_cannot_be_overwritten_by_older_worker() {
+        let order = Arc::new(CachePublicationOrder::default());
+        let writes = Arc::new(Mutex::new(Vec::new()));
+        let older = order.accept();
+        let newer = order.accept();
+        let newer_writes = Arc::clone(&writes);
+        order.publish(newer, || newer_writes.lock().unwrap().push("new"));
+        let older_writes = Arc::clone(&writes);
+        order.publish(older, || older_writes.lock().unwrap().push("old"));
+        assert_eq!(*writes.lock().unwrap(), vec!["new"]);
+    }
+
+    #[test]
+    fn accepted_publications_remain_ordered_when_older_write_is_in_progress() {
+        let order = Arc::new(CachePublicationOrder::default());
+        let writes = Arc::new(Mutex::new(Vec::new()));
+        let (entered, wait_entered) = mpsc::channel();
+        let (resume, wait_resume) = mpsc::channel();
+        let first = order.accept();
+        let old_order = Arc::clone(&order);
+        let old_writes = Arc::clone(&writes);
+        let old = thread::spawn(move || {
+            old_order.publish(first, || {
+                entered.send(()).unwrap();
+                wait_resume.recv().unwrap();
+                old_writes.lock().unwrap().push("old");
+            })
+        });
+        wait_entered.recv_timeout(Duration::from_secs(2)).unwrap();
+        let second = order.accept();
+        let new_order = Arc::clone(&order);
+        let new_writes = Arc::clone(&writes);
+        let new = thread::spawn(move || {
+            new_order.publish(second, || new_writes.lock().unwrap().push("new"))
+        });
+        resume.send(()).unwrap();
+        old.join().unwrap();
+        new.join().unwrap();
+        assert_eq!(*writes.lock().unwrap(), vec!["old", "new"]);
+    }
+}
+
 #[cfg(all(test, target_os = "macos"))]
 mod background_process_tests {
     use super::background_java_options;
@@ -1496,7 +1616,28 @@ mod profile_cache_smoke_test {
             loop {
                 if let Some(event) = loader.poll().into_iter().next() {
                     assert!(event.cache_error.is_none(), "{:?}", event.cache_error);
-                    break event.result.unwrap();
+                    let view = event.result.unwrap();
+                    if let Some((canonical_root, fingerprint)) = event.cache_candidate {
+                        loader
+                            .publish_cache(
+                                root.clone(),
+                                generation,
+                                canonical_root,
+                                view.clone(),
+                                fingerprint,
+                            )
+                            .unwrap();
+                        while loader.has_workers() {
+                            loader.poll();
+                            assert!(
+                                std::time::Instant::now() < deadline,
+                                "cache write timed out"
+                            );
+                            thread::sleep(Duration::from_millis(10));
+                        }
+                        assert!(loader.poll_cache_errors().is_empty());
+                    }
+                    break view;
                 }
                 assert!(
                     std::time::Instant::now() < deadline,
