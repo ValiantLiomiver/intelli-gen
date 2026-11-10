@@ -439,9 +439,12 @@ cache write. Accepted writes run off the UI thread and are ordered per project
 within one IDE process. The cache also records the configured JDK home and
 catalog version and the selected Maven executable or wrapper path; a mismatch or
 missing identity triggers a refresh while keeping the cached view as a fallback.
-Separate IDE processes do not coordinate cache writes. The identity does not
-detect a Maven executable, wrapper configuration, or JDK replaced at the same
-path without a corresponding catalog-version update.
+Changes to the project's wrapper scripts and `.mvn` configuration also trigger a
+refresh and change the cache fingerprint. Separate IDE processes do not
+coordinate cache writes. The identity does not detect an installed Maven
+executable, downloaded wrapper distribution, or JDK replaced at the same path
+without a corresponding catalog-version update. User-level Maven settings and
+environment variables are not included in the cache fingerprint.
 
 The optional `real_maven_resolves_property_module_and_records_its_pom` test
 passed with Maven 3.9.9 and JDK 23 on a disposable reactor whose `extra` profile

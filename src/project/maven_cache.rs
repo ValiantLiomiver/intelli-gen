@@ -256,7 +256,23 @@ pub fn fingerprint_poms(model: &ProjectModel) -> Result<String, String> {
             .iter()
             .map(|module| module.root.join("pom.xml")),
     );
+    paths.extend(maven_project_config_paths(&model.root));
     fingerprint_pom_paths(&model.root, &paths)
+}
+
+pub(crate) fn maven_project_config_paths(root: &Path) -> Vec<PathBuf> {
+    [
+        "mvnw",
+        "mvnw.cmd",
+        ".mvn/maven.config",
+        ".mvn/jvm.config",
+        ".mvn/extensions.xml",
+        ".mvn/wrapper/maven-wrapper.properties",
+        ".mvn/wrapper/maven-wrapper.jar",
+    ]
+    .into_iter()
+    .map(|path| root.join(path))
+    .collect()
 }
 
 pub fn fingerprint_pom_paths(root: &Path, paths: &[PathBuf]) -> Result<String, String> {
@@ -276,7 +292,7 @@ pub fn fingerprint_pom_paths(root: &Path, paths: &[PathBuf]) -> Result<String, S
             }
             Err(error) => {
                 return Err(format!(
-                    "Cannot fingerprint Maven POM {}: {error}",
+                    "Cannot fingerprint Maven input {}: {error}",
                     path.display()
                 ));
             }
@@ -520,6 +536,29 @@ mod tests {
         fs::write(module.join("pom.xml"), "<project>changed</project>").unwrap();
         assert_ne!(first, fingerprint_poms(&project).unwrap());
 
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn maven_fingerprint_tracks_wrapper_and_project_configuration() {
+        let root = temp_root("wrapper-config");
+        fs::write(root.join("pom.xml"), "<project/>").unwrap();
+        let project = model(&root, Vec::new());
+        let before = fingerprint_poms(&project).unwrap();
+        fs::create_dir_all(root.join(".mvn/wrapper")).unwrap();
+        fs::write(
+            root.join(".mvn/wrapper/maven-wrapper.properties"),
+            "distributionUrl=first",
+        )
+        .unwrap();
+        let changed = fingerprint_poms(&project).unwrap();
+        assert_ne!(before, changed);
+        fs::write(
+            root.join(".mvn/wrapper/maven-wrapper.properties"),
+            "distributionUrl=other",
+        )
+        .unwrap();
+        assert_ne!(changed, fingerprint_poms(&project).unwrap());
         fs::remove_dir_all(root).unwrap();
     }
 

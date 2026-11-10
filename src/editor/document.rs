@@ -54,20 +54,48 @@ impl std::error::Error for EditorError {
     }
 }
 
+fn open_regular_document(path: &Path) -> Result<fs::File, EditorError> {
+    let metadata = fs::metadata(path).map_err(|error| EditorError::new(path, "read", error))?;
+    if !metadata.is_file() {
+        return Err(EditorError::new(
+            path,
+            "open",
+            io::Error::new(io::ErrorKind::InvalidInput, "not a regular file"),
+        ));
+    }
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NONBLOCK);
+    }
+    let file = options
+        .open(path)
+        .map_err(|error| EditorError::new(path, "open", error))?;
+    let metadata = file
+        .metadata()
+        .map_err(|error| EditorError::new(path, "read", error))?;
+    if !metadata.is_file() {
+        return Err(EditorError::new(
+            path,
+            "open",
+            io::Error::new(io::ErrorKind::InvalidInput, "not a regular file"),
+        ));
+    }
+    Ok(file)
+}
+
 impl Document {
     /// Synchronous document operations are called exclusively by the editor worker.
     pub fn load(path: &Path) -> Result<Self, EditorError> {
         let normalized = path
             .canonicalize()
             .map_err(|e| EditorError::new(path, "open", e))?;
-        let metadata = fs::metadata(&normalized).map_err(|e| EditorError::new(path, "read", e))?;
-        if !metadata.is_file() {
-            return Err(EditorError::new(
-                path,
-                "open",
-                io::Error::new(io::ErrorKind::InvalidInput, "not a regular file"),
-            ));
-        }
+        let file = open_regular_document(&normalized)?;
+        let metadata = file
+            .metadata()
+            .map_err(|e| EditorError::new(path, "read", e))?;
         // Bound allocation even if the file grows after metadata was read.
         // Oversized/invalid input fails the open, never creates a partial document.
         if metadata.len() > MAX_DOCUMENT_BYTES as u64 {
@@ -81,9 +109,7 @@ impl Document {
             ));
         }
         let mut text = String::new();
-        fs::File::open(&normalized)
-            .map_err(|e| EditorError::new(path, "open", e))?
-            .take(MAX_DOCUMENT_BYTES as u64 + 1)
+        file.take(MAX_DOCUMENT_BYTES as u64 + 1)
             .read_to_string(&mut text)
             .map_err(|e| EditorError::new(path, "read as UTF-8", e))?;
         if text.len() > MAX_DOCUMENT_BYTES {
@@ -525,7 +551,8 @@ fn atomic_write_new(
 
 fn disk_matches(path: &Path, expected: &[u8]) -> io::Result<bool> {
     let mut current = Vec::with_capacity(expected.len());
-    fs::File::open(path)?
+    open_regular_document(path)
+        .map_err(|error| error.source)?
         .take(expected.len() as u64 + 1)
         .read_to_end(&mut current)?;
     Ok(current == expected)
@@ -545,6 +572,65 @@ fn external_change_error(path: &Path, operation: &'static str) -> EditorError {
 mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[cfg(unix)]
+    #[test]
+    fn opened_document_descriptor_is_not_replaced_by_a_fifo() {
+        let root = std::env::temp_dir().join(format!(
+            "intelli-gen-document-open-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir(&root).unwrap();
+        let path = root.join("Example.java");
+        fs::write(&path, "original").unwrap();
+        let mut file = open_regular_document(&path).unwrap();
+        fs::remove_file(&path).unwrap();
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(&path)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let mut contents = String::new();
+        file.read_to_string(&mut contents).unwrap();
+        assert_eq!(contents, "original");
+        assert!(open_regular_document(&path).is_err());
+        assert!(disk_matches(&path, b"original").is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn document_load_rejects_oversized_and_invalid_utf8_files() {
+        let root = std::env::temp_dir().join(format!(
+            "intelli-gen-document-invalid-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir(&root).unwrap();
+        let oversized = root.join("large.java");
+        fs::File::create(&oversized)
+            .unwrap()
+            .set_len(MAX_DOCUMENT_BYTES as u64 + 1)
+            .unwrap();
+        assert!(
+            Document::load(&oversized)
+                .unwrap_err()
+                .to_string()
+                .contains("16 MiB")
+        );
+        let invalid = root.join("invalid.java");
+        fs::write(&invalid, [0xff]).unwrap();
+        assert!(Document::load(&invalid).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn save_persists_edits_and_clears_dirty_state() {

@@ -152,6 +152,7 @@ fn watch(
 ) {
     const CONTENT_CHECK_INTERVAL: Duration = Duration::from_secs(5);
     pom_paths.push(root.join("pom.xml"));
+    pom_paths.extend(super::maven_cache::maven_project_config_paths(&root));
     let _ = super::maven::profile_pom_paths(&root, &mut pom_paths);
     pom_paths.sort();
     pom_paths.dedup();
@@ -232,6 +233,7 @@ fn watch(
             let model = ProjectModel::discover(&root).map_err(|error| error.to_string());
             if let Ok(model) = &model {
                 let mut discovered = project_pom_paths(model);
+                discovered.extend(super::maven_cache::maven_project_config_paths(&root));
                 if super::maven::profile_pom_paths(&root, &mut discovered).is_ok() {
                     static_paths = discovered;
                 } else {
@@ -479,6 +481,36 @@ mod tests {
             assert!(
                 Instant::now() < deadline,
                 "profile module POM change was not detected"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        watcher.cancel();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn wrapper_configuration_change_triggers_reload() {
+        let root = project_root("wrapper-config");
+        let mut watcher = MavenPomWatcher::start_with_timing(
+            root.clone(),
+            vec![root.join("pom.xml")],
+            1,
+            Duration::from_millis(10),
+            Duration::from_millis(30),
+        )
+        .unwrap();
+        wait_ready(&watcher);
+        fs::create_dir_all(root.join(".mvn/wrapper")).unwrap();
+        fs::write(
+            root.join(".mvn/wrapper/maven-wrapper.properties"),
+            "distributionUrl=changed",
+        )
+        .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while watcher.poll().is_empty() {
+            assert!(
+                Instant::now() < deadline,
+                "wrapper configuration change was not detected"
             );
             std::thread::sleep(Duration::from_millis(5));
         }
