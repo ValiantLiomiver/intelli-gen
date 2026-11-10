@@ -303,6 +303,7 @@ mod tests {
 
     fn sample_view(name: &str) -> MavenView {
         MavenView {
+            pom_fingerprints: Default::default(),
             profiles: vec![MavenProfile {
                 id: "dev".into(),
                 active_by_default: false,

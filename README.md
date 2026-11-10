@@ -428,11 +428,18 @@ disposable reactor with an offline `mvnw` and that profile, set
 `INTELLI_GEN_PROFILE_MAVEN_PROJECT` and `INTELLI_GEN_BUILD_JAVA_HOME`, then run
 `cargo test real_maven_profile_refresh_preserves_default_cache -- --ignored`.
 The POM watcher and cache fingerprint include literal module paths declared in
-Maven profiles. Paths containing Maven property expressions cannot be resolved
-statically: new cache writes are disabled and those module POMs require a manual
-refresh. An existing cached view may still be shown with a fingerprint error.
+Maven profiles. After a successful Maven refresh, the watcher also monitors
+resolved module paths that use Maven properties. Property-based paths cannot be
+fingerprinted statically, so new cache writes are disabled; an existing cached
+view may still be shown with a fingerprint error.
 Profile module discovery stays inside the reactor root; an external module also
 disables the cache fingerprint.
+
+The optional `real_maven_resolves_property_module_and_records_its_pom` test
+passed with Maven 3.9.9 and JDK 23 on a disposable reactor whose `extra` profile
+uses `${extra.module}`. Set `INTELLI_GEN_PROPERTY_MAVEN_PROJECT` to such a reactor
+with an offline `mvnw` and `INTELLI_GEN_BUILD_JAVA_HOME` to the JDK, then run
+`cargo test real_maven_resolves_property_module_and_records_its_pom -- --ignored`.
 
 The live language/debug worker test also passed with a minimal Maven project
 containing only a POM and conventional Java sources, without an Eclipse

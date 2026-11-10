@@ -2597,8 +2597,9 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                         {
                             state.maven_selected_module = None;
                         }
+                        let watcher_error = watch_resolved_maven_poms(state, &root, &view);
                         state.maven_view = Some(view);
-                        state.maven_error = None;
+                        state.maven_error = watcher_error;
                     }
                     Err(error) => state.maven_error = Some(error),
                 }
@@ -2627,6 +2628,11 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                         }
                         if let Some(view) = state.maven_view.clone() {
                             sync_maven_profiles(state, &view);
+                            if use_cached
+                                && let Some(error) = watch_resolved_maven_poms(state, &root, &view)
+                            {
+                                state.maven_error = Some(error);
+                            }
                         }
                         match current_pom_fingerprint {
                             Ok(current)
@@ -3128,6 +3134,52 @@ fn retire_maven_watcher(state: &mut AppState) {
     }
 }
 
+fn resolved_maven_poms(
+    root: &std::path::Path,
+    module: &crate::project::maven_view::MavenModuleView,
+) -> Vec<PathBuf> {
+    fn collect(
+        root: &std::path::Path,
+        module: &crate::project::maven_view::MavenModuleView,
+        paths: &mut Vec<PathBuf>,
+    ) {
+        if let Some(relative) = &module.relative_path
+            && relative.components().all(|component| {
+                matches!(
+                    component,
+                    std::path::Component::Normal(_) | std::path::Component::CurDir
+                )
+            })
+        {
+            paths.push(root.join(relative).join("pom.xml"));
+        }
+        for child in &module.modules {
+            collect(root, child, paths);
+        }
+    }
+    let mut paths = Vec::new();
+    collect(root, module, &mut paths);
+    paths
+}
+
+fn watch_resolved_maven_poms(
+    state: &AppState,
+    root: &std::path::Path,
+    view: &crate::project::maven_view::MavenView,
+) -> Option<String> {
+    let paths = resolved_maven_poms(root, &view.root_module)
+        .into_iter()
+        .map(|path| {
+            let fingerprint = view.pom_fingerprints.get(&path).cloned();
+            (path, fingerprint)
+        })
+        .collect();
+    state
+        .maven_pom_watcher
+        .as_ref()
+        .and_then(|watcher| watcher.set_resolved_poms(paths).err())
+}
+
 fn retire_project_tree_watcher(state: &mut AppState) {
     if let Some(mut watcher) = state.project_tree_watcher.take() {
         watcher.request_cancel();
@@ -3173,6 +3225,26 @@ mod maven_cache_tests {
     use super::{cached_maven_view_is_stale, maven_pom_event_is_current};
     use eframe::egui;
     use std::path::Path;
+
+    #[test]
+    fn resolved_maven_paths_include_nested_modules_without_escaping_root() {
+        let module: crate::project::maven_view::MavenModuleView = serde_json::from_value(serde_json::json!({
+            "name": "root", "relative_path": null, "lifecycle": [], "plugins": [], "dependencies": [], "repositories": [],
+            "modules": [
+                {"name":"one", "relative_path":"one", "lifecycle":[], "plugins":[], "dependencies":[], "repositories":[], "modules":[
+                    {"name":"nested", "relative_path":"one/nested", "lifecycle":[], "plugins":[], "dependencies":[], "repositories":[], "modules":[]}
+                ]},
+                {"name":"unsafe", "relative_path":"../outside", "lifecycle":[], "plugins":[], "dependencies":[], "repositories":[], "modules":[]}
+            ]
+        })).unwrap();
+        assert_eq!(
+            super::resolved_maven_poms(Path::new("/project"), &module),
+            vec![
+                std::path::PathBuf::from("/project/one/pom.xml"),
+                std::path::PathBuf::from("/project/one/nested/pom.xml")
+            ]
+        );
+    }
 
     #[test]
     fn unverifiable_cached_view_attempts_one_refresh() {

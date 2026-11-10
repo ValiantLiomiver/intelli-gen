@@ -25,6 +25,8 @@ use super::{ProjectKind, ProjectModel, maven::valid_profile_id, resolve_program_
 pub struct MavenView {
     pub profiles: Vec<MavenProfile>,
     pub root_module: MavenModuleView,
+    #[serde(skip)]
+    pub pom_fingerprints: HashMap<PathBuf, String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -464,6 +466,7 @@ struct Context {
     seen_modules: HashSet<PathBuf>,
     profile_ids: HashMap<String, bool>,
     plugin_goals: HashMap<(PathBuf, String), (String, Vec<String>)>,
+    pom_fingerprints: HashMap<PathBuf, String>,
 }
 
 fn load(
@@ -512,6 +515,7 @@ fn load(
         seen_modules: HashSet::new(),
         profile_ids: HashMap::new(),
         plugin_goals: HashMap::new(),
+        pom_fingerprints: HashMap::new(),
     };
     context.read_profiles(&root)?;
     // Include profiles in statically discovered POMs even if a different profile
@@ -549,6 +553,7 @@ fn load(
     Ok(MavenView {
         profiles,
         root_module,
+        pom_fingerprints: context.pom_fingerprints,
     })
 }
 
@@ -580,6 +585,19 @@ impl Context {
                 directory.display()
             )
         })?;
+        if self
+            .root
+            .canonicalize()
+            .is_ok_and(|root| identity.starts_with(root))
+        {
+            let pom_path = super::discovery::normalize(directory).join("pom.xml");
+            if let Ok(fingerprint) = super::maven_cache::fingerprint_pom_paths(
+                &self.root,
+                std::slice::from_ref(&pom_path),
+            ) {
+                self.pom_fingerprints.insert(pom_path, fingerprint);
+            }
+        }
         if !self.seen_modules.insert(identity.clone()) {
             return Err(format!(
                 "Maven module cycle or duplicate at {}",
@@ -1343,6 +1361,7 @@ mod terminal_process_tests {
             seen_modules: HashSet::new(),
             profile_ids: HashMap::new(),
             plugin_goals: HashMap::new(),
+            pom_fingerprints: HashMap::new(),
         }
     }
 
@@ -1400,6 +1419,54 @@ mod terminal_process_tests {
 #[cfg(all(test, unix))]
 mod profile_cache_smoke_test {
     use super::*;
+
+    #[test]
+    #[ignore = "requires INTELLI_GEN_PROPERTY_MAVEN_PROJECT with an extra profile using a module property and INTELLI_GEN_BUILD_JAVA_HOME"]
+    fn real_maven_resolves_property_module_and_records_its_pom() {
+        let root = PathBuf::from(std::env::var_os("INTELLI_GEN_PROPERTY_MAVEN_PROJECT").unwrap());
+        let jdk_home = PathBuf::from(std::env::var_os("INTELLI_GEN_BUILD_JAVA_HOME").unwrap());
+        let model = ProjectModel::discover(&root).unwrap();
+        let mut loader = MavenViewLoader::default();
+        loader
+            .start(MavenViewRequest {
+                project: model,
+                executable: None,
+                jdk: crate::java::jdk::JdkCatalog::add(&jdk_home).unwrap(),
+                profiles: vec!["extra".into()],
+                profiles_user_modified: true,
+                generation: 1,
+            })
+            .unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(90);
+        let event = loop {
+            if let Some(event) = loader.poll().into_iter().next() {
+                break event;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "Maven refresh timed out"
+            );
+            thread::sleep(Duration::from_millis(30));
+        };
+        let view = event.result.unwrap();
+        let pom = root.join("custom/extra/pom.xml");
+        assert!(
+            view.root_module
+                .modules
+                .iter()
+                .any(|module| module.relative_path.as_deref() == Some(Path::new("custom/extra")))
+        );
+        assert_eq!(
+            view.pom_fingerprints.get(&pom),
+            Some(
+                &super::super::maven_cache::fingerprint_pom_paths(
+                    &root,
+                    std::slice::from_ref(&pom)
+                )
+                .unwrap()
+            )
+        );
+    }
 
     #[test]
     #[ignore = "requires a disposable INTELLI_GEN_PROFILE_MAVEN_PROJECT with an extra profile and INTELLI_GEN_BUILD_JAVA_HOME"]

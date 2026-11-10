@@ -17,6 +17,7 @@ pub struct MavenPomEvent {
 
 pub struct MavenPomWatcher {
     receiver: Receiver<MavenPomEvent>,
+    updates: Sender<Vec<(PathBuf, Option<String>)>>,
     ready: Receiver<()>,
     cancelled: Arc<AtomicBool>,
     worker: Option<JoinHandle<()>>,
@@ -46,6 +47,7 @@ impl MavenPomWatcher {
         debounce: Duration,
     ) -> Result<Self, String> {
         let (sender, receiver) = mpsc::channel();
+        let (updates, update_receiver) = mpsc::channel();
         let (ready_sender, ready) = mpsc::channel();
         let cancelled = Arc::new(AtomicBool::new(false));
         let worker_cancelled = Arc::clone(&cancelled);
@@ -61,17 +63,29 @@ impl MavenPomWatcher {
                     worker_cancelled,
                     sender,
                     ready_sender,
+                    update_receiver,
                 );
             })
             .map_err(|error| format!("Cannot start Maven POM watcher: {error}"))?;
         let thread = worker.thread().clone();
         Ok(Self {
             receiver,
+            updates,
             ready,
             cancelled,
             worker: Some(worker),
             thread: Some(thread),
         })
+    }
+
+    pub fn set_resolved_poms(&self, paths: Vec<(PathBuf, Option<String>)>) -> Result<(), String> {
+        self.updates
+            .send(paths)
+            .map_err(|_| "Maven POM watcher is unavailable".to_owned())?;
+        if let Some(thread) = &self.thread {
+            thread.unpark();
+        }
+        Ok(())
     }
 
     pub fn poll(&mut self) -> Vec<MavenPomEvent> {
@@ -134,12 +148,15 @@ fn watch(
     cancelled: Arc<AtomicBool>,
     sender: Sender<MavenPomEvent>,
     ready: Sender<()>,
+    updates: Receiver<Vec<(PathBuf, Option<String>)>>,
 ) {
     const CONTENT_CHECK_INTERVAL: Duration = Duration::from_secs(5);
     pom_paths.push(root.join("pom.xml"));
     let _ = super::maven::profile_pom_paths(&root, &mut pom_paths);
     pom_paths.sort();
     pom_paths.dedup();
+    let mut static_paths = pom_paths.clone();
+    let mut resolved_paths: Vec<PathBuf> = Vec::new();
     let mut previous = metadata_snapshot(&pom_paths).ok();
     let mut previous_content = content_snapshot(&root, &pom_paths);
     let mut last_content_check = Instant::now();
@@ -159,6 +176,50 @@ fn watch(
             previous = Some(current);
             changed_at = Some(Instant::now());
         }
+        if let Some(paths) = updates.try_iter().last() {
+            let resolved: Vec<_> = paths.iter().map(|(path, _)| path.clone()).collect();
+            let observed = content_snapshot(&root, &resolved);
+            for (path, expected) in &paths {
+                if let Some(expected) = expected
+                    && observed
+                        .iter()
+                        .find(|(observed_path, _)| observed_path == path)
+                        .and_then(|(_, fingerprint)| fingerprint.as_ref().ok())
+                        != Some(expected)
+                {
+                    changed_at = Some(Instant::now());
+                }
+            }
+            resolved_paths = paths.into_iter().map(|(path, _)| path).collect();
+            resolved_paths.sort();
+            resolved_paths.dedup();
+            let mut next = static_paths.clone();
+            next.extend(resolved_paths.iter().cloned());
+            next.sort();
+            next.dedup();
+            let added: Vec<_> = next
+                .iter()
+                .filter(|path| !pom_paths.contains(path))
+                .cloned()
+                .collect();
+            if let Some(snapshot) = &mut previous {
+                snapshot.retain(|entry| next.contains(&entry.path));
+                if let Ok(new_entries) = metadata_snapshot(&added) {
+                    snapshot.extend(new_entries);
+                    snapshot.sort_by(|a, b| a.path.cmp(&b.path));
+                }
+            }
+            previous_content.retain(|(path, _)| next.contains(path));
+            previous_content.extend(
+                observed
+                    .into_iter()
+                    .filter(|(path, _)| added.contains(path)),
+            );
+            previous_content.sort_by(|a, b| a.0.cmp(&b.0));
+            pom_paths = next;
+            #[cfg(test)]
+            let _ = ready.send(());
+        }
         if last_content_check.elapsed() >= CONTENT_CHECK_INTERVAL {
             last_content_check = Instant::now();
             let fingerprint = content_snapshot(&root, &pom_paths);
@@ -172,10 +233,12 @@ fn watch(
             if let Ok(model) = &model {
                 let mut discovered = project_pom_paths(model);
                 if super::maven::profile_pom_paths(&root, &mut discovered).is_ok() {
-                    pom_paths = discovered;
+                    static_paths = discovered;
                 } else {
-                    pom_paths.extend(discovered);
+                    static_paths.extend(discovered);
                 }
+                pom_paths = static_paths.clone();
+                pom_paths.extend(resolved_paths.iter().cloned());
                 pom_paths.sort();
                 pom_paths.dedup();
                 previous = metadata_snapshot(&pom_paths).ok();
@@ -416,6 +479,74 @@ mod tests {
             assert!(
                 Instant::now() < deadline,
                 "profile module POM change was not detected"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        watcher.cancel();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn resolved_property_module_is_watched_after_model_load() {
+        let root = project_root("resolved-profile");
+        let module = root.join("resolved");
+        fs::create_dir_all(&module).unwrap();
+        fs::write(root.join("pom.xml"), "<project><profiles><profile><modules><module>${module.path}</module></modules></profile></profiles></project>").unwrap();
+        let pom = module.join("pom.xml");
+        fs::write(&pom, "<project><name>before</name></project>").unwrap();
+        let mut watcher = MavenPomWatcher::start_with_timing(
+            root.clone(),
+            vec![root.join("pom.xml")],
+            1,
+            Duration::from_millis(10),
+            Duration::from_millis(30),
+        )
+        .unwrap();
+        wait_ready(&watcher);
+        watcher
+            .set_resolved_poms(vec![(pom.clone(), None)])
+            .unwrap();
+        wait_ready(&watcher);
+        fs::write(&pom, "<project><name>after-longer</name></project>").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while watcher.poll().is_empty() {
+            assert!(
+                Instant::now() < deadline,
+                "resolved module POM change was not detected"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        watcher.cancel();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn resolved_module_changed_before_registration_triggers_reload() {
+        let root = project_root("resolved-during-load");
+        let module = root.join("dynamic");
+        fs::create_dir_all(&module).unwrap();
+        let pom = module.join("pom.xml");
+        fs::write(&pom, "<project><name>before</name></project>").unwrap();
+        let before = super::fingerprint_pom_paths(&root, std::slice::from_ref(&pom)).unwrap();
+        let mut watcher = MavenPomWatcher::start_with_timing(
+            root.clone(),
+            vec![root.join("pom.xml")],
+            1,
+            Duration::from_millis(10),
+            Duration::from_millis(30),
+        )
+        .unwrap();
+        wait_ready(&watcher);
+        fs::write(&pom, "<project><name>after</name></project>").unwrap();
+        watcher
+            .set_resolved_poms(vec![(pom, Some(before))])
+            .unwrap();
+        wait_ready(&watcher);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while watcher.poll().is_empty() {
+            assert!(
+                Instant::now() < deadline,
+                "change during Maven resolution was not detected"
             );
             std::thread::sleep(Duration::from_millis(5));
         }
