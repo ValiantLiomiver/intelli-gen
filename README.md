@@ -302,7 +302,11 @@ The server resolved `smoke` rather than the deliberately incorrect model name
 It also passed on 2026-11-09 against the current Rust worker and packaged Java
 tools with an Eclipse fixture and JDK 25, including all three debug sessions.
 The worker test was repeated successfully against commit `09627ce`.
-On the same date, a native accessibility smoke check launched the current debug
+On 2026-11-10 it passed against commit `0f9caa4` with a fresh Eclipse fixture,
+GraalVM 23 as the project JDK, and JBR 25 for the language server and debug
+launch. This repeats the worker-level breakpoint, evaluation, stepping,
+logpoint, cancellation, and cleanup checks; it is not a native UI test.
+On 2026-11-09, a native accessibility smoke check launched the then-current debug
 build and opened a disposable Gradle project from the recent-project list. The
 project status, tree, and window title confirmed the result. A separate native
 smoke check opened a disposable Java file, edited it through accessibility,
@@ -331,6 +335,12 @@ caret there. These modal buttons expose non-empty bounds to macOS accessibility.
 A native save-conflict check confirmed that an external change present before
 Save remains on disk, the editor retains its unsaved buffer, and the error is
 reported without leaving the status as “Saving”.
+On 2026-11-10, a native MCP accessibility check on `0f9caa4` edited and saved a
+disposable Java file, built its Maven reactor from the workspace root, and
+followed an intentionally failing test report to line 5 of `MainTest.java`.
+The resulting class printed the edited value `73`. The same check exposed an
+unnamed project-tree disclosure control; after the fix, its localized expand
+and collapse buttons both worked through macOS accessibility.
 
 For this test, use the `Main.java` with the `add` helper shown in the Maven
 fixture below, compiled into `bin/` with debug information. Use an Eclipse
@@ -371,6 +381,8 @@ successful completion events and selected JDK reporting, confirms compilation of
 `custom/app/src/main/java/Main.java`, and checks that Clean removes its `.class`.
 It passed again on 2026-11-09 against the current Rust worker.
 The same offline worker test also passed against commit `09627ce`.
+It passed again against `0f9caa4` on 2026-11-10 using a fresh disposable
+fixture, Gradle 6.7.1, Corretto 8, and an isolated Gradle user home.
 The fixture's settings include `:app` with
 `project(':app').projectDir = file('custom/app')`; its module applies the Java
 plugin and uses only local JUnit/Hamcrest JARs for its test dependencies.
@@ -409,6 +421,8 @@ verifies that Clean removes the compiled class. The Maven fixture provides an
 executable `mvnw` that invokes the installed Maven with `--offline`; the
 configured Maven path is deliberately nonexistent to verify wrapper precedence.
 It passed again on 2026-11-09 with Corretto JDK 8 and a disposable reactor.
+It also passed against `0f9caa4` on 2026-11-10 with a fresh reactor and the
+same Maven 3.9.9 and Corretto 8 setup.
 
 Set `INTELLI_GEN_MAVEN_PROJECT` to this disposable reactor and
 `INTELLI_GEN_BUILD_JAVA_HOME` to its JDK, then run

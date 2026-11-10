@@ -1072,6 +1072,24 @@ fn render_entries(
                     );
                 }
             });
+            let expanded = egui::collapsing_header::CollapsingState::load_with_default_open(
+                ui.ctx(),
+                id,
+                false,
+            )
+            .is_open();
+            let label = crate::i18n::ui_format(
+                ui,
+                if expanded {
+                    "Collapse {name}"
+                } else {
+                    "Expand {name}"
+                },
+                &[("name", &entry.name)],
+            );
+            toggle_response.widget_info(|| {
+                egui::WidgetInfo::labeled(egui::Role::Button, ui.is_enabled(), &label)
+            });
             if let Some(icon) = icon.filter(|_| !is_maven_module) {
                 paint_tree_icon(
                     ui,
@@ -1157,6 +1175,84 @@ struct VisibleProjectEntry {
 #[cfg(test)]
 mod icon_tests {
     use super::*;
+
+    #[test]
+    fn directory_expander_has_an_accessible_name_and_click_action() {
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let mut entries = vec![TreeEntry {
+            path: PathBuf::from("custom"),
+            name: "custom".into(),
+            directory: true,
+            symlink: false,
+            java_kind: None,
+            children: None,
+            loading_request: None,
+            error: None,
+        }];
+        let mut button = None;
+        let mut clicked = false;
+        let mut requested = false;
+        let mut collapsed_label = false;
+        for _ in 0..5 {
+            let mut events = Vec::new();
+            if !clicked && let Some(target_node) = button {
+                events.push(egui::Event::AccessKitActionRequest(
+                    egui::accesskit::ActionRequest {
+                        action: egui::accesskit::Action::Click,
+                        target_tree: egui::accesskit::TreeId::ROOT,
+                        target_node,
+                        data: None,
+                    },
+                ));
+                clicked = true;
+            }
+            let mut actions = Vec::new();
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(800.0, 600.0),
+                    )),
+                    events,
+                    ..Default::default()
+                },
+                |root| {
+                    egui::CentralPanel::default().show(root, |ui| {
+                        render_entries(
+                            ui,
+                            Path::new("."),
+                            &mut entries,
+                            &[],
+                            &mut actions,
+                            &mut None,
+                            &mut false,
+                            &mut vec![],
+                            &mut false,
+                        );
+                    });
+                },
+            );
+            requested |= actions.iter().any(|action| matches!(action, TreeAction::LoadChildren { path, .. } if path == Path::new("custom")));
+            if let Some(update) = output.platform_output.accesskit_update.take() {
+                for (id, node) in update.nodes {
+                    if node.role() == egui::Role::Button
+                        && node.label() == Some("Expand custom")
+                        && node.supports_action(egui::accesskit::Action::Click)
+                    {
+                        button = Some(id);
+                    }
+                    collapsed_label |= node.role() == egui::Role::Button
+                        && node.label() == Some("Collapse custom");
+                }
+            }
+            output.textures_delta.clear();
+        }
+        assert!(
+            button.is_some() && clicked && requested && collapsed_label,
+            "directory disclosure must be a named accessible button"
+        );
+    }
     #[test]
     fn icons_emit_expected_shapes() {
         let ctx = egui::Context::default();
