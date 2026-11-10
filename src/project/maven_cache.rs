@@ -22,7 +22,31 @@ pub struct CachedMavenView {
     pub view: MavenView,
     pub pom_fingerprint: String,
     #[serde(default)]
+    pub tools: Option<MavenToolIdentity>,
+    #[serde(default)]
     default_profiles: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MavenToolIdentity {
+    jdk_home: PathBuf,
+    jdk_version: String,
+    maven: PathBuf,
+}
+
+impl MavenToolIdentity {
+    pub fn new(
+        model: &ProjectModel,
+        executable: Option<&Path>,
+        jdk: &crate::java::jdk::JdkInstallation,
+    ) -> Option<Self> {
+        let maven = model.wrapper.as_deref().or(executable)?;
+        Some(Self {
+            jdk_home: jdk.home.clone(),
+            jdk_version: jdk.version.raw.clone(),
+            maven: super::resolve_program_path(&model.root, maven),
+        })
+    }
 }
 
 pub struct MavenViewCache {
@@ -160,6 +184,7 @@ impl MavenViewCache {
         view: &MavenView,
         pom_fingerprint: &str,
         default_profiles: bool,
+        tools: Option<MavenToolIdentity>,
     ) -> Result<(), String> {
         if !default_profiles {
             return Ok(());
@@ -178,6 +203,7 @@ impl MavenViewCache {
             root: canonical_root,
             view: view.clone(),
             pom_fingerprint: pom_fingerprint.to_owned(),
+            tools,
             default_profiles: true,
         };
         let data = serde_json::to_vec(&cached)
@@ -342,7 +368,9 @@ mod tests {
         let root = temp_root("round-trip");
         let cache = super::MavenViewCache::at(root.join("cache"));
         let view = sample_view("cached-project");
-        cache.save(&root, &view, "fingerprint-1", true).unwrap();
+        cache
+            .save(&root, &view, "fingerprint-1", true, None)
+            .unwrap();
 
         let cached = cache.load(&root).unwrap().unwrap();
         assert_eq!(cached.pom_fingerprint, "fingerprint-1");
@@ -355,12 +383,54 @@ mod tests {
     }
 
     #[test]
+    fn tool_identity_tracks_jdk_and_effective_maven_wrapper() {
+        let root = temp_root("tool-identity");
+        let mut project = model(&root, Vec::new());
+        let mut jdk = crate::java::jdk::JdkInstallation::unavailable(Path::new("/jdk-one"));
+        jdk.version.raw = "21".into();
+        let initial =
+            super::MavenToolIdentity::new(&project, Some(Path::new("/maven-one")), &jdk).unwrap();
+        assert_ne!(
+            initial,
+            super::MavenToolIdentity::new(&project, Some(Path::new("/maven-two")), &jdk).unwrap()
+        );
+        jdk.home = PathBuf::from("/jdk-two");
+        let changed =
+            super::MavenToolIdentity::new(&project, Some(Path::new("/maven-one")), &jdk).unwrap();
+        assert_ne!(initial, changed);
+        project.wrapper = Some(root.join("mvnw"));
+        let wrapper =
+            super::MavenToolIdentity::new(&project, Some(Path::new("/maven-one")), &jdk).unwrap();
+        assert_eq!(
+            wrapper,
+            super::MavenToolIdentity::new(&project, Some(Path::new("/maven-two")), &jdk).unwrap()
+        );
+        jdk.version.raw = "23".into();
+        assert_ne!(
+            wrapper,
+            super::MavenToolIdentity::new(&project, Some(Path::new("/maven-two")), &jdk).unwrap()
+        );
+        let cache = super::MavenViewCache::at(root.join("cache"));
+        cache
+            .save(
+                &root,
+                &sample_view("project"),
+                "fingerprint",
+                true,
+                Some(wrapper.clone()),
+            )
+            .unwrap();
+        assert_eq!(cache.load(&root).unwrap().unwrap().tools, Some(wrapper));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn cache_isolated_by_project_root() {
         let first = temp_root("first");
         let second = temp_root("second");
         let cache = super::MavenViewCache::at(first.join("cache"));
         cache
-            .save(&first, &sample_view("first"), "one", true)
+            .save(&first, &sample_view("first"), "one", true, None)
             .unwrap();
 
         assert!(cache.load(&second).unwrap().is_none());
@@ -382,7 +452,13 @@ mod tests {
         let root = temp_root("legacy-profiles");
         let cache = super::MavenViewCache::at(root.join("cache"));
         cache
-            .save(&root, &sample_view("custom-profile"), "same-pom", true)
+            .save(
+                &root,
+                &sample_view("custom-profile"),
+                "same-pom",
+                true,
+                None,
+            )
             .unwrap();
         let path = cache.path_for(&root.canonicalize().unwrap());
         let mut value: serde_json::Value =
@@ -398,10 +474,10 @@ mod tests {
         let root = temp_root("custom-profiles");
         let cache = super::MavenViewCache::at(root.join("cache"));
         cache
-            .save(&root, &sample_view("default"), "same-pom", true)
+            .save(&root, &sample_view("default"), "same-pom", true, None)
             .unwrap();
         cache
-            .save(&root, &sample_view("custom"), "same-pom", false)
+            .save(&root, &sample_view("custom"), "same-pom", false, None)
             .unwrap();
         assert_eq!(
             cache.load(&root).unwrap().unwrap().view.root_module.name,

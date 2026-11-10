@@ -1226,6 +1226,7 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                 state.maven_generation = state.maven_generation.wrapping_add(1);
                 state.maven_cache_generation = state.maven_cache_generation.wrapping_add(1);
                 state.maven_view = None;
+                state.maven_tools = None;
                 state.maven_view_root = state
                     .project
                     .as_ref()
@@ -2251,6 +2252,7 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
             AppEvent::SettingsChanged => {
                 state.language.refresh_tooling(&state.settings);
                 save_settings(state);
+                reconcile_maven_tools(state);
             }
             AppEvent::SettingsSaved { generation, result } => {
                 if generation == state.settings_save_generation {
@@ -2338,6 +2340,7 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                     state.last_error = Some(error);
                 }
                 state.language.refresh_tooling(&state.settings);
+                reconcile_maven_tools(state);
                 state.status = format!(
                     "JDK catalog updated: {} installation(s)",
                     state.settings.jdks.len()
@@ -2579,10 +2582,20 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                 result,
                 cache_error,
                 cache_candidate,
+                tools,
             } => {
                 if state.maven_view_root.as_ref() != Some(&root)
                     || generation != state.maven_generation
                 {
+                    continue;
+                }
+                if tools != current_maven_tools(state) {
+                    if state.quit_requested {
+                        state.maven_loading = false;
+                        state.maven_view_loader.cancel();
+                    } else {
+                        reload_maven_view(state);
+                    }
                     continue;
                 }
                 state.maven_loading = false;
@@ -2599,13 +2612,14 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                             state.maven_selected_module = None;
                         }
                         let watcher_error = watch_resolved_maven_poms(state, &root, &view);
-                        if let Some((canonical_root, fingerprint)) = cache_candidate
+                        if let Some((canonical_root, fingerprint, tools)) = cache_candidate
                             && let Err(error) = state.maven_view_loader.publish_cache(
                                 root.clone(),
                                 generation,
                                 canonical_root,
                                 view.clone(),
                                 fingerprint,
+                                tools,
                             )
                         {
                             state.maven_cache_error = Some(error);
@@ -2646,6 +2660,12 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                 match result {
                     Ok(Some(cached)) => {
                         let use_cached = state.maven_view.is_none();
+                        let current_tools = current_maven_tools(state);
+                        let tools_changed =
+                            current_tools.is_none() || cached.tools != current_tools;
+                        if use_cached {
+                            state.maven_tools = cached.tools.clone();
+                        }
                         if state.maven_view.is_none() {
                             state.maven_view = Some(cached.view);
                         }
@@ -2659,10 +2679,11 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                         }
                         match current_pom_fingerprint {
                             Ok(current)
-                                if cached_maven_view_is_stale(
-                                    Some(&cached.pom_fingerprint),
-                                    Some(&current),
-                                ) =>
+                                if tools_changed
+                                    || cached_maven_view_is_stale(
+                                        Some(&cached.pom_fingerprint),
+                                        Some(&current),
+                                    ) =>
                             {
                                 if use_cached && !state.maven_loading && state.maven_error.is_none()
                                 {
@@ -3053,6 +3074,7 @@ fn reload_maven_view(state: &mut AppState) {
     state.maven_generation = state.maven_generation.wrapping_add(1);
     state.maven_loading = false;
     state.maven_error = None;
+    state.maven_tools = current_maven_tools(state);
     let request = (|| -> Result<_, String> {
         let project = state.project.as_ref().ok_or("Open a Maven project first")?;
         let model = project
@@ -3079,6 +3101,16 @@ fn reload_maven_view(state: &mut AppState) {
             Err(error) => state.maven_error = Some(error),
         },
         Err(error) => state.maven_error = Some(error),
+    }
+}
+
+fn reconcile_maven_tools(state: &mut AppState) {
+    if state.maven_view_root.is_some()
+        && (state.maven_loading || state.maven_view.is_some() || state.maven_error.is_some())
+        && state.maven_tools != current_maven_tools(state)
+        && !state.quit_requested
+    {
+        reload_maven_view(state);
     }
 }
 
@@ -3243,11 +3275,195 @@ fn configured_maven_jdk(
     state.settings.selected_jdk(root, None).cloned()
 }
 
+fn current_maven_tools(state: &AppState) -> Option<crate::project::maven_cache::MavenToolIdentity> {
+    let project = state.project.as_ref()?;
+    let model = project.model.as_ref()?;
+    let jdk = configured_maven_jdk(state, &project.root).ok()?;
+    crate::project::maven_cache::MavenToolIdentity::new(
+        model,
+        state.settings.maven_executable.as_deref(),
+        &jdk,
+    )
+}
+
 #[cfg(test)]
 mod maven_cache_tests {
     use super::{cached_maven_view_is_stale, maven_pom_event_is_current};
     use eframe::egui;
     use std::path::Path;
+
+    #[test]
+    fn cache_without_tool_identity_attempts_refresh_even_when_poms_match() {
+        let context = egui::Context::default();
+        let mut app = crate::app::IdeaLikeApp::new_with_context(context.clone(), None);
+        app.state.settings = crate::settings::UserSettings::default();
+        let root = std::path::PathBuf::from("/workspace/maven");
+        app.state.project = Some(crate::project::Project {
+            root: root.clone(),
+            kind: crate::project::ProjectKind::Maven,
+            display_name: "maven".into(),
+            discovery_error: None,
+            model: Some(crate::project::ProjectModel {
+                root: root.clone(),
+                name: "maven".into(),
+                kind: crate::project::ProjectKind::Maven,
+                modules: Vec::new(),
+                wrapper: None,
+            }),
+        });
+        app.state.maven_view_root = Some(root.clone());
+        app.state.maven_cache_generation = 5;
+        app.state.enqueue(crate::app::events::AppEvent::MavenCacheLoaded {
+            root, generation: 5,
+            result: Ok(Some(serde_json::from_value(serde_json::json!({
+                "root": "/workspace/maven", "pom_fingerprint": "same", "default_profiles": true,
+                "view": {"profiles": [], "root_module": {"name": "cached", "relative_path": null,
+                    "lifecycle": [], "plugins": [], "dependencies": [], "repositories": [], "modules": []}}
+            })).unwrap())),
+            current_pom_fingerprint: Ok("same".into()),
+        });
+        super::process_events(&context, &mut app.state);
+        assert_eq!(
+            app.state.maven_generation, 1,
+            "unknown tool identity must trigger one refresh"
+        );
+        assert!(
+            app.state.maven_view.is_some(),
+            "cached view remains a fallback"
+        );
+    }
+
+    #[test]
+    fn cache_from_another_jdk_attempts_refresh() {
+        let context = egui::Context::default();
+        let mut app = crate::app::IdeaLikeApp::new_with_context(context.clone(), None);
+        app.state.settings = crate::settings::UserSettings::default();
+        let root = std::path::PathBuf::from("/workspace/maven");
+        let mut jdk = crate::java::jdk::JdkInstallation::unavailable(Path::new("/new-jdk"));
+        jdk.valid = true;
+        jdk.version.raw = "21".into();
+        app.state.settings.default_jdk_id = Some(jdk.id.clone());
+        app.state.settings.jdks.push(jdk);
+        app.state.settings.maven_executable = Some("/maven".into());
+        app.state.project = Some(crate::project::Project {
+            root: root.clone(),
+            kind: crate::project::ProjectKind::Maven,
+            display_name: "maven".into(),
+            discovery_error: None,
+            model: Some(crate::project::ProjectModel {
+                root: root.clone(),
+                name: "maven".into(),
+                kind: crate::project::ProjectKind::Maven,
+                modules: Vec::new(),
+                wrapper: None,
+            }),
+        });
+        app.state.maven_view_root = Some(root.clone());
+        app.state.maven_cache_generation = 1;
+        app.state.enqueue(crate::app::events::AppEvent::MavenCacheLoaded {
+            root, generation: 1, current_pom_fingerprint: Ok("same".into()),
+            result: Ok(Some(serde_json::from_value(serde_json::json!({
+                "root": "/workspace/maven", "pom_fingerprint": "same", "default_profiles": true,
+                "tools": {"jdk_home":"/old-jdk", "jdk_version":"21", "maven":"/maven"},
+                "view": {"profiles": [], "root_module": {"name":"cached", "relative_path":null,
+                    "lifecycle":[], "plugins":[], "dependencies":[], "repositories":[], "modules":[]}}
+            })).unwrap())),
+        });
+        super::process_events(&context, &mut app.state);
+        assert_eq!(app.state.maven_generation, 1);
+        app.state.maven_view_loader.cancel();
+    }
+
+    #[test]
+    fn stale_result_from_previous_jdk_is_not_published() {
+        let context = egui::Context::default();
+        let mut app = crate::app::IdeaLikeApp::new_with_context(context.clone(), None);
+        app.state.settings = crate::settings::UserSettings::default();
+        let root = std::path::PathBuf::from("/workspace/maven");
+        let mut jdk = crate::java::jdk::JdkInstallation::unavailable(Path::new("/new-jdk"));
+        jdk.valid = true;
+        jdk.version.raw = "21".into();
+        app.state.settings.default_jdk_id = Some(jdk.id.clone());
+        app.state.settings.jdks.push(jdk);
+        app.state.settings.maven_executable = Some("/maven".into());
+        app.state.project = Some(crate::project::Project {
+            root: root.clone(),
+            kind: crate::project::ProjectKind::Maven,
+            display_name: "maven".into(),
+            discovery_error: None,
+            model: Some(crate::project::ProjectModel {
+                root: root.clone(),
+                name: "maven".into(),
+                kind: crate::project::ProjectKind::Maven,
+                modules: Vec::new(),
+                wrapper: None,
+            }),
+        });
+        app.state.maven_view_root = Some(root.clone());
+        app.state.maven_generation = 1;
+        app.state.maven_loading = true;
+        let old: crate::project::maven_cache::MavenToolIdentity = serde_json::from_value(
+            serde_json::json!({"jdk_home":"/old-jdk", "jdk_version":"21", "maven":"/maven"}),
+        )
+        .unwrap();
+        let view = serde_json::from_value(serde_json::json!({"profiles": [], "root_module": {
+            "name":"old", "relative_path":null, "lifecycle":[], "plugins":[], "dependencies":[], "repositories":[], "modules":[]
+        }})).unwrap();
+        app.state
+            .enqueue(crate::app::events::AppEvent::MavenViewCompleted {
+                root: root.clone(),
+                generation: 1,
+                result: Ok(view),
+                cache_error: None,
+                tools: Some(old.clone()),
+                cache_candidate: Some((root, "fingerprint".into(), old)),
+            });
+        super::process_events(&context, &mut app.state);
+        assert!(app.state.maven_view.is_none());
+        assert_eq!(app.state.maven_generation, 2);
+        app.state.maven_view_loader.cancel();
+    }
+
+    #[test]
+    fn settings_reconciliation_only_reloads_when_maven_tools_change() {
+        let context = egui::Context::default();
+        let mut app = crate::app::IdeaLikeApp::new_with_context(context, None);
+        app.state.settings = crate::settings::UserSettings::default();
+        let root = std::path::PathBuf::from("/workspace/maven");
+        let mut jdk = crate::java::jdk::JdkInstallation::unavailable(Path::new("/jdk"));
+        jdk.valid = true;
+        app.state.settings.default_jdk_id = Some(jdk.id.clone());
+        app.state.settings.jdks.push(jdk);
+        app.state.settings.maven_executable = Some("/maven-one".into());
+        app.state.project = Some(crate::project::Project {
+            root: root.clone(),
+            kind: crate::project::ProjectKind::Maven,
+            display_name: "maven".into(),
+            discovery_error: None,
+            model: Some(crate::project::ProjectModel {
+                root: root.clone(),
+                name: "maven".into(),
+                kind: crate::project::ProjectKind::Maven,
+                modules: Vec::new(),
+                wrapper: None,
+            }),
+        });
+        app.state.maven_view_root = Some(root);
+        app.state.maven_loading = true;
+        app.state.maven_tools = super::current_maven_tools(&app.state);
+        super::reconcile_maven_tools(&mut app.state);
+        assert_eq!(app.state.maven_generation, 0);
+        app.state.settings.maven_executable = Some("/maven-two".into());
+        super::reconcile_maven_tools(&mut app.state);
+        assert_eq!(app.state.maven_generation, 1);
+        app.state.maven_view_loader.cancel();
+        app.state.maven_loading = false;
+        app.state.maven_error = Some("previous refresh failed".into());
+        app.state.settings.maven_executable = Some("/maven-three".into());
+        super::reconcile_maven_tools(&mut app.state);
+        assert_eq!(app.state.maven_generation, 2);
+        app.state.maven_view_loader.cancel();
+    }
 
     #[test]
     fn superseded_maven_result_never_starts_a_cache_writer() {
@@ -3267,7 +3483,15 @@ mod maven_cache_tests {
                 generation: 1,
                 result: Ok(view),
                 cache_error: None,
-                cache_candidate: Some((root, "old".into())),
+                tools: None,
+                cache_candidate: Some((
+                    root,
+                    "old".into(),
+                    serde_json::from_value(
+                        serde_json::json!({"jdk_home":"/jdk", "jdk_version":"21", "maven":"/mvn"}),
+                    )
+                    .unwrap(),
+                )),
             });
         super::process_events(&context, &mut app.state);
         assert!(!app.state.maven_view_loader.has_workers());

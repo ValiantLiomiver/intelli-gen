@@ -220,6 +220,7 @@ pub struct AppState {
     pub maven_project_generation: u64,
     pub maven_view: Option<MavenView>,
     pub maven_view_root: Option<PathBuf>,
+    pub maven_tools: Option<crate::project::maven_cache::MavenToolIdentity>,
     pub maven_profiles: HashSet<String>,
     pub maven_profiles_user_modified: bool,
     pub maven_generation: u64,
@@ -536,6 +537,7 @@ impl IdeaLikeApp {
             maven_project_generation: 0,
             maven_view: None,
             maven_view_root: None,
+            maven_tools: None,
             maven_profiles: HashSet::new(),
             maven_profiles_user_modified: false,
             maven_generation: 0,
@@ -737,6 +739,7 @@ impl eframe::App for IdeaLikeApp {
                 result: event.result,
                 cache_error: event.cache_error,
                 cache_candidate: event.cache_candidate,
+                tools: event.tools,
             });
         }
         for (root, generation, error) in self.state.maven_view_loader.poll_cache_errors() {

@@ -113,7 +113,12 @@ pub enum AppEvent {
         generation: u64,
         result: Result<crate::project::maven_view::MavenView, String>,
         cache_error: Option<String>,
-        cache_candidate: Option<(PathBuf, String)>,
+        tools: Option<crate::project::maven_cache::MavenToolIdentity>,
+        cache_candidate: Option<(
+            PathBuf,
+            String,
+            crate::project::maven_cache::MavenToolIdentity,
+        )>,
     },
     MavenCacheWriteFailed {
         root: PathBuf,

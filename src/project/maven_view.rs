@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::java::jdk::JdkInstallation;
 
-use super::maven_cache::{MavenViewCache, fingerprint_poms};
+use super::maven_cache::{MavenToolIdentity, MavenViewCache, fingerprint_poms};
 use super::{ProjectKind, ProjectModel, maven::valid_profile_id, resolve_program_path};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -75,7 +75,8 @@ pub struct MavenViewEvent {
     pub generation: u64,
     pub result: Result<MavenView, String>,
     pub cache_error: Option<String>,
-    pub cache_candidate: Option<(PathBuf, String)>,
+    pub tools: Option<MavenToolIdentity>,
+    pub cache_candidate: Option<(PathBuf, String, MavenToolIdentity)>,
 }
 
 #[derive(Default)]
@@ -253,6 +254,11 @@ impl MavenViewLoader {
             .name("maven-view".into())
             .spawn(move || {
                 let cache_project = request.project.clone();
+                let tools = MavenToolIdentity::new(
+                    &request.project,
+                    request.executable.as_deref(),
+                    &request.jdk,
+                );
                 let default_profiles = !request.profiles_user_modified;
                 let fingerprint_before = fingerprint_poms(&cache_project);
                 let event = MavenViewEvent {
@@ -266,6 +272,7 @@ impl MavenViewLoader {
                         worker_console,
                     ),
                     cache_error: None,
+                    tools: tools.clone(),
                     cache_candidate: None,
                 };
                 let mut event = event;
@@ -273,7 +280,11 @@ impl MavenViewLoader {
                     match (fingerprint_before, fingerprint_poms(&cache_project)) {
                         (Ok(before), Ok(after)) if before == after && default_profiles => {
                             match cache_project.root.canonicalize() {
-                                Ok(root) => event.cache_candidate = Some((root, after)),
+                                Ok(root) => {
+                                    if let Some(tools) = tools {
+                                        event.cache_candidate = Some((root, after, tools));
+                                    }
+                                }
                                 Err(error) => {
                                     event.cache_error = Some(format!(
                                         "Cannot resolve Maven cache project root: {error}"
@@ -349,6 +360,7 @@ impl MavenViewLoader {
         canonical_root: PathBuf,
         view: MavenView,
         fingerprint: String,
+        tools: MavenToolIdentity,
     ) -> Result<(), String> {
         let order = Arc::clone(self.cache_orders.entry(canonical_root.clone()).or_default());
         let sequence = order.accept();
@@ -357,8 +369,9 @@ impl MavenViewLoader {
             .name("maven-cache-write".into())
             .spawn(move || {
                 let result = order.publish(sequence, || {
-                    MavenViewCache::for_user()
-                        .and_then(|cache| cache.save(&canonical_root, &view, &fingerprint, true))
+                    MavenViewCache::for_user().and_then(|cache| {
+                        cache.save(&canonical_root, &view, &fingerprint, true, Some(tools))
+                    })
                 });
                 if let Some(Err(error)) = result {
                     let _ = sender.send((root, generation, error));
@@ -1358,7 +1371,15 @@ mod cache_publication_tests {
                 generation: 1,
                 result: Ok(view),
                 cache_error: None,
-                cache_candidate: Some((root, "old".into())),
+                tools: None,
+                cache_candidate: Some((
+                    root,
+                    "old".into(),
+                    serde_json::from_value(
+                        serde_json::json!({"jdk_home":"/jdk", "jdk_version":"21", "maven":"/mvn"}),
+                    )
+                    .unwrap(),
+                )),
             })
             .unwrap();
         loader.cancel();
@@ -1617,7 +1638,7 @@ mod profile_cache_smoke_test {
                 if let Some(event) = loader.poll().into_iter().next() {
                     assert!(event.cache_error.is_none(), "{:?}", event.cache_error);
                     let view = event.result.unwrap();
-                    if let Some((canonical_root, fingerprint)) = event.cache_candidate {
+                    if let Some((canonical_root, fingerprint, tools)) = event.cache_candidate {
                         loader
                             .publish_cache(
                                 root.clone(),
@@ -1625,6 +1646,7 @@ mod profile_cache_smoke_test {
                                 canonical_root,
                                 view.clone(),
                                 fingerprint,
+                                tools,
                             )
                             .unwrap();
                         while loader.has_workers() {
@@ -1648,6 +1670,10 @@ mod profile_cache_smoke_test {
         };
         let default_view = resolve(1, Vec::new(), false);
         let default_cache = cache.load(&root).unwrap().unwrap();
+        assert_eq!(
+            default_cache.tools,
+            MavenToolIdentity::new(&model, None, &jdk)
+        );
         let refreshed_default = resolve(2, vec!["extra".into()], false);
         assert_eq!(
             refreshed_default.root_module.modules.len(),

@@ -436,8 +436,12 @@ Profile module discovery stays inside the reactor root; an external module also
 disables the cache fingerprint.
 Only a Maven result accepted for the current project and refresh can schedule a
 cache write. Accepted writes run off the UI thread and are ordered per project
-within one IDE process. Separate IDE processes do not coordinate cache writes;
-the fingerprint covers POM files, not Maven or JDK settings.
+within one IDE process. The cache also records the configured JDK home and
+catalog version and the selected Maven executable or wrapper path; a mismatch or
+missing identity triggers a refresh while keeping the cached view as a fallback.
+Separate IDE processes do not coordinate cache writes. The identity does not
+detect a Maven executable, wrapper configuration, or JDK replaced at the same
+path without a corresponding catalog-version update.
 
 The optional `real_maven_resolves_property_module_and_records_its_pom` test
 passed with Maven 3.9.9 and JDK 23 on a disposable reactor whose `extra` profile
