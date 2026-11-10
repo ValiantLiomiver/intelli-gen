@@ -212,12 +212,19 @@ dependencies; missing cached dependencies cause Gradle to fail. It also configur
 `java.import.gradle.offline.enabled`. Use **Apply / restart Java intelligence**
 after changing the preference to update an existing language session. A configured
 Gradle executable in a standard distribution (`bin/gradle` or `bin/gradle.bat`,
-with its launcher JAR under `lib`) also supplies the importer's Gradle home;
-the project wrapper retains precedence. Restart Java intelligence after changing
-that executable. After loading tasks, **Refresh dependencies** beside a `:dependencies` task runs
+with its launcher JAR under `lib`) supplies the importer's Gradle home. Without
+one, automatic Gradle import is disabled and the IDE shows a warning. The language
+server does not use the project wrapper; user-initiated builds still prefer it.
+Restart Java intelligence after changing that executable. After loading tasks, **Refresh dependencies** beside a `:dependencies` task runs
 that report with `--refresh-dependencies`, using the selected JDK and the normal
 Build output/cancellation flow. The action requires online mode and may contact
 repositories or download dependencies. No JetBrains implementation code is included in Intelli-gen.
+
+For the no-installation regression smoke test, point `INTELLI_GEN_DAP_PROJECT` at a
+disposable Gradle project, `GRADLE_USER_HOME` at an empty disposable directory,
+and set `INTELLI_GEN_JAVA_HOME` and `INTELLI_GEN_JAVA_RESOURCES` as described below.
+Run `cargo test live_gradle_import_without_local_gradle_does_not_install_distribution -- --ignored`;
+the test starts JDT LS and checks that no wrapper distribution is installed.
 
 ## Java tooling runtime verification
 

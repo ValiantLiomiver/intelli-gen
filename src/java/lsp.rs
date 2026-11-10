@@ -763,6 +763,62 @@ mod main_project_tests {
     use super::*;
 
     #[tokio::test]
+    #[ignore = "requires disposable INTELLI_GEN_DAP_PROJECT, GRADLE_USER_HOME, INTELLI_GEN_JAVA_HOME and INTELLI_GEN_JAVA_RESOURCES"]
+    async fn live_gradle_import_without_local_gradle_does_not_install_distribution() {
+        let root = PathBuf::from(std::env::var_os("INTELLI_GEN_DAP_PROJECT").unwrap());
+        let gradle_user_home = PathBuf::from(std::env::var_os("GRADLE_USER_HOME").unwrap());
+        assert!(!gradle_user_home.join("wrapper/dists").exists());
+        let home = PathBuf::from(std::env::var_os("INTELLI_GEN_JAVA_HOME").unwrap());
+        let resources = PathBuf::from(std::env::var_os("INTELLI_GEN_JAVA_RESOURCES").unwrap());
+        let jdk = crate::java::jdk::JdkCatalog::add(&home).unwrap();
+        let executable = resources.parent().unwrap().join("MacOS/intelli-gen");
+        let resolved = crate::java::lsp_config::resolve_jdtls(
+            &crate::settings::UserSettings::default(),
+            &executable,
+        )
+        .unwrap();
+        let config = JdtlsConfig {
+            executable: resolved.display_path,
+            launcher_arguments: resolved.arguments,
+            lombok_agent: None,
+            lombok_declared: false,
+            shared_configuration: resolved.shared_configuration,
+            package_version: resolved.package_version,
+            runtime_jdk_id: jdk.id.clone(),
+            project_jdk_id: Some(jdk.id.clone()),
+            gradle_offline: false,
+            gradle_home: None,
+            workspace_data: root.parent().unwrap().join("rust-worker-workspace"),
+            jdks: vec![jdk],
+            debug_bundle: None,
+            debug_bundle_error: None,
+        };
+        let project = ProjectModel::discover(&root).unwrap();
+        assert_eq!(project.kind, crate::project::ProjectKind::Gradle);
+        let mut session = JavaLanguageService::start(&project, &config).unwrap();
+        tokio::time::timeout(Duration::from_secs(90), async {
+            loop {
+                if let LanguageEvent::ServerState(message) =
+                    session.events.recv().await.unwrap().event
+                {
+                    assert!(
+                        !message.starts_with("Java intelligence unavailable:"),
+                        "{message}"
+                    );
+                    if message == "Java intelligence ready" {
+                        break;
+                    }
+                }
+            }
+        })
+        .await
+        .unwrap();
+        tokio::time::sleep(Duration::from_secs(15)).await;
+        assert!(!gradle_user_home.join("wrapper/dists").exists());
+        session.shutdown();
+    }
+
+    #[tokio::test]
     #[ignore = "requires INTELLI_GEN_JAVA_HOME, INTELLI_GEN_JAVA_RESOURCES and INTELLI_GEN_DAP_PROJECT smoke fixture"]
     async fn live_worker_resolves_server_project_name() {
         let root = PathBuf::from(std::env::var_os("INTELLI_GEN_DAP_PROJECT").unwrap());
@@ -3768,6 +3824,7 @@ pub struct LanguageTool {
     pub diagnostics: HashMap<PathBuf, Vec<LanguageDiagnostic>>,
     pub summary: String,
     pub lombok_warning: Option<String>,
+    pub gradle_import_warning: Option<String>,
     lombok_cache_check: Option<std::sync::mpsc::Receiver<(u64, PathBuf, bool)>>,
     lombok_restart_requested: bool,
     pub code_actions: Option<(PathBuf, i64, Position, Vec<CodeActionItem>)>,
@@ -3952,6 +4009,7 @@ impl LanguageTool {
     ) {
         self.shutdown();
         self.lombok_warning = None;
+        self.gradle_import_warning = None;
         self.pending_maven_files.clear();
         self.documents.clear();
         self.semantic_highlights.clear();
@@ -4114,6 +4172,9 @@ impl LanguageTool {
                         self.generation,
                     ) {
                         Ok(session) => {
+                            self.gradle_import_warning = (project.kind == crate::project::ProjectKind::Gradle && config.gradle_home.is_none()).then(||
+                                "Gradle Java import is disabled. Configure an installed Gradle executable in Settings and restart Java intelligence.".to_owned()
+                            );
                             self.lombok_warning = (config.lombok_declared && config.lombok_agent.is_none()).then(||
                                 "Lombok is declared, but its JAR is not in the local Maven/Gradle cache. Resolve it with a successful build or restart Java intelligence after resolving it elsewhere.".to_owned()
                             );
@@ -5423,6 +5484,12 @@ pub fn render(ui: &mut eframe::egui::Ui, state: &mut crate::app::AppState) {
             .clicked()
     {
         events.push(AppEvent::RestartLanguage);
+    }
+    if let Some(warning) = &state.language.gradle_import_warning {
+        ui.colored_label(
+            ui.visuals().warn_fg_color,
+            crate::i18n::message(ui.ctx(), warning),
+        );
     }
     if let Some(warning) = &state.language.lombok_warning {
         ui.colored_label(

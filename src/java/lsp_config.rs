@@ -13,14 +13,28 @@ mod maven_import_tests {
     use super::{default_java_import_settings, java_settings_for_maven_refresh};
 
     #[test]
-    fn default_settings_disable_maven_import_and_keep_gradle_enabled() {
+    fn gradle_import_requires_a_local_installation() {
         let imports = default_java_import_settings(json!("/jdk/home"), false, None);
         assert_eq!(imports["maven"]["enabled"], false);
-        assert_eq!(imports["gradle"]["enabled"], true);
+        assert_eq!(imports["gradle"]["enabled"], false);
         assert_eq!(imports["gradle"]["java"]["home"], "/jdk/home");
         assert_eq!(imports["gradle"]["offline"]["enabled"], false);
-        assert_eq!(imports["gradle"]["wrapper"]["enabled"], true);
+        assert_eq!(imports["gradle"]["wrapper"]["enabled"], false);
+        assert_eq!(imports["gradle"]["version"], "");
         assert!(imports["gradle"]["home"].is_null());
+    }
+
+    #[test]
+    fn local_gradle_import_does_not_use_the_wrapper() {
+        let imports = default_java_import_settings(
+            json!("/jdk/home"),
+            true,
+            Some(std::path::Path::new("/gradle/home")),
+        );
+        assert_eq!(imports["gradle"]["enabled"], true);
+        assert_eq!(imports["gradle"]["wrapper"]["enabled"], false);
+        assert_eq!(imports["gradle"]["home"], "/gradle/home");
+        assert_eq!(imports["gradle"]["offline"]["enabled"], true);
     }
 
     #[test]
@@ -38,6 +52,10 @@ mod maven_import_tests {
         assert_eq!(
             refreshed["java"]["import"]["gradle"]["home"],
             "/gradle/home"
+        );
+        assert_eq!(
+            refreshed["java"]["import"]["gradle"]["wrapper"]["enabled"],
+            false
         );
     }
 
@@ -58,6 +76,13 @@ mod maven_import_tests {
         std::fs::write(root.join("lib/gradle-launcher-1.jar"), "jar").unwrap();
         assert_eq!(
             super::configured_gradle_home(Some(&root.join("bin/gradle"))),
+            Some(root.canonicalize().unwrap())
+        );
+        assert_eq!(
+            super::configured_gradle_home_with_path(
+                Some(std::path::Path::new("gradle")),
+                Some(root.join("bin").as_os_str()),
+            ),
             Some(root.canonicalize().unwrap())
         );
         std::fs::write(root.join("custom-launcher"), "script").unwrap();
@@ -269,7 +294,22 @@ pub struct JdtlsConfig {
 }
 
 fn configured_gradle_home(executable: Option<&Path>) -> Option<PathBuf> {
-    let executable = executable?.canonicalize().ok()?;
+    configured_gradle_home_with_path(executable, std::env::var_os("PATH").as_deref())
+}
+
+fn configured_gradle_home_with_path(
+    executable: Option<&Path>,
+    path: Option<&std::ffi::OsStr>,
+) -> Option<PathBuf> {
+    let executable = executable?;
+    let executable = if executable.components().count() == 1 {
+        std::env::split_paths(path?)
+            .map(|dir| dir.join(executable))
+            .find(|candidate| candidate.is_file())?
+    } else {
+        executable.to_path_buf()
+    };
+    let executable = executable.canonicalize().ok()?;
     if !executable.is_file()
         || !matches!(executable.file_name()?.to_str()?, "gradle" | "gradle.bat")
     {
@@ -299,7 +339,7 @@ pub(crate) fn default_java_import_settings(
 ) -> Value {
     json!({
         "maven": {"enabled": false},
-        "gradle": {"enabled": true, "home": gradle_home, "wrapper": {"enabled": true}, "java": {"home": gradle_java_home}, "offline": {"enabled": offline}}
+        "gradle": {"enabled": gradle_home.is_some(), "home": gradle_home, "version": "", "wrapper": {"enabled": false}, "java": {"home": gradle_java_home}, "offline": {"enabled": offline}}
     })
 }
 
