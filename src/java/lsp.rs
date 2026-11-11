@@ -1015,6 +1015,53 @@ mod main_project_tests {
             paths.project_name.as_deref(),
             Some(if gradle { "smoke-project" } else { "smoke" })
         );
+        session
+            .try_command(LanguageCommand::Open {
+                path: source.clone(),
+                text: "public class Main { int value = \"not a number\"; }".into(),
+                version: 1,
+            })
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                let update = session.events.recv().await.expect("diagnostic event");
+                if let LanguageEvent::Diagnostics { path, items, .. } = update.event
+                    && path == source
+                    && items
+                        .iter()
+                        .any(|item| item.message.contains("String") && item.message.contains("int"))
+                {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("JDT LS reports the unsaved type error");
+        session
+            .try_command(LanguageCommand::Change {
+                path: source.clone(),
+                text: "public class Main { boolean flag = 1; }".into(),
+                version: 2,
+            })
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                let update = session.events.recv().await.expect("diagnostic event");
+                if let LanguageEvent::Diagnostics { path, items, .. } = update.event
+                    && path == source
+                    && items.iter().any(|item| {
+                        item.message.contains("int") && item.message.contains("boolean")
+                    })
+                {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("JDT LS reports the changed type error");
+        session
+            .try_command(LanguageCommand::Close(source.clone()))
+            .unwrap();
         let resolver = DebugAdapterResolver {
             commands: session.commands.clone(),
             root: project.root.clone(),

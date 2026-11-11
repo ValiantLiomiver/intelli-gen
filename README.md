@@ -318,6 +318,14 @@ Server 0.53.2 from local VS Code extensions, using Java 25 and a fresh Eclipse
 fixture. It additionally asserted that the live language worker requests an egui
 repaint during initialization. External network and writes to the shared Maven and Gradle caches
 were denied; loopback was permitted for the debug adapter.
+The worker test also checks diagnostics for two successive unsaved type errors.
+In a native check with the same local Java tools, an unsaved String-to-int error
+appeared in the diagnostics panel and disappeared when the text was restored.
+Closing the window also stopped its JDT LS process. A single idle sample with
+JDT LS ready recorded about 1.86 CPU seconds in the IDE and 0.25 in Java over
+18 wall seconds; these are separate process totals, not a benchmark. The native
+check used a disposable project, blocked external network and shared cache writes,
+and allowed writes only to its isolated JDT workspace within the app settings.
 On 2026-11-09, a native accessibility smoke check launched the then-current debug
 build and opened a disposable Gradle project from the recent-project list. The
 project status, tree, and window title confirmed the result. A separate native
