@@ -720,7 +720,7 @@ impl IdeaLikeApp {
             .active_tab
             .and_then(|index| self.state.editor_tabs.get_mut(index));
         self.state.find_replace.poll(active_find_tab);
-        self.state.search.poll();
+        self.state.search.poll(&self.state.editor_tabs);
         self.state.quick_open.poll();
         self.state.terminal.poll();
         self.state.git.poll();

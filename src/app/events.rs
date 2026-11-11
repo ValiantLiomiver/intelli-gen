@@ -212,6 +212,11 @@ pub enum GradleAction {
 pub enum SearchAction {
     Open,
     Run(crate::search::SearchQuery),
+    OpenResult {
+        path: PathBuf,
+        line: usize,
+        generation: u64,
+    },
     PreviewReplace(crate::search::SearchQuery, String),
     ApplyReplace,
     Cancel,

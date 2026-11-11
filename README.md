@@ -105,6 +105,11 @@ Bookmarks below an inserted or removed line move with the edit; replacing a sele
 
 **Navigate → Test / production source** (`⌘⇧T`) switches between matching files in JDT LS imported test and production source roots when the counterpart exists. The conventional `src/main/java` and `src/test/java` layout remains the fallback until Java intelligence returns project metadata.
 
+**Find in Project** searches unsaved contents of open project files as well as
+files on disk. If an open file changes after the search starts, run the search
+again before navigating its results. Open unsaved files missing from disk are
+reported as not searched; ignored files and file filters still apply.
+
 When an opened directory is inside a Gradle module declared in a parent settings
 file, Intelli-gen keeps that directory as the workspace and uses the containing
 build and its wrapper. Module discovery supports literal includes and supported

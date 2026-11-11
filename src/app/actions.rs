@@ -1855,40 +1855,50 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                 }
                 super::events::SearchAction::Run(query) => {
                     if let Some(project) = &state.project {
-                        state.search.start(project.root.clone(), query);
+                        let root = project.root.clone();
+                        if query.text.is_empty() {
+                            state.search.start(root, query, Vec::new());
+                        } else {
+                            match project_search_snapshots(&state.editor_tabs, &root) {
+                                Some(documents) => state.search.start(root, query, documents),
+                                None => {
+                                    state.search.reset();
+                                    state.search.message =
+                                        "Open unsaved files exceed the project search limit".into();
+                                }
+                            }
+                        }
+                    }
+                }
+                super::events::SearchAction::OpenResult {
+                    path,
+                    line,
+                    generation,
+                } => {
+                    if state
+                        .search
+                        .result_is_current(generation, &path, line, &state.editor_tabs)
+                    {
+                        navigate_to_position(
+                            state,
+                            path,
+                            crate::java::lsp::Position {
+                                line: line.saturating_sub(1).min(u32::MAX as usize) as u32,
+                                character: 0,
+                            },
+                        );
                     }
                 }
                 super::events::SearchAction::PreviewReplace(query, replacement) => {
                     if let Some(project) = &state.project {
                         let project_root = project.root.clone();
-                        let relevant_tabs: Vec<_> = state
-                            .editor_tabs
-                            .iter()
-                            .filter(|tab| tab.path.starts_with(&project_root))
-                            .collect();
-                        let dirty_tabs: Vec<_> = relevant_tabs
-                            .iter()
-                            .filter(|tab| tab.document.is_dirty())
-                            .collect();
-                        let dirty_bytes = dirty_tabs.iter().try_fold(0usize, |total, tab| {
-                            total.checked_add(tab.document.text.len())
-                        });
-                        if dirty_tabs.len() > 200
-                            || dirty_bytes
-                                .is_none_or(|bytes| bytes > crate::editor::MAX_WORKSPACE_EDIT_BYTES)
-                        {
+                        let Some(open_documents) =
+                            project_search_snapshots(&state.editor_tabs, &project_root)
+                        else {
                             state.search.message =
                                 "Open unsaved files exceed the project replacement limit".into();
                             return;
-                        }
-                        let open_documents = relevant_tabs
-                            .into_iter()
-                            .map(|tab| crate::search::OpenDocumentSnapshot {
-                                path: tab.document.path.clone(),
-                                revision: tab.document.revision,
-                                text: tab.document.is_dirty().then(|| tab.document.text.clone()),
-                            })
-                            .collect();
+                        };
                         state.search.start_replace_preview(
                             project_root,
                             query,
@@ -4740,6 +4750,37 @@ fn active_path(state: &AppState) -> Option<std::path::PathBuf> {
         .active_tab
         .and_then(|index| state.editor_tabs.get(index))
         .map(|tab| tab.path.clone())
+}
+
+fn project_search_snapshots(
+    tabs: &[EditorTab],
+    root: &Path,
+) -> Option<Vec<crate::search::OpenDocumentSnapshot>> {
+    let relevant: Vec<_> = tabs
+        .iter()
+        .filter(|tab| tab.path.starts_with(root))
+        .collect();
+    let mut count = 0;
+    let mut bytes = 0usize;
+    for tab in &relevant {
+        if tab.document.is_dirty() {
+            count += 1;
+            bytes = bytes.checked_add(tab.document.text.len())?;
+        }
+    }
+    if count > 200 || bytes > crate::editor::MAX_WORKSPACE_EDIT_BYTES {
+        return None;
+    }
+    Some(
+        relevant
+            .into_iter()
+            .map(|tab| crate::search::OpenDocumentSnapshot {
+                path: tab.document.path.clone(),
+                revision: tab.document.revision,
+                text: tab.document.is_dirty().then(|| tab.document.text.clone()),
+            })
+            .collect(),
+    )
 }
 
 fn unsaved_build_paths(
