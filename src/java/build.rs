@@ -483,6 +483,73 @@ mod gradle_argument_tests {
     use super::*;
 
     #[tokio::test]
+    #[ignore = "requires disposable INTELLI_GEN_GRADLE_PROJECT with a passing a module, failing z module, offline gradlew and INTELLI_GEN_BUILD_JAVA_HOME"]
+    async fn live_gradle_worker_reports_passing_and_failing_modules() {
+        let root = PathBuf::from(std::env::var_os("INTELLI_GEN_GRADLE_PROJECT").unwrap());
+        let home = PathBuf::from(std::env::var_os("INTELLI_GEN_BUILD_JAVA_HOME").unwrap());
+        let mut handle = BuildService::start_with_executable(
+            BuildRequest {
+                project: ProjectModel::discover(&root).unwrap(),
+                jdk: crate::java::jdk::JdkCatalog::add(&home).unwrap(),
+                task: BuildTask::Test,
+                gradle_offline: true,
+                module: None,
+                test_task: None,
+                test_filter: None,
+            },
+            Some(Path::new("/missing-configured-gradle")),
+        )
+        .unwrap();
+        let mut console = None;
+        let mut reports = None;
+        let mut output = String::new();
+        tokio::time::timeout(Duration::from_secs(120), async {
+            loop {
+                match handle.events.recv().await.expect("build worker event") {
+                    BuildEvent::Output { text, .. } => output.push_str(&text),
+                    BuildEvent::Tests(summary) => console = Some(summary),
+                    BuildEvent::ReportTests(summary) => reports = Some(summary),
+                    BuildEvent::Finished {
+                        exit_code,
+                        cancelled,
+                        error,
+                        ..
+                    } => {
+                        assert!(
+                            exit_code.is_some_and(|code| code != 0),
+                            "{error:?}\n{output}"
+                        );
+                        assert!(!cancelled);
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .expect("Gradle worker completed before timeout");
+        handle.worker.take().unwrap().join().unwrap();
+        assert_eq!(
+            console,
+            Some(diagnostics::TestSummary {
+                total: 1,
+                passed: 0,
+                failed: 1,
+                skipped: 0
+            })
+        );
+        assert_eq!(
+            reports,
+            Some(diagnostics::TestSummary {
+                total: 2,
+                passed: 1,
+                failed: 1,
+                skipped: 0
+            })
+        );
+    }
+
+    #[tokio::test]
     #[ignore = "requires disposable INTELLI_GEN_GRADLE_PROJECT with passing Gradle tests, offline gradlew and INTELLI_GEN_BUILD_JAVA_HOME"]
     async fn live_gradle_worker_reports_passing_tests_from_xml() {
         let root = PathBuf::from(std::env::var_os("INTELLI_GEN_GRADLE_PROJECT").unwrap());
@@ -1353,6 +1420,58 @@ mod test_source_line_tests {
         tool.poll();
         assert_eq!(tool.test_summary, Some(console));
     }
+
+    #[test]
+    fn more_complete_gradle_reports_replace_partial_console_counts() {
+        let (sender, events) = mpsc::channel(8);
+        let (cancel, _) = watch::channel(false);
+        let console = diagnostics::TestSummary {
+            total: 1,
+            passed: 0,
+            failed: 1,
+            skipped: 0,
+        };
+        let reports = diagnostics::TestSummary {
+            total: 2,
+            passed: 1,
+            failed: 1,
+            skipped: 0,
+        };
+        sender.try_send(BuildEvent::Tests(console)).unwrap();
+        sender.try_send(BuildEvent::ReportTests(reports)).unwrap();
+        let mut tool = BuildTool {
+            handle: Some(BuildHandle {
+                events,
+                cancel,
+                worker: None,
+            }),
+            ..Default::default()
+        };
+        tool.poll();
+        assert_eq!(tool.test_summary, Some(reports));
+
+        let (sender, events) = mpsc::channel(8);
+        let (cancel, _) = watch::channel(false);
+        sender.try_send(BuildEvent::Tests(console)).unwrap();
+        sender
+            .try_send(BuildEvent::ReportTests(diagnostics::TestSummary {
+                total: 3,
+                passed: 3,
+                failed: 0,
+                skipped: 0,
+            }))
+            .unwrap();
+        let mut tool = BuildTool {
+            handle: Some(BuildHandle {
+                events,
+                cancel,
+                worker: None,
+            }),
+            ..Default::default()
+        };
+        tool.poll();
+        assert_eq!(tool.test_summary, Some(console));
+    }
 }
 
 async fn read_output(
@@ -1663,7 +1782,14 @@ impl BuildTool {
                     total.skipped = total.skipped.saturating_add(summary.skipped);
                 }
                 BuildEvent::ReportTests(summary) => {
-                    self.test_summary.get_or_insert(summary);
+                    if self.test_summary.is_none_or(|console| {
+                        summary.total > console.total
+                            && summary.passed >= console.passed
+                            && summary.failed >= console.failed
+                            && summary.skipped >= console.skipped
+                    }) {
+                        self.test_summary = Some(summary);
+                    }
                 }
                 BuildEvent::TestFailures(failures) => {
                     for failure in failures {
