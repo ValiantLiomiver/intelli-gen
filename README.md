@@ -313,6 +313,11 @@ On 2026-11-10 it passed against commit `0f9caa4` with a fresh Eclipse fixture,
 GraalVM 23 as the project JDK, and JBR 25 for the language server and debug
 launch. This repeats the worker-level breakpoint, evaluation, stepping,
 logpoint, cancellation, and cleanup checks; it is not a native UI test.
+On 2026-11-11 the same live worker test passed with JDT LS 1.61.0 and Java Debug
+Server 0.53.2 from local VS Code extensions, using Java 25 and a fresh Eclipse
+fixture. It additionally asserted that the live language worker requests an egui
+repaint during initialization. External network and writes to the shared Maven and Gradle caches
+were denied; loopback was permitted for the debug adapter.
 On 2026-11-09, a native accessibility smoke check launched the then-current debug
 build and opened a disposable Gradle project from the recent-project list. The
 project status, tree, and window title confirmed the result. A separate native

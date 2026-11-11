@@ -931,7 +931,14 @@ mod main_project_tests {
         } else {
             "Main.java"
         });
-        let mut session = JavaLanguageService::start(&project, &config).unwrap();
+        let context = eframe::egui::Context::default();
+        let wakeups = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed = wakeups.clone();
+        context.set_request_repaint_callback(move |_| {
+            observed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        });
+        let mut session =
+            JavaLanguageService::start_for_generation(&project, &config, 0, Some(context)).unwrap();
         tokio::time::timeout(Duration::from_secs(90), async {
             loop {
                 let update = session.events.recv().await.expect("language worker event");
@@ -948,6 +955,13 @@ mod main_project_tests {
         })
         .await
         .expect("language worker ready");
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while wakeups.load(std::sync::atomic::Ordering::Relaxed) == 0 {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the live language worker must wake the workbench");
         if maven {
             session
                 .try_command(LanguageCommand::RefreshMaven {
