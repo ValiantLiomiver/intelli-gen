@@ -189,6 +189,14 @@ evidence, not a separate runtime observation. Intelli-gen's Go to Line dialog
 uses a persistent syntax label, starts with the current caret position selected,
 and scrolls the requested caret into view.
 
+REA also inspected the current `intellij.platform.ide.impl.jar` for duplication
+(Evidence `ev_713045200c852fe7a89bda1f058137ad812ab8d86893a329db8151547746849f`,
+SHA-256 `8b67c1bcbdadc45e4a2b7e3da2103a50eda664e77632236dfbdd11d8bf85c2c5`).
+Its `DuplicateAction` bytecode inserts a copy of the selected block and selects
+it, or duplicates the current line when no text is selected. This is static
+evidence, not a runtime observation. Intelli-gen does not yet provide this action;
+safe support must preserve undo across pages and respect the file size limit.
+
 REA also inventoried the installed `intellij.platform.projectView.jar`
 (Evidence `ev_bbbbad1a5f12027ca29087b9d874e62ee05ac0d9a5155933b753e4f85572531c`,
 SHA-256 `3228a8dbe1db28ff8dce684d38ceaa9e66109cde0f8348b30ea3d2d353d5937e`).

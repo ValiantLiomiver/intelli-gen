@@ -240,7 +240,12 @@ impl UserSettings {
                 continue;
             }
             let line = i64::from(bookmark.line);
-            if line > i64::from(end_line) {
+            if line > i64::from(end_line)
+                || (shift_start
+                    && delta > 0
+                    && start_line == end_line
+                    && line == i64::from(start_line))
+            {
                 bookmark.line = (line + delta).clamp(1, i64::from(u32::MAX)) as u32;
                 changed |= delta != 0;
             } else if line >= i64::from(start_line) && (start_line != end_line || shift_start) {
@@ -442,8 +447,39 @@ impl std::error::Error for SettingsError {
     }
 }
 #[cfg(test)]
-mod offline_tests {
+mod tests {
     use super::*;
+
+    #[test]
+    fn inserting_lines_at_start_moves_the_bookmark_with_existing_text() {
+        let mut settings = UserSettings::default();
+        let root = PathBuf::from("/project");
+        let file = root.join("Main.java");
+        settings.toggle_line_bookmark(root.clone(), file.clone(), 2);
+        settings.toggle_line_bookmark(root.clone(), file.clone(), 3);
+        assert!(settings.remap_bookmarks_after_edit(&root, &file, 2, 2, 1, true));
+        assert_eq!(
+            settings
+                .project_bookmarks(&root)
+                .iter()
+                .map(|item| item.line)
+                .collect::<Vec<_>>(),
+            vec![3, 4]
+        );
+
+        let mut settings = UserSettings::default();
+        settings.toggle_line_bookmark(root.clone(), file.clone(), 2);
+        settings.toggle_line_bookmark(root.clone(), file.clone(), 3);
+        assert!(settings.remap_bookmarks_after_edit(&root, &file, 2, 2, 1, false));
+        assert_eq!(
+            settings
+                .project_bookmarks(&root)
+                .iter()
+                .map(|item| item.line)
+                .collect::<Vec<_>>(),
+            vec![2, 4]
+        );
+    }
 
     #[test]
     fn gradle_offline_defaults_to_false_and_survives_settings_roundtrip() {
