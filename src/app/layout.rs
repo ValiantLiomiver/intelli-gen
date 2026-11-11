@@ -1139,6 +1139,17 @@ fn render_maven_sidebar(ui: &mut egui::Ui, state: &mut AppState) {
         }
     });
     ui.separator();
+    if state
+        .project
+        .as_ref()
+        .and_then(|project| project.model.as_ref())
+        .is_some_and(|model| model.wrapper.is_some())
+    {
+        ui.label(crate::i18n::ui_text(
+            ui,
+            "Reloading or running Maven tasks may download Maven through the project wrapper.",
+        ));
+    }
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
         .show(ui, |ui| {
@@ -1157,6 +1168,12 @@ fn render_maven_sidebar(ui: &mut egui::Ui, state: &mut AppState) {
                 ui.colored_label(
                     ui.visuals().error_fg_color,
                     crate::i18n::message(ui.ctx(), error),
+                );
+            }
+            if let Some(warning) = &state.maven_warning {
+                ui.colored_label(
+                    ui.visuals().warn_fg_color,
+                    crate::i18n::message(ui.ctx(), warning),
                 );
             }
             if let Some(error) = &state.maven_cache_error {
