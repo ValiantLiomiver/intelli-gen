@@ -15,6 +15,39 @@ fn byte_index(text: &str, character_index: usize) -> usize {
         .map_or(text.len(), |(byte, _)| byte)
 }
 
+fn selection_document_lines(
+    tab: &EditorTab,
+    range: egui::text::CCursorRange,
+) -> Option<(u32, u32)> {
+    let selected = range.as_sorted_char_range();
+    let local_start = usize::from(selected.start);
+    let local_end = usize::from(selected.end);
+    let base = if tab.document.text.len() > PAGED_EDITOR_BYTES {
+        let prefix = tab.document.text.get(..tab.page_start)?;
+        let page = tab.document.text.get(tab.page_start..tab.page_end)?;
+        if local_end > page.chars().count() {
+            return None;
+        }
+        prefix.chars().count()
+    } else {
+        0
+    };
+    let line_at = |index: usize| {
+        tab.document
+            .text
+            .chars()
+            .take(index)
+            .filter(|character| *character == '\n')
+            .count()
+            .saturating_add(1)
+            .min(u32::MAX as usize) as u32
+    };
+    Some((
+        line_at(base + local_start),
+        line_at(base + local_end.saturating_sub(1)),
+    ))
+}
+
 fn toggle_line_comment(text: &mut String, start: usize, end: usize) -> Option<(usize, usize)> {
     let char_count = text.chars().count();
     let start_byte = byte_index(text, start.min(char_count));
@@ -264,6 +297,93 @@ mod completion_trigger_tests {
             },
         );
         output.textures_delta.clear();
+    }
+
+    #[test]
+    fn paged_selection_edit_remaps_bookmarks_using_document_lines() {
+        let context = egui::Context::default();
+        let root = PathBuf::from("/project");
+        let path = root.join("Main.java");
+        let text = format!("{}λ😀\n", "a".repeat(98)).repeat(2_600);
+        let mut app = crate::app::IdeaLikeApp::new_with_context(context.clone(), None);
+        app.state.settings = crate::settings::UserSettings::default();
+        app.state.project = Some(crate::project::Project {
+            root: root.clone(),
+            kind: crate::project::ProjectKind::Gradle,
+            display_name: "project".into(),
+            model: None,
+            discovery_error: None,
+        });
+        app.state
+            .settings
+            .toggle_line_bookmark(root.clone(), path.clone(), 100);
+        app.state
+            .settings
+            .toggle_line_bookmark(root.clone(), path.clone(), 2000);
+        let mut tab = EditorTab::new(Document {
+            path: path.clone(),
+            text: text.clone(),
+            saved_text: text,
+            cursor_line: 1,
+            cursor_column: 1,
+            revision: 0,
+        });
+        tab.pending_character_index = Some(130_000);
+        frame(&context, &mut tab, 0.0, vec![]);
+        assert!(tab.page_start > 0);
+        let editor_id = egui::Id::new(("paged_source_editor", &path));
+        let mut editor = egui::text_edit::TextEditState::load(&context, editor_id).unwrap();
+        editor
+            .cursor
+            .set_char_range(Some(egui::text::CCursorRange::two(
+                egui::text::CCursor::new(10),
+                egui::text::CCursor::new(111),
+            )));
+        editor.store(&context, editor_id);
+        app.state.editor_tabs.push(tab);
+        app.state.active_tab = Some(0);
+        let mut output = context.run_ui(
+            egui::RawInput {
+                time: Some(0.1),
+                events: vec![egui::Event::Text("X".into())],
+                ..Default::default()
+            },
+            |ui| {
+                egui::CentralPanel::default().show(ui, |ui| render(ui, &mut app.state));
+            },
+        );
+        output.textures_delta.clear();
+        assert_eq!(
+            app.state.editor_tabs[0].document.text.matches('\n').count(),
+            2_599
+        );
+        assert_eq!(
+            app.state
+                .settings
+                .project_bookmarks(&root)
+                .iter()
+                .map(|bookmark| bookmark.line)
+                .collect::<Vec<_>>(),
+            vec![100, 1_999]
+        );
+    }
+
+    #[test]
+    fn stale_paged_selection_has_no_document_line_range() {
+        let mut tab = EditorTab::new(Document {
+            path: "/project/Main.java".into(),
+            text: format!("😀{}", "a".repeat(PAGED_EDITOR_BYTES)),
+            saved_text: String::new(),
+            cursor_line: 1,
+            cursor_column: 1,
+            revision: 1,
+        });
+        let selection =
+            egui::text::CCursorRange::two(egui::text::CCursor::new(0), egui::text::CCursor::new(2));
+        tab.page_start = tab.document.text.len() + 1;
+        assert_eq!(selection_document_lines(&tab, selection), None);
+        tab.page_start = 1;
+        assert_eq!(selection_document_lines(&tab, selection), None);
     }
 
     #[test]
@@ -2511,21 +2631,7 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
                 egui::text_edit::TextEditState::load(ui.ctx(), editor_id)
                     .and_then(|editor| editor.cursor.char_range())
                     .filter(|range| !range.is_empty())
-                    .map(|range| {
-                        let selected = range.as_sorted_char_range();
-                        let line_at = |index: usize| {
-                            tab.document
-                                .text
-                                .chars()
-                                .take(index)
-                                .filter(|character| *character == '\n')
-                                .count() as u32
-                                + 1
-                        };
-                        let start: usize = selected.start.into();
-                        let end: usize = selected.end.into();
-                        (line_at(start), line_at(end.saturating_sub(1)))
-                    })
+                    .and_then(|range| selection_document_lines(tab, range))
             })
             .flatten();
         let test_class_action = if state.build.running() {
