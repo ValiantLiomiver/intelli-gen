@@ -474,6 +474,66 @@ mod gradle_argument_tests {
     use super::*;
 
     #[tokio::test]
+    #[ignore = "requires INTELLI_GEN_GRADLE_PROJECT disposable two-module fixture with offline gradlew and INTELLI_GEN_BUILD_JAVA_HOME"]
+    async fn live_gradle_worker_builds_enclosing_project_from_nested_module() {
+        let root = PathBuf::from(std::env::var_os("INTELLI_GEN_GRADLE_PROJECT").unwrap());
+        let home = PathBuf::from(std::env::var_os("INTELLI_GEN_BUILD_JAVA_HOME").unwrap());
+        let workspace = root.join("app/src/main/java");
+        let project = ProjectModel::discover(&workspace).unwrap();
+        assert_eq!(project.root, root);
+        assert_eq!(
+            project.wrapper.as_deref(),
+            Some(root.join("gradlew").as_path())
+        );
+        let app_class = root.join("app/build/classes/java/main/Main.class");
+        let lib_class = root.join("lib/build/classes/java/main/Library.class");
+        assert!(
+            !app_class.exists() && !lib_class.exists(),
+            "use a clean disposable fixture"
+        );
+        let jdk = crate::java::jdk::JdkCatalog::add(&home).unwrap();
+        let mut handle = BuildService::start_with_executable(
+            BuildRequest {
+                project,
+                jdk,
+                task: BuildTask::Build,
+                gradle_offline: true,
+                module: None,
+                test_task: None,
+                test_filter: None,
+            },
+            Some(Path::new("/missing-configured-gradle")),
+        )
+        .unwrap();
+        let mut output = String::new();
+        tokio::time::timeout(Duration::from_secs(120), async {
+            loop {
+                match handle.events.recv().await.expect("build worker event") {
+                    BuildEvent::Output { text, .. } => output.push_str(&text),
+                    BuildEvent::Finished {
+                        exit_code,
+                        cancelled,
+                        error,
+                        ..
+                    } => {
+                        assert_eq!(exit_code, Some(0), "{error:?}\n{output}");
+                        assert!(!cancelled);
+                        assert!(error.is_none(), "{error:?}");
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .expect("Gradle worker completed before timeout");
+        handle.worker.take().unwrap().join().unwrap();
+        assert!(output.contains("BUILD SUCCESSFUL"), "{output}");
+        assert!(app_class.is_file());
+        assert!(lib_class.is_file());
+    }
+
+    #[tokio::test]
     #[ignore = "requires INTELLI_GEN_GRADLE, INTELLI_GEN_BUILD_JAVA_HOME and INTELLI_GEN_GRADLE_PROJECT disposable fixture"]
     async fn live_gradle_worker_builds_and_cleans_remapped_module() {
         let root = PathBuf::from(std::env::var_os("INTELLI_GEN_GRADLE_PROJECT").unwrap());
