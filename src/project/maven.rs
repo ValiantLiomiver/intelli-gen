@@ -232,7 +232,7 @@ fn collect(
                 "Maven module paths must be nonempty literal paths; property expansion is unavailable",
             ));
         }
-        let module_root = normalize(&root.join(name));
+        let module_root = module_directory(root, name);
         if module_root == build_root || result.iter().any(|module| module.root == module_root) {
             continue;
         }
@@ -251,6 +251,15 @@ fn collect(
         }
     }
     Ok(())
+}
+
+pub(crate) fn module_directory(root: &Path, entry: &str) -> PathBuf {
+    let path = normalize(&root.join(entry));
+    if path.file_name().is_some_and(|name| name == "pom.xml") && !path.is_dir() {
+        path.parent().unwrap_or(root).to_path_buf()
+    } else {
+        path
+    }
 }
 
 /// Deserialization may finish after the first root. Consume the entire input

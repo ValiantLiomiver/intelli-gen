@@ -564,7 +564,13 @@ mod gradle_argument_tests {
         home: PathBuf,
         kind: ProjectKind,
     ) {
-        let project = ProjectModel::discover(&root).unwrap();
+        let discovery_path = if kind == ProjectKind::Maven {
+            root.join("custom/app/src/main/java")
+        } else {
+            root.clone()
+        };
+        let project = ProjectModel::discover(&discovery_path).unwrap();
+        assert_eq!(project.root, root);
         assert_eq!(project.kind, kind);
         assert!(
             project

@@ -863,7 +863,7 @@ impl Context {
                     directory.display()
                 ));
             }
-            modules.push(self.module(&directory.join(entry), false)?);
+            modules.push(self.module(&super::maven::module_directory(directory, entry), false)?);
         }
         Ok(MavenModuleView {
             name,
@@ -1593,6 +1593,44 @@ mod terminal_process_tests {
 #[cfg(all(test, unix))]
 mod profile_cache_smoke_test {
     use super::*;
+
+    #[test]
+    #[ignore = "requires disposable INTELLI_GEN_MAVEN_PROJECT with an explicit module pom.xml, offline mvnw and INTELLI_GEN_BUILD_JAVA_HOME"]
+    fn real_maven_view_resolves_explicit_module_pom() {
+        let root = PathBuf::from(std::env::var_os("INTELLI_GEN_MAVEN_PROJECT").unwrap());
+        let home = PathBuf::from(std::env::var_os("INTELLI_GEN_BUILD_JAVA_HOME").unwrap());
+        let model = ProjectModel::discover(&root.join("custom/app/src/main/java")).unwrap();
+        let mut loader = MavenViewLoader::default();
+        loader
+            .start(MavenViewRequest {
+                watched_paths: Vec::new(),
+                project: model,
+                executable: None,
+                jdk: crate::java::jdk::JdkCatalog::add(&home).unwrap(),
+                profiles: Vec::new(),
+                profiles_user_modified: false,
+                generation: 1,
+            })
+            .unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(90);
+        let event = loop {
+            if let Some(event) = loader.poll().into_iter().next() {
+                break event;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "Maven refresh timed out"
+            );
+            thread::sleep(Duration::from_millis(30));
+        };
+        let view = event.result.unwrap();
+        assert!(
+            view.root_module
+                .modules
+                .iter()
+                .any(|module| module.relative_path.as_deref() == Some(Path::new("custom/app")))
+        );
+    }
 
     #[test]
     #[ignore = "requires INTELLI_GEN_PROPERTY_MAVEN_PROJECT with an extra profile using a module property and INTELLI_GEN_BUILD_JAVA_HOME"]

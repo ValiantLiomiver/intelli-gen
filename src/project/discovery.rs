@@ -52,10 +52,10 @@ pub(super) fn discover_model(path: &Path) -> Result<ProjectModel, ProjectError> 
         } else {
             continue;
         };
-        let root = if kind == ProjectKind::Gradle {
-            containing_gradle_build(root)?
-        } else {
-            root
+        let root = match kind {
+            ProjectKind::Gradle => containing_gradle_build(root)?,
+            ProjectKind::Maven => containing_maven_reactor(root)?,
+            ProjectKind::Unknown => unreachable!(),
         };
         let mut modules = match kind {
             ProjectKind::Maven => maven::modules(root)?,
@@ -100,6 +100,33 @@ pub(super) fn discover_model(path: &Path) -> Result<ProjectModel, ProjectError> 
         modules: Vec::new(),
         wrapper: None,
     })
+}
+
+fn containing_maven_reactor(module: &Path) -> Result<&Path, ProjectError> {
+    let mut selected = module;
+    if wrapper(module, ProjectKind::Maven)?.is_some() {
+        return Ok(module);
+    }
+    let canonical_module = module.canonicalize().ok();
+    for ancestor in module.ancestors().skip(1) {
+        if !matches!(descriptor_exists(&ancestor.join("pom.xml")), Ok(true)) {
+            continue;
+        }
+        if maven::modules(ancestor).is_ok_and(|modules| {
+            modules.iter().any(|entry| {
+                entry.root == module
+                    || canonical_module.as_ref().is_some_and(|canonical| {
+                        entry.root.canonicalize().ok().as_ref() == Some(canonical)
+                    })
+            })
+        }) {
+            selected = ancestor;
+            if wrapper(ancestor, ProjectKind::Maven)?.is_some() {
+                break;
+            }
+        }
+    }
+    Ok(selected)
 }
 
 fn containing_gradle_build(module: &Path) -> Result<&Path, ProjectError> {
@@ -212,6 +239,115 @@ mod tests {
         let project = discover(&nested);
         assert_eq!(project.root, nested);
         assert_eq!(project.model.unwrap().root, workspace);
+        fs::remove_dir_all(workspace).unwrap();
+    }
+
+    #[test]
+    fn nested_maven_reactor_module_uses_reactor_root_and_wrapper() {
+        let workspace = std::env::temp_dir().join(format!(
+            "intelli-gen-maven-module-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let nested = workspace.join("group/app/src/main/java");
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(workspace.join("pom.xml"), "<project><artifactId>root</artifactId><modules><module>group</module></modules></project>").unwrap();
+        fs::write(workspace.join("group/pom.xml"), "<project><artifactId>group</artifactId><modules><module>app</module></modules></project>").unwrap();
+        fs::write(
+            workspace.join("group/app/pom.xml"),
+            "<project><artifactId>app</artifactId></project>",
+        )
+        .unwrap();
+        let wrapper = workspace.join(if cfg!(windows) { "mvnw.cmd" } else { "mvnw" });
+        fs::write(&wrapper, "wrapper").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let project = discover(&nested);
+        assert_eq!(project.root, nested);
+        let model = project.model.unwrap();
+        assert_eq!(model.root, workspace);
+        assert_eq!(model.wrapper.as_deref(), Some(wrapper.as_path()));
+        assert!(
+            model
+                .modules
+                .iter()
+                .any(|module| module.root.ends_with("group/app"))
+        );
+        fs::remove_dir_all(workspace).unwrap();
+    }
+
+    #[test]
+    fn explicit_module_pom_identifies_maven_reactor() {
+        let workspace = std::env::temp_dir().join(format!(
+            "intelli-gen-maven-pom-module-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let child = workspace.join("group/app");
+        fs::create_dir_all(&child).unwrap();
+        fs::write(
+            workspace.join("pom.xml"),
+            "<project><modules><module>group/app/pom.xml</module></modules></project>",
+        )
+        .unwrap();
+        fs::write(
+            child.join("pom.xml"),
+            "<project><artifactId>app</artifactId></project>",
+        )
+        .unwrap();
+        let model = ProjectModel::discover(&child).unwrap();
+        assert_eq!(model.root, workspace);
+        assert_eq!(model.modules[0].root, child);
+        fs::remove_dir_all(workspace).unwrap();
+    }
+
+    #[test]
+    fn unrelated_maven_project_and_nearer_wrapper_keep_their_own_root() {
+        let workspace = std::env::temp_dir().join(format!(
+            "intelli-gen-maven-independent-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let child = workspace.join("app");
+        fs::create_dir_all(&child).unwrap();
+        fs::write(
+            workspace.join("pom.xml"),
+            "<project><modules><module>other</module></modules></project>",
+        )
+        .unwrap();
+        fs::write(
+            child.join("pom.xml"),
+            "<project><artifactId>app</artifactId></project>",
+        )
+        .unwrap();
+        assert_eq!(ProjectModel::discover(&child).unwrap().root, child);
+        fs::write(
+            workspace.join("pom.xml"),
+            "<project><modules><module>app</module></modules></project>",
+        )
+        .unwrap();
+        let wrapper = child.join(if cfg!(windows) { "mvnw.cmd" } else { "mvnw" });
+        fs::write(&wrapper, "wrapper").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let model = ProjectModel::discover(&child).unwrap();
+        assert_eq!(model.root, child);
+        assert_eq!(model.wrapper.as_deref(), Some(wrapper.as_path()));
         fs::remove_dir_all(workspace).unwrap();
     }
 

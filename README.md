@@ -129,6 +129,14 @@ even with `--offline`. Set `INTELLI_GEN_BUILD_JAVA_HOME` to a compatible JDK and
 `GRADLE_USER_HOME` to a disposable directory, then run the test with `--ignored`.
 It also passed with `app` linked to a directory inside the build.
 
+For Maven, opening a module declared directly in an ancestor reactor keeps the
+opened directory as the workspace and discovers the reactor and its wrapper.
+A nearer module wrapper takes precedence. Literal module entries ending in
+`pom.xml` are supported as well as directory entries. This discovery does not
+infer membership declared only in Maven profiles, including profiles active by
+default; open the reactor root in that case. A Maven 3.9.9 offline check covered
+an explicit module POM, the build/test/clean worker, and the Maven project view.
+
 ## IntelliJ reverse-engineering evidence
 
 The local reference is IntelliJ IDEA Ultimate 2026.3, currently installed as
