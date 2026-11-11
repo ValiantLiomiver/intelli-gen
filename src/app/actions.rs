@@ -1317,6 +1317,10 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                 state.maven_selected_module = None;
                 state.maven_loading = false;
                 state.maven_refresh_deferred = false;
+                state.maven_followup_refresh = false;
+                state.maven_input_fingerprint = None;
+                state.maven_watched_paths.clear();
+                state.maven_refresh_failed = false;
                 state.maven_cache_loading = false;
                 state.maven_error = None;
                 state.maven_warning = None;
@@ -2664,13 +2668,17 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                 cache_error,
                 cache_candidate,
                 tools,
+                input_fingerprint,
+                inputs_changed,
             } => {
                 if state.maven_view_root.as_ref() != Some(&root)
                     || generation != state.maven_generation
                 {
                     continue;
                 }
-                let changed_during_load = std::mem::take(&mut state.maven_refresh_deferred);
+                let changed_during_load =
+                    std::mem::take(&mut state.maven_refresh_deferred) || inputs_changed;
+                let followup = std::mem::take(&mut state.maven_followup_refresh);
                 if tools != current_maven_tools(state) {
                     if state.quit_requested {
                         state.maven_loading = false;
@@ -2685,6 +2693,10 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                 state.maven_cache_error = cache_error;
                 match result {
                     Ok(view) => {
+                        let fingerprint_incomplete = input_fingerprint
+                            .as_ref()
+                            .is_none_or(|value| !value.complete);
+                        state.maven_input_fingerprint = input_fingerprint;
                         sync_maven_profiles(state, &view);
                         if find_maven_module(
                             &view.root_module,
@@ -2696,6 +2708,7 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                         }
                         let watcher_error = watch_resolved_maven_poms(state, &root, &view);
                         if !changed_during_load
+                            && !fingerprint_incomplete
                             && let Some((canonical_root, fingerprint, tools)) = cache_candidate
                             && let Err(error) = state.maven_view_loader.publish_cache(
                                 root.clone(),
@@ -2709,11 +2722,25 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                             state.maven_cache_error = Some(error);
                         }
                         state.maven_view = Some(view);
-                        state.maven_warning =
-                            changed_during_load.then(|| MAVEN_STALE_WARNING.into());
+                        state.maven_warning = (changed_during_load || fingerprint_incomplete)
+                            .then(|| MAVEN_STALE_WARNING.into());
                         state.maven_error = watcher_error;
+                        // shortcut: one follow-up avoids loops when the wrapper repeatedly changes inputs.
+                        if changed_during_load
+                            && !followup
+                            && !state.quit_requested
+                            && state.maven_error.is_none()
+                            && current_maven_wrapper(state)
+                                .is_some_and(|wrapper| state.wrapper_approvals.contains(&wrapper))
+                        {
+                            reload_maven_view(state);
+                            state.maven_followup_refresh = state.maven_loading;
+                        }
                     }
-                    Err(error) => state.maven_error = Some(error),
+                    Err(error) => {
+                        state.maven_refresh_failed = true;
+                        state.maven_error = Some(error);
+                    }
                 }
             }
             AppEvent::MavenCacheWriteFailed {
@@ -2805,12 +2832,30 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                 }
                 match event.model {
                     Ok(model) if model.kind == ProjectKind::Maven => {
+                        if let Some(fingerprint) = &event.input_fingerprint {
+                            state.maven_watched_paths = fingerprint.paths.clone();
+                        }
+                        let already_loaded = !state.maven_loading
+                            && event.input_fingerprint.is_some()
+                            && event.input_fingerprint == state.maven_input_fingerprint;
                         if let Some(project) = &mut state.project {
                             project.kind = model.kind;
                             project.model = Some(model);
                             project.discovery_error = None;
                         }
-                        state.maven_error = None;
+                        if already_loaded {
+                            if event
+                                .input_fingerprint
+                                .as_ref()
+                                .is_some_and(|input| !input.complete)
+                            {
+                                state.maven_warning = Some(MAVEN_STALE_WARNING.into());
+                            }
+                            continue;
+                        }
+                        if !state.maven_refresh_failed {
+                            state.maven_error = None;
+                        }
                         reload_maven_view_automatically(state);
                     }
                     Ok(model) => {
@@ -2826,6 +2871,7 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                         state.maven_profiles_user_modified = false;
                         state.maven_loading = false;
                         state.maven_refresh_deferred = false;
+                        state.maven_followup_refresh = false;
                         state.maven_warning = None;
                         state.maven_view_loader.cancel();
                         state.maven_generation = state.maven_generation.wrapping_add(1);
@@ -2838,6 +2884,7 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                         state.maven_generation = state.maven_generation.wrapping_add(1);
                         state.maven_loading = false;
                         state.maven_refresh_deferred = false;
+                        state.maven_followup_refresh = false;
                         state.maven_warning = None;
                         state.maven_error = Some(error);
                     }
@@ -3161,6 +3208,8 @@ fn sync_maven_profiles(state: &mut AppState, view: &crate::project::maven_view::
 fn reload_maven_view(state: &mut AppState) {
     state.maven_view_loader.cancel();
     state.maven_refresh_deferred = false;
+    state.maven_followup_refresh = false;
+    state.maven_refresh_failed = false;
     state.maven_warning = None;
     refresh_maven_dependencies(state);
     state.maven_generation = state.maven_generation.wrapping_add(1);
@@ -3184,32 +3233,49 @@ fn reload_maven_view(state: &mut AppState) {
             jdk,
             profiles,
             profiles_user_modified: state.maven_profiles_user_modified,
+            watched_paths: state.maven_watched_paths.clone(),
             generation: state.maven_generation,
         })
     })();
     match request {
         Ok(request) => match state.maven_view_loader.start(request) {
             Ok(()) => state.maven_loading = true,
-            Err(error) => state.maven_error = Some(error),
+            Err(error) => {
+                state.maven_refresh_failed = true;
+                state.maven_error = Some(error);
+            }
         },
-        Err(error) => state.maven_error = Some(error),
+        Err(error) => {
+            state.maven_refresh_failed = true;
+            state.maven_error = Some(error);
+        }
     }
 }
 
 const MAVEN_STALE_WARNING: &str =
     "Maven model may be stale. Reload manually; the project wrapper may download Maven.";
 
-fn reload_maven_view_automatically(state: &mut AppState) {
-    if state
+fn current_maven_wrapper(state: &AppState) -> Option<(std::path::PathBuf, std::path::PathBuf)> {
+    state
         .project
         .as_ref()
         .and_then(|project| project.model.as_ref())
-        .is_some_and(|model| model.wrapper.is_some())
-    {
+        .and_then(|model| Some((model.root.clone(), model.wrapper.clone()?)))
+}
+
+fn reload_maven_view_automatically(state: &mut AppState) {
+    if let Some(wrapper) = current_maven_wrapper(state) {
         if state.maven_loading {
             state.maven_refresh_deferred = true;
             state.maven_tools = current_maven_tools(state);
             refresh_maven_dependencies(state);
+            return;
+        }
+        if !state.maven_refresh_failed
+            && state.wrapper_approvals.contains(&wrapper)
+            && (state.maven_view.is_none() || state.maven_input_fingerprint.is_some())
+        {
+            reload_maven_view(state);
             return;
         }
         state.maven_view_loader.cancel();
@@ -3223,7 +3289,9 @@ fn reload_maven_view_automatically(state: &mut AppState) {
             }
         } else {
             state.maven_warning = None;
-            state.maven_error = Some(MAVEN_STALE_WARNING.into());
+            if !state.maven_refresh_failed {
+                state.maven_error = Some(MAVEN_STALE_WARNING.into());
+            }
         }
         refresh_maven_dependencies(state);
     } else {
@@ -3660,6 +3728,8 @@ mod maven_cache_tests {
         }})).unwrap();
         app.state
             .enqueue(crate::app::events::AppEvent::MavenViewCompleted {
+                input_fingerprint: None,
+                inputs_changed: false,
                 root: root.clone(),
                 generation: 1,
                 result: Ok(view),
@@ -3728,6 +3798,8 @@ mod maven_cache_tests {
         .unwrap();
         app.state
             .enqueue(crate::app::events::AppEvent::MavenViewCompleted {
+                input_fingerprint: None,
+                inputs_changed: false,
                 root: root.clone(),
                 generation: 1,
                 result: Ok(view),
@@ -3811,6 +3883,7 @@ mod maven_cache_tests {
         app.state
             .enqueue(crate::app::events::AppEvent::MavenPomsChanged(
                 crate::project::maven_watch::MavenPomEvent {
+                    input_fingerprint: None,
                     root: root.clone(),
                     project_generation: 0,
                     model: Ok(model),
@@ -3821,6 +3894,8 @@ mod maven_cache_tests {
         assert_eq!(app.state.maven_generation, 7);
         app.state
             .enqueue(crate::app::events::AppEvent::MavenViewCompleted {
+                input_fingerprint: None,
+                inputs_changed: false,
                 root,
                 generation: 7,
                 result: Err("obsolete result".into()),
@@ -3838,6 +3913,7 @@ mod maven_cache_tests {
         app.state
             .enqueue(crate::app::events::AppEvent::MavenPomsChanged(
                 crate::project::maven_watch::MavenPomEvent {
+                    input_fingerprint: None,
                     root: root.clone(),
                     project_generation: 0,
                     model: Ok(model),
@@ -3851,6 +3927,8 @@ mod maven_cache_tests {
         .unwrap();
         app.state
             .enqueue(crate::app::events::AppEvent::MavenViewCompleted {
+                input_fingerprint: None,
+                inputs_changed: false,
                 root,
                 generation: 7,
                 result: Ok(view),
@@ -3876,6 +3954,7 @@ mod maven_cache_tests {
         app.state
             .enqueue(crate::app::events::AppEvent::MavenPomsChanged(
                 crate::project::maven_watch::MavenPomEvent {
+                    input_fingerprint: None,
                     root,
                     project_generation: 0,
                     model: Ok(model),
@@ -3893,6 +3972,244 @@ mod maven_cache_tests {
                 .as_deref()
                 .unwrap()
                 .contains("stale")
+        );
+    }
+
+    #[test]
+    fn maven_watcher_ignores_only_a_known_identical_input_snapshot() {
+        for complete in [true, false] {
+            let context = egui::Context::default();
+            let mut app = crate::app::IdeaLikeApp::new_with_context(context.clone(), None);
+            app.state.settings = crate::settings::UserSettings::default();
+            let root = std::path::PathBuf::from("/workspace/maven");
+            let model = crate::project::ProjectModel {
+                root: root.clone(),
+                name: "maven".into(),
+                kind: crate::project::ProjectKind::Maven,
+                modules: Vec::new(),
+                wrapper: Some(root.join("mvnw")),
+            };
+            app.state.project = Some(crate::project::Project {
+                root: root.clone(),
+                kind: model.kind,
+                display_name: "maven".into(),
+                discovery_error: None,
+                model: Some(model.clone()),
+            });
+            app.state.maven_view_root = Some(root.clone());
+            app.state
+                .wrapper_approvals
+                .insert((root.clone(), root.join("mvnw")));
+            app.state.maven_input_fingerprint =
+                Some(crate::project::maven_watch::MavenInputFingerprint {
+                    digest: "snapshot-a".into(),
+                    complete,
+                    paths: Vec::new(),
+                });
+            for (fingerprint, expected_generation) in
+                [(Some("snapshot-a"), 0), (Some("snapshot-b"), 1)]
+            {
+                app.state
+                    .enqueue(crate::app::events::AppEvent::MavenPomsChanged(
+                        crate::project::maven_watch::MavenPomEvent {
+                            root: root.clone(),
+                            project_generation: 0,
+                            model: Ok(model.clone()),
+                            input_fingerprint: fingerprint.map(|digest| {
+                                crate::project::maven_watch::MavenInputFingerprint {
+                                    digest: digest.into(),
+                                    complete,
+                                    paths: Vec::new(),
+                                }
+                            }),
+                        },
+                    ));
+                super::process_events(&context, &mut app.state);
+                assert_eq!(app.state.maven_generation, expected_generation);
+            }
+            assert_eq!(
+                app.state.maven_error.as_deref(),
+                Some("Choose a JDK in Settings or Project Structure")
+            );
+        }
+    }
+
+    #[test]
+    fn approved_wrapper_retries_one_refresh_after_an_inflight_change() {
+        let context = egui::Context::default();
+        let mut app = crate::app::IdeaLikeApp::new_with_context(context.clone(), None);
+        app.state.settings = crate::settings::UserSettings::default();
+        let root = std::path::PathBuf::from("/workspace/maven");
+        let model = crate::project::ProjectModel {
+            root: root.clone(),
+            name: "maven".into(),
+            kind: crate::project::ProjectKind::Maven,
+            modules: Vec::new(),
+            wrapper: Some(root.join("mvnw")),
+        };
+        app.state.project = Some(crate::project::Project {
+            root: root.clone(),
+            kind: model.kind,
+            display_name: "maven".into(),
+            discovery_error: None,
+            model: Some(model.clone()),
+        });
+        app.state.maven_view_root = Some(root.clone());
+        app.state
+            .wrapper_approvals
+            .insert((root.clone(), root.join("mvnw")));
+        app.state.maven_generation = 7;
+        app.state.maven_loading = true;
+        app.state
+            .enqueue(crate::app::events::AppEvent::MavenPomsChanged(
+                crate::project::maven_watch::MavenPomEvent {
+                    input_fingerprint: None,
+                    root: root.clone(),
+                    project_generation: 0,
+                    model: Ok(model),
+                },
+            ));
+        super::process_events(&context, &mut app.state);
+        assert!(app.state.maven_loading);
+        assert_eq!(app.state.maven_generation, 7);
+        let view = serde_json::from_value(serde_json::json!({"profiles": [], "root_module": {
+            "name": "resolved", "relative_path": null, "lifecycle": [], "plugins": [],
+            "dependencies": [], "repositories": [], "modules": []
+        }}))
+        .unwrap();
+        app.state
+            .enqueue(crate::app::events::AppEvent::MavenViewCompleted {
+                input_fingerprint: None,
+                inputs_changed: false,
+                root,
+                generation: 7,
+                result: Ok(view),
+                cache_error: None,
+                cache_candidate: None,
+                tools: None,
+            });
+        super::process_events(&context, &mut app.state);
+        assert_eq!(
+            app.state.maven_generation, 8,
+            "a single follow-up refresh is requested"
+        );
+        assert_eq!(
+            app.state.maven_error.as_deref(),
+            Some("Choose a JDK in Settings or Project Structure")
+        );
+        app.state.maven_generation = 9;
+        app.state.maven_loading = true;
+        app.state.maven_refresh_deferred = true;
+        app.state.maven_followup_refresh = true;
+        let root = app.state.maven_view_root.clone().unwrap();
+        let view = serde_json::from_value(serde_json::json!({"profiles": [], "root_module": {
+            "name": "resolved", "relative_path": null, "lifecycle": [], "plugins": [],
+            "dependencies": [], "repositories": [], "modules": []
+        }}))
+        .unwrap();
+        app.state
+            .enqueue(crate::app::events::AppEvent::MavenViewCompleted {
+                input_fingerprint: None,
+                inputs_changed: false,
+                root,
+                generation: 9,
+                result: Ok(view),
+                cache_error: None,
+                cache_candidate: None,
+                tools: None,
+            });
+        super::process_events(&context, &mut app.state);
+        assert_eq!(
+            app.state.maven_generation, 9,
+            "repeated changes must not cause a reload loop"
+        );
+        assert!(app.state.maven_warning.is_some());
+
+        app.state.maven_generation = 10;
+        app.state.maven_loading = true;
+        app.state.maven_refresh_deferred = false;
+        app.state.maven_followup_refresh = false;
+        let root = app.state.maven_view_root.clone().unwrap();
+        let view = serde_json::from_value(serde_json::json!({"profiles": [], "root_module": {
+            "name": "partial", "relative_path": null, "lifecycle": [], "plugins": [],
+            "dependencies": [], "repositories": [], "modules": []
+        }}))
+        .unwrap();
+        app.state
+            .enqueue(crate::app::events::AppEvent::MavenViewCompleted {
+                root,
+                generation: 10,
+                result: Ok(view),
+                cache_error: None,
+                cache_candidate: None,
+                tools: None,
+                inputs_changed: false,
+                input_fingerprint: Some(crate::project::maven_watch::MavenInputFingerprint {
+                    digest: "partial".into(),
+                    complete: false,
+                    paths: Vec::new(),
+                }),
+            });
+        super::process_events(&context, &mut app.state);
+        assert_eq!(
+            app.state.maven_generation, 10,
+            "an unchanged partial snapshot must not trigger a follow-up"
+        );
+        assert!(app.state.maven_warning.is_some());
+    }
+
+    #[test]
+    fn approved_wrapper_allows_automatic_maven_refresh() {
+        let context = egui::Context::default();
+        let mut app = crate::app::IdeaLikeApp::new_with_context(context, None);
+        app.state.settings = crate::settings::UserSettings::default();
+        let root = std::path::PathBuf::from("/workspace/maven");
+        let wrapper = root.join("mvnw");
+        app.state.project = Some(crate::project::Project {
+            root: root.clone(),
+            kind: crate::project::ProjectKind::Maven,
+            display_name: "maven".into(),
+            discovery_error: None,
+            model: Some(crate::project::ProjectModel {
+                root: root.clone(),
+                name: "maven".into(),
+                kind: crate::project::ProjectKind::Maven,
+                modules: Vec::new(),
+                wrapper: Some(wrapper.clone()),
+            }),
+        });
+        app.state.maven_view_root = Some(root.clone());
+        app.state.wrapper_approvals.insert((root, wrapper));
+        super::reload_maven_view_automatically(&mut app.state);
+        assert_eq!(
+            app.state.maven_error.as_deref(),
+            Some("Choose a JDK in Settings or Project Structure")
+        );
+        app.state.maven_error = None;
+        app.state.maven_refresh_failed = false;
+        app.state.maven_loading = true;
+        let generation = app.state.maven_generation;
+        super::reload_maven_view_automatically(&mut app.state);
+        assert!(app.state.maven_loading);
+        assert!(app.state.maven_refresh_deferred);
+        assert_eq!(app.state.maven_generation, generation);
+        app.state.maven_loading = false;
+        app.state
+            .project
+            .as_mut()
+            .unwrap()
+            .model
+            .as_mut()
+            .unwrap()
+            .wrapper = Some("/workspace/maven/other-wrapper".into());
+        super::reload_maven_view_automatically(&mut app.state);
+        assert!(
+            app.state
+                .maven_error
+                .as_deref()
+                .unwrap()
+                .contains("wrapper"),
+            "approval for one wrapper must not authorize another"
         );
     }
 
@@ -3920,6 +4237,7 @@ mod maven_cache_tests {
         app.state
             .enqueue(crate::app::events::AppEvent::MavenPomsChanged(
                 crate::project::maven_watch::MavenPomEvent {
+                    input_fingerprint: None,
                     root,
                     project_generation: app.state.maven_project_generation,
                     model: Ok(model),
@@ -4031,6 +4349,7 @@ mod maven_cache_tests {
         app.state
             .maven_view_loader
             .start(crate::project::maven_view::MavenViewRequest {
+                watched_paths: Vec::new(),
                 project: app.state.project.as_ref().unwrap().model.clone().unwrap(),
                 executable: None,
                 jdk: crate::java::jdk::JdkInstallation::unavailable(Path::new("/missing-jdk")),

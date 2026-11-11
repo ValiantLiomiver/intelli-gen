@@ -120,6 +120,8 @@ pub enum AppEvent {
         result: Result<crate::project::maven_view::MavenView, String>,
         cache_error: Option<String>,
         tools: Option<crate::project::maven_cache::MavenToolIdentity>,
+        input_fingerprint: Option<crate::project::maven_watch::MavenInputFingerprint>,
+        inputs_changed: bool,
         cache_candidate: Option<(
             PathBuf,
             String,

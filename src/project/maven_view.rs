@@ -66,6 +66,7 @@ pub struct MavenViewRequest {
     pub profiles: Vec<String>,
     /// When false, profiles marked activeByDefault are selected for the first load.
     pub profiles_user_modified: bool,
+    pub watched_paths: Vec<PathBuf>,
     pub generation: u64,
 }
 
@@ -77,6 +78,8 @@ pub struct MavenViewEvent {
     pub cache_error: Option<String>,
     pub tools: Option<MavenToolIdentity>,
     pub cache_candidate: Option<(PathBuf, String, MavenToolIdentity)>,
+    pub input_fingerprint: Option<super::maven_watch::MavenInputFingerprint>,
+    pub inputs_changed: bool,
 }
 
 #[derive(Default)]
@@ -261,6 +264,9 @@ impl MavenViewLoader {
                 );
                 let default_profiles = !request.profiles_user_modified;
                 let fingerprint_before = fingerprint_poms(&cache_project);
+                let watched_paths = request.watched_paths.clone();
+                let inputs_before =
+                    super::maven_watch::input_fingerprint(&cache_project, &watched_paths);
                 let event = MavenViewEvent {
                     root: request.project.root.clone(),
                     generation: request.generation,
@@ -274,9 +280,34 @@ impl MavenViewLoader {
                     cache_error: None,
                     tools: tools.clone(),
                     cache_candidate: None,
+                    input_fingerprint: None,
+                    inputs_changed: false,
                 };
                 let mut event = event;
                 if event.result.is_ok() && !worker_cancel.load(Ordering::Acquire) {
+                    if let Ok(view) = &event.result {
+                        let after =
+                            super::maven_watch::input_fingerprint(&cache_project, &watched_paths);
+                        event.inputs_changed = inputs_before.digest != after.digest;
+                        let mut resolved = watched_paths;
+                        resolved.extend(view.pom_fingerprints.keys().cloned());
+                        for (path, expected) in &view.pom_fingerprints {
+                            if super::maven_cache::fingerprint_pom_paths(
+                                &cache_project.root,
+                                std::slice::from_ref(path),
+                            )
+                            .ok()
+                            .as_ref()
+                                != Some(expected)
+                            {
+                                event.inputs_changed = true;
+                            }
+                        }
+                        event.input_fingerprint = Some(super::maven_watch::input_fingerprint(
+                            &cache_project,
+                            &resolved,
+                        ));
+                    }
                     match (fingerprint_before, fingerprint_poms(&cache_project)) {
                         (Ok(before), Ok(after)) if before == after && default_profiles => {
                             match cache_project.root.canonicalize() {
@@ -1367,6 +1398,8 @@ mod cache_publication_tests {
         loader
             .sender
             .send(MavenViewEvent {
+                input_fingerprint: None,
+                inputs_changed: false,
                 root: root.clone(),
                 generation: 1,
                 result: Ok(view),
@@ -1570,6 +1603,7 @@ mod profile_cache_smoke_test {
         let mut loader = MavenViewLoader::default();
         loader
             .start(MavenViewRequest {
+                watched_paths: Vec::new(),
                 project: model,
                 executable: None,
                 jdk: crate::java::jdk::JdkCatalog::add(&jdk_home).unwrap(),
@@ -1625,6 +1659,7 @@ mod profile_cache_smoke_test {
         let mut resolve = |generation, profiles: Vec<String>, profiles_user_modified| {
             loader
                 .start(MavenViewRequest {
+                    watched_paths: Vec::new(),
                     project: model.clone(),
                     executable: None,
                     jdk: jdk.clone(),

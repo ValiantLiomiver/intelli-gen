@@ -352,6 +352,10 @@ On 2026-11-11, a native MCP accessibility check on `426bd52` used a disposable
 Maven project with a local marker-only wrapper. Cancelling the localized wrapper
 dialog left the marker absent; allowing it ran the wrapper, and a second task ran
 without another prompt in the same session. The fixture performed no download.
+A second disposable Maven wrapper check confirmed that editing its POM did not
+run the wrapper before consent, but did start a reload after consent. Its wrapper
+deliberately failed; the Maven error stayed visible and a later POM edit did not
+start repeated retries. Java HTTP(S) proxy settings pointed to a closed local port.
 
 For this test, use the `Main.java` with the `add` helper shown in the Maven
 fixture below, compiled into `bin/` with debug information. Use an Eclipse
@@ -464,10 +468,12 @@ cache write. Accepted writes run off the UI thread and are ordered per project
 within one IDE process. The cache also records the configured JDK home and
 catalog version and the selected Maven executable or wrapper path; a mismatch or
 missing identity triggers a refresh while keeping the cached view as a fallback.
-When a project has a Maven wrapper, automatic refresh is deferred and the sidebar
-asks for a manual reload because running the wrapper can download Maven. Changes
+When a project has a Maven wrapper, automatic refresh is deferred until the
+wrapper is approved for the current IDE session, because it can download Maven.
+After approval, subsequent project changes can refresh the view automatically. Changes
 to the project's wrapper scripts and `.mvn` configuration also change the cache
-fingerprint. Separate IDE processes do not
+fingerprint. The IDE warns when monitored inputs cannot be fully checked and
+pauses automatic retries after a Maven error until a manual reload. Separate IDE processes do not
 coordinate cache writes. The identity does not detect an installed Maven
 executable, downloaded wrapper distribution, or JDK replaced at the same path
 without a corresponding catalog-version update. User-level Maven settings and

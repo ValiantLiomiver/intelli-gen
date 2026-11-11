@@ -227,6 +227,10 @@ pub struct AppState {
     pub maven_cache_generation: u64,
     pub maven_loading: bool,
     pub maven_refresh_deferred: bool,
+    pub maven_followup_refresh: bool,
+    pub maven_input_fingerprint: Option<crate::project::maven_watch::MavenInputFingerprint>,
+    pub maven_watched_paths: Vec<PathBuf>,
+    pub maven_refresh_failed: bool,
     pub maven_cache_loading: bool,
     pub maven_error: Option<String>,
     pub maven_warning: Option<String>,
@@ -554,6 +558,10 @@ impl IdeaLikeApp {
             maven_cache_generation: 0,
             maven_loading: false,
             maven_refresh_deferred: false,
+            maven_followup_refresh: false,
+            maven_input_fingerprint: None,
+            maven_watched_paths: Vec::new(),
+            maven_refresh_failed: false,
             maven_cache_loading: false,
             maven_error: None,
             maven_warning: None,
@@ -754,6 +762,8 @@ impl eframe::App for IdeaLikeApp {
                 cache_error: event.cache_error,
                 cache_candidate: event.cache_candidate,
                 tools: event.tools,
+                input_fingerprint: event.input_fingerprint,
+                inputs_changed: event.inputs_changed,
             });
         }
         for (root, generation, error) in self.state.maven_view_loader.poll_cache_errors() {

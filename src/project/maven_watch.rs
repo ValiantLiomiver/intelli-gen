@@ -1,4 +1,5 @@
 use std::fs;
+use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -13,6 +14,43 @@ pub struct MavenPomEvent {
     pub root: PathBuf,
     pub project_generation: u64,
     pub model: Result<ProjectModel, String>,
+    pub input_fingerprint: Option<MavenInputFingerprint>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MavenInputFingerprint {
+    pub digest: String,
+    pub complete: bool,
+    pub paths: Vec<PathBuf>,
+}
+
+pub(crate) fn input_fingerprint(
+    model: &ProjectModel,
+    resolved: &[PathBuf],
+) -> MavenInputFingerprint {
+    let root = &model.root;
+    let mut paths = project_pom_paths(model);
+    paths.extend(super::maven_cache::maven_project_config_paths(root));
+    let mut complete = matches!(super::maven::profile_pom_paths(root, &mut paths), Ok(false));
+    paths.extend_from_slice(resolved);
+    paths.sort();
+    paths.dedup();
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for path in &paths {
+        path.hash(&mut hasher);
+        match fingerprint_pom_paths(root, std::slice::from_ref(path)) {
+            Ok(fingerprint) => fingerprint.hash(&mut hasher),
+            Err(error) => {
+                complete = false;
+                error.hash(&mut hasher);
+            }
+        }
+    }
+    MavenInputFingerprint {
+        digest: format!("{:016x}", hasher.finish()),
+        complete,
+        paths,
+    }
 }
 
 pub struct MavenPomWatcher {
@@ -246,10 +284,15 @@ fn watch(
                 previous = metadata_snapshot(&pom_paths).ok();
                 previous_content = content_snapshot(&root, &pom_paths);
             }
+            let input_fingerprint = model
+                .as_ref()
+                .ok()
+                .map(|model| input_fingerprint(model, &pom_paths));
             let _ = sender.send(MavenPomEvent {
                 root: root.clone(),
                 project_generation,
                 model,
+                input_fingerprint,
             });
             changed_at = None;
         }
@@ -377,6 +420,42 @@ mod tests {
         )
         .unwrap();
         assert_ne!(before, super::content_snapshot(&root, &paths));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn incomplete_profile_snapshot_still_detects_readable_pom_changes() {
+        let root = project_root("partial-fingerprint");
+        let module = root.join("extra");
+        fs::create_dir_all(&module).unwrap();
+        fs::write(module.join("pom.xml"), "<project>").unwrap();
+        let root_pom = root.join("pom.xml");
+        fs::write(&root_pom, "<project><profiles><profile><modules><module>extra</module></modules></profile></profiles></project>").unwrap();
+        let model = crate::project::ProjectModel::discover(&root).unwrap();
+        let retained = module.join("child/pom.xml");
+        fs::create_dir_all(retained.parent().unwrap()).unwrap();
+        fs::write(&retained, "<project><name>first</name></project>").unwrap();
+        let before = super::input_fingerprint(&model, std::slice::from_ref(&retained));
+        assert!(!before.complete);
+        fs::write(&retained, "<project><name>second</name></project>").unwrap();
+        let child_changed = super::input_fingerprint(&model, std::slice::from_ref(&retained));
+        assert_ne!(
+            before.digest, child_changed.digest,
+            "retained watched paths must remain visible"
+        );
+        fs::write(&root_pom, "<project><name>changed</name><profiles><profile><modules><module>extra</module></modules></profile></profiles></project>").unwrap();
+        let after = super::input_fingerprint(&model, std::slice::from_ref(&retained));
+        assert!(!after.complete);
+        assert_ne!(child_changed.digest, after.digest);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn unresolved_profile_module_is_marked_incomplete() {
+        let root = project_root("unresolved-fingerprint");
+        fs::write(root.join("pom.xml"), "<project><profiles><profile><modules><module>${unknown}</module></modules></profile></profiles></project>").unwrap();
+        let model = crate::project::ProjectModel::discover(&root).unwrap();
+        assert!(!super::input_fingerprint(&model, &[]).complete);
         fs::remove_dir_all(root).unwrap();
     }
 
