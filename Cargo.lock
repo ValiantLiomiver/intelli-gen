@@ -1778,6 +1778,8 @@ dependencies = [
  "ignore",
  "libc",
  "notify",
+ "objc2 0.6.5",
+ "objc2-app-kit 0.3.2",
  "plist",
  "portable-pty",
  "quick-xml 0.38.4",

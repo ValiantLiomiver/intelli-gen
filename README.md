@@ -326,6 +326,10 @@ JDT LS ready recorded about 1.86 CPU seconds in the IDE and 0.25 in Java over
 18 wall seconds; these are separate process totals, not a benchmark. The native
 check used a disposable project, blocked external network and shared cache writes,
 and allowed writes only to its isolated JDT workspace within the app settings.
+On 2026-11-11, a native macOS quit check with a dirty disposable Java file
+verified that the system termination request opens the save confirmation;
+cancel kept the edit open, and discarding on a second request closed both the
+IDE and its JDT LS process without changing the file on disk.
 On 2026-11-09, a native accessibility smoke check launched the then-current debug
 build and opened a disposable Gradle project from the recent-project list. The
 project status, tree, and window title confirmed the result. A separate native

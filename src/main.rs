@@ -4,6 +4,8 @@ mod editor;
 mod git;
 mod i18n;
 mod java;
+#[cfg(target_os = "macos")]
+mod macos_quit;
 mod project;
 mod search;
 mod settings;
@@ -28,6 +30,8 @@ fn main() -> eframe::Result {
         "Intelli-gen",
         options,
         Box::new(move |cc| {
+            #[cfg(target_os = "macos")]
+            macos_quit::install(cc.egui_ctx.clone());
             install_bold_monospace_font(&cc.egui_ctx);
             let image =
                 eframe::icon_data::from_png_bytes(SPLASH).expect("embedded splash is valid");
@@ -61,6 +65,10 @@ struct StartupApp {
 impl eframe::App for StartupApp {
     fn logic(&mut self, ctx: &eframe::egui::Context, frame: &mut eframe::Frame) {
         if let Some(app) = &mut self.app {
+            #[cfg(target_os = "macos")]
+            if macos_quit::take_request() {
+                app.state.enqueue(app::events::AppEvent::RequestQuit);
+            }
             eframe::App::logic(app, ctx, frame);
         }
     }
@@ -87,6 +95,7 @@ impl eframe::App for StartupApp {
                 self.context.clone(),
                 self.startup_path.take(),
             ));
+            ui.ctx().request_repaint();
         }
         eframe::App::ui(self.app.as_mut().unwrap(), ui, frame);
     }
