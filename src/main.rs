@@ -59,6 +59,12 @@ struct StartupApp {
 }
 
 impl eframe::App for StartupApp {
+    fn logic(&mut self, ctx: &eframe::egui::Context, frame: &mut eframe::Frame) {
+        if let Some(app) = &mut self.app {
+            eframe::App::logic(app, ctx, frame);
+        }
+    }
+
     fn ui(&mut self, ui: &mut eframe::egui::Ui, frame: &mut eframe::Frame) {
         if !self.splash_frame_shown {
             eframe::egui::CentralPanel::default()
@@ -112,4 +118,29 @@ fn install_bold_monospace_font(context: &eframe::egui::Context) {
             .insert(family, vec![BOLD_MONOSPACE_FAMILY.into()]);
     }
     context.set_fonts(fonts);
+}
+
+#[cfg(test)]
+mod startup_tests {
+    #[test]
+    fn startup_wrapper_forwards_hidden_logic_to_the_workbench() {
+        let context = eframe::egui::Context::default();
+        let image = eframe::egui::ColorImage::new([1, 1], vec![eframe::egui::Color32::BLACK]);
+        let splash = context.load_texture("test-splash", image, Default::default());
+        let mut app = crate::app::IdeaLikeApp::new_with_context(context.clone(), None);
+        app.state
+            .enqueue(crate::app::events::AppEvent::Status("forwarded".into()));
+        let mut startup = super::StartupApp {
+            context: context.clone(),
+            startup_path: None,
+            splash,
+            splash_frame_shown: true,
+            app: Some(app),
+        };
+        let mut frame = eframe::Frame::_new_kittest();
+        let _ = context.run_logic(&eframe::egui::RawInput::default(), |ctx| {
+            eframe::App::logic(&mut startup, ctx, &mut frame);
+        });
+        assert_eq!(startup.app.unwrap().state.status, "forwarded");
+    }
 }

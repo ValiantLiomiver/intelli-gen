@@ -55,6 +55,17 @@ mod modal_accessibility_tests {
     use eframe::egui;
 
     #[test]
+    fn background_logic_processes_events_without_rendering() {
+        let context = egui::Context::default();
+        let mut app = super::IdeaLikeApp::new_with_context(context.clone(), None);
+        app.state.enqueue(super::events::AppEvent::Status(
+            "background complete".into(),
+        ));
+        let _ = context.run_logic(&egui::RawInput::default(), |ctx| app.advance(ctx));
+        assert_eq!(app.state.status, "background complete");
+    }
+
+    #[test]
     fn modal_dialog_has_accessible_bounds() {
         let context = egui::Context::default();
         context.enable_accesskit();
@@ -660,9 +671,9 @@ impl IdeaLikeApp {
     }
 }
 
-impl eframe::App for IdeaLikeApp {
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        if ui.ctx().input(|input| input.viewport().close_requested())
+impl IdeaLikeApp {
+    fn advance(&mut self, ctx: &egui::Context) {
+        if ctx.input(|input| input.viewport().close_requested())
             && (!self.state.quit_approved
                 || self.state.terminal.has_workers()
                 || self.state.build.has_workers()
@@ -694,8 +705,7 @@ impl eframe::App for IdeaLikeApp {
                 || self.state.debugger.has_workers()
                 || self.state.editor_io.has_workers())
         {
-            ui.ctx()
-                .send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             self.state.enqueue(AppEvent::RequestQuit);
         }
         for completion in self.state.editor_io.drain() {
@@ -829,6 +839,7 @@ impl eframe::App for IdeaLikeApp {
         if self.state.language.take_lombok_restart_request() {
             self.state.pending_language_restart = true;
         }
+        actions::process_events(ctx, &mut self.state);
         if self.state.pending_run.is_some()
             || self.state.terminal.has_workers()
             || self.state.build.has_workers()
@@ -861,25 +872,8 @@ impl eframe::App for IdeaLikeApp {
             || self.state.run.has_workers()
             || self.state.debugger.has_workers()
         {
-            ui.ctx()
-                .request_repaint_after(std::time::Duration::from_millis(40));
+            ctx.request_repaint_after(std::time::Duration::from_millis(40));
         }
-        actions::keyboard_shortcuts(ui.ctx(), &mut self.state);
-        actions::process_events(ui.ctx(), &mut self.state);
-        let workbench_enabled = !self.state.quit_approved;
-        ui.add_enabled_ui(workbench_enabled, |ui| layout::render(ui, &mut self.state));
-        if let Some(delay) = self
-            .state
-            .project_tree
-            .as_ref()
-            .and_then(crate::project::tree::ProjectTree::root_validation_delay)
-        {
-            ui.ctx().request_repaint_after(delay);
-        }
-        if !self.state.quit_approved {
-            self.state.language.sync_documents(&self.state.editor_tabs);
-        }
-        crate::editor::tabs::close_prompt(ui.ctx(), &mut self.state);
         if self.state.quit_approved {
             self.state.run_configuration_loader.shutdown();
             self.state.terminal.close();
@@ -938,12 +932,38 @@ impl eframe::App for IdeaLikeApp {
                 || self.state.debugger.has_workers()
             {
                 self.state.status = "Waiting for process cleanup before closing…".into();
-                ui.ctx()
-                    .request_repaint_after(std::time::Duration::from_millis(40));
+                ctx.request_repaint_after(std::time::Duration::from_millis(40));
             } else {
-                ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
         }
+        if !self.state.events.is_empty() {
+            ctx.request_repaint();
+        }
+    }
+}
+
+impl eframe::App for IdeaLikeApp {
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.advance(ctx);
+    }
+
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        actions::keyboard_shortcuts(ui.ctx(), &mut self.state);
+        let workbench_enabled = !self.state.quit_approved;
+        ui.add_enabled_ui(workbench_enabled, |ui| layout::render(ui, &mut self.state));
+        if let Some(delay) = self
+            .state
+            .project_tree
+            .as_ref()
+            .and_then(crate::project::tree::ProjectTree::root_validation_delay)
+        {
+            ui.ctx().request_repaint_after(delay);
+        }
+        if !self.state.quit_approved {
+            self.state.language.sync_documents(&self.state.editor_tabs);
+        }
+        crate::editor::tabs::close_prompt(ui.ctx(), &mut self.state);
         if !self.state.events.is_empty() {
             ui.ctx().request_repaint();
         }

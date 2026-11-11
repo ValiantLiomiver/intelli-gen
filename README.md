@@ -356,6 +356,12 @@ A second disposable Maven wrapper check confirmed that editing its POM did not
 run the wrapper before consent, but did start a reload after consent. Its wrapper
 deliberately failed; the Maven error stayed visible and a later POM edit did not
 start repeated retries. Java HTTP(S) proxy settings pointed to a closed local port.
+On 2026-11-11, a separate native check used the installed Maven 3.9.9 offline:
+after approval, editing the POM added a profile to the Maven panel automatically.
+A wrapper that rewrote a watched file triggered one follow-up, then stopped with
+a stale warning. A second check confirmed that a POM edit was processed and its
+new profile was ready while the IDE window was minimized. These runs denied
+network access and writes to the shared Maven cache and Intelli-gen settings/cache.
 
 For this test, use the `Main.java` with the `add` helper shown in the Maven
 fixture below, compiled into `bin/` with debug information. Use an Eclipse
