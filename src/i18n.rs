@@ -361,8 +361,12 @@ mod tests {
         let (italian, error) = Translator::load(LanguagePreference::Italian, None);
         assert!(error.is_none());
         assert_eq!(italian.message("Ln 12, Col 8"), "Riga 12, colonna 8");
-        assert_eq!(italian.message("2 matching lines; 1 unreadable, binary, non-UTF-8 or oversized files skipped; 3 unsaved open files missing from disk were not searched"),
-            "2 righe trovate; 1 file illeggibili, binari, non UTF-8 o troppo grandi ignorati; 3 file aperti non salvati e mancanti su disco non sono stati cercati");
+        assert_eq!(
+            italian.message(
+                "2 matching lines; 1 unreadable, binary, non-UTF-8 or oversized files skipped"
+            ),
+            "2 righe trovate; 1 file illeggibili, binari, non UTF-8 o troppo grandi ignorati"
+        );
     }
 
     #[test]

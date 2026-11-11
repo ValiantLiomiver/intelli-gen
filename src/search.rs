@@ -58,7 +58,6 @@ struct SearchResults {
     matches: Vec<SearchMatch>,
     skipped: usize,
     truncated: bool,
-    missing_open: usize,
 }
 
 #[derive(Default)]
@@ -361,12 +360,6 @@ impl ProjectSearch {
                             ""
                         }
                     );
-                    if results.missing_open > 0 {
-                        self.message.push_str(&format!(
-                            "; {} unsaved open files missing from disk were not searched",
-                            results.missing_open
-                        ));
-                    }
                     self.matches = results.matches;
                 }
                 Ok(SearchResponse::Replace(results)) => {
@@ -462,38 +455,92 @@ fn search(
                 }
             }
         };
-        for (index, line) in text.lines().enumerate() {
-            if cancelled() {
-                return Ok(results);
-            }
-            let matched =
-                crate::editor::find_replace::contains_text(line, &query.text, query.case_sensitive);
-            if matched {
-                results.matches.push(SearchMatch {
-                    path: path.clone(),
-                    line: index + 1,
-                    preview: line.chars().take(300).collect(),
-                });
-                if results.matches.len() == 5_000 {
-                    results.truncated = true;
-                    return Ok(results);
-                }
-            }
+        if append_search_matches(&mut results, &path, text, query, &cancelled) {
+            return Ok(results);
         }
     }
-    for path in buffers.keys() {
+    let mut matcher = walker
+        .build_matchers()
+        .into_iter()
+        .next()
+        .expect("one project root");
+    let mut missing: Vec<_> = buffers.into_iter().collect();
+    missing.sort_by(|left, right| left.0.cmp(&right.0));
+    for (path, text) in missing {
         if cancelled() {
             break;
         }
-        let relative = path.strip_prefix(&root).unwrap_or(path);
+        let relative = path.strip_prefix(&root).unwrap_or(&path);
         if (!query.file_globs.is_empty() && !globs.is_match(relative))
-            || !matches!(std::fs::symlink_metadata(path), Err(error) if error.kind() == std::io::ErrorKind::NotFound)
+            || relative
+                .components()
+                .any(|part| EXCLUDED.iter().any(|name| part.as_os_str() == *name))
+            || !matches!(std::fs::symlink_metadata(&path), Err(error) if error.kind() == std::io::ErrorKind::NotFound)
         {
             continue;
         }
-        results.missing_open += 1;
+        match missing_path_has_blocked_parent(&root, relative) {
+            Ok(true) => continue,
+            Ok(false) => {}
+            Err(_) => {
+                results.skipped += 1;
+                continue;
+            }
+        }
+        if matcher.matched(relative, false).is_ignore() {
+            continue;
+        }
+        if text.len() as u64 > MAX_SEARCH_FILE_BYTES || text.as_bytes().contains(&0) {
+            results.skipped += 1;
+            continue;
+        }
+        if append_search_matches(&mut results, &path, &text, query, &cancelled) {
+            break;
+        }
     }
     Ok(results)
+}
+
+fn missing_path_has_blocked_parent(root: &Path, relative: &Path) -> std::io::Result<bool> {
+    let mut current = root.to_path_buf();
+    if let Some(parent) = relative.parent() {
+        for part in parent.components() {
+            current.push(part.as_os_str());
+            match std::fs::symlink_metadata(&current) {
+                Ok(metadata) if !metadata.is_dir() => return Ok(true),
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+                Err(error) => return Err(error),
+            }
+        }
+    }
+    Ok(false)
+}
+
+fn append_search_matches(
+    results: &mut SearchResults,
+    path: &Path,
+    text: &str,
+    query: &SearchQuery,
+    cancelled: &impl Fn() -> bool,
+) -> bool {
+    for (index, line) in text.lines().enumerate() {
+        if cancelled() {
+            return true;
+        }
+        if crate::editor::find_replace::contains_text(line, &query.text, query.case_sensitive) {
+            results.matches.push(SearchMatch {
+                path: path.to_path_buf(),
+                line: index + 1,
+                preview: line.chars().take(300).collect(),
+            });
+            if results.matches.len() == 5_000 {
+                results.truncated = true;
+                return true;
+            }
+        }
+    }
+    false
 }
 
 #[cfg(test)]
@@ -537,7 +584,212 @@ mod search_buffer_tests {
         assert_eq!(fresh.matches.len(), 1);
         std::fs::remove_file(&path).unwrap();
         let missing = search(&root, &query("unsaved"), snapshots(), || false).unwrap();
-        assert_eq!(missing.missing_open, 1);
+        assert_eq!(missing.matches.len(), 1);
+        assert_eq!(missing.matches[0].path, path);
+        assert_eq!(missing.matches[0].line, 2);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn missing_open_buffers_respect_project_exclusions_and_ignore_rules() {
+        let root = std::env::temp_dir().join(format!(
+            "intelli-gen-search-missing-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(root.join("ignored")).unwrap();
+        std::fs::create_dir_all(root.join("target")).unwrap();
+        std::fs::create_dir_all(root.join("nested")).unwrap();
+        std::fs::write(root.join(".ignore"), "ignored/\n*.secret\n").unwrap();
+        std::fs::write(root.join("nested/.gitignore"), "*.java\n!Keep.java\n").unwrap();
+        let root = root.canonicalize().unwrap();
+        let documents = || {
+            [
+                "Missing.java",
+                "ignored/Hidden.java",
+                "target/Generated.java",
+                "key.secret",
+                "nested/Drop.java",
+                "nested/Keep.java",
+                "removed-directory/StillOpen.java",
+            ]
+            .into_iter()
+            .map(|name| OpenDocumentSnapshot {
+                path: root.join(name),
+                revision: 1,
+                text: Some("needle\n".into()),
+            })
+            .collect()
+        };
+        let mut query = SearchQuery {
+            text: "needle".into(),
+            case_sensitive: true,
+            file_globs: Vec::new(),
+        };
+        let result = search(&root, &query, documents(), || false).unwrap();
+        let paths: std::collections::HashSet<_> = result
+            .matches
+            .iter()
+            .map(|found| found.path.clone())
+            .collect();
+        assert_eq!(
+            paths,
+            std::collections::HashSet::from([
+                root.join("Missing.java"),
+                root.join("nested/Keep.java"),
+                root.join("removed-directory/StillOpen.java"),
+            ])
+        );
+        query.file_globs = vec!["*.txt".into()];
+        assert!(
+            search(&root, &query, documents(), || false)
+                .unwrap()
+                .matches
+                .is_empty()
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn missing_buffer_result_navigates_to_the_existing_editor() {
+        let root = std::env::temp_dir().join(format!(
+            "intelli-gen-search-navigation-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let root = root.canonicalize().unwrap();
+        let path = root.join("Main.java");
+        std::fs::write(&path, "original\n").unwrap();
+        let mut document = crate::editor::Document::load(&path).unwrap();
+        document.text = "first\nneedle\n".into();
+        document.mark_changed();
+        std::fs::remove_file(&path).unwrap();
+        let context = egui::Context::default();
+        let mut app = crate::app::IdeaLikeApp::new_with_context(context.clone(), None);
+        app.state
+            .editor_tabs
+            .push(crate::editor::EditorTab::new(document));
+        app.state.search.start(
+            root.clone(),
+            SearchQuery {
+                text: "needle".into(),
+                case_sensitive: true,
+                file_globs: Vec::new(),
+            },
+            vec![OpenDocumentSnapshot {
+                path: path.clone(),
+                revision: app.state.editor_tabs[0].document.revision,
+                text: Some(app.state.editor_tabs[0].document.text.clone()),
+            }],
+        );
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while app.state.search.running {
+            app.state.search.poll(&app.state.editor_tabs);
+            assert!(
+                std::time::Instant::now() < deadline,
+                "search did not finish"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(app.state.search.matches.len(), 1);
+        let generation = app.state.search.generation.load(Ordering::Relaxed);
+        app.state.enqueue(crate::app::events::AppEvent::Search(
+            crate::app::events::SearchAction::OpenResult {
+                path,
+                line: 2,
+                generation,
+            },
+        ));
+        crate::app::actions::process_events(&context, &mut app.state);
+        assert_eq!(app.state.active_tab, Some(0));
+        assert!(app.state.loading_files.is_empty());
+        assert_eq!(app.state.editor_tabs[0].document.text, "first\nneedle\n");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn missing_buffer_under_replaced_symlink_is_not_searched() {
+        use std::os::unix::fs::symlink;
+        let root = std::env::temp_dir().join(format!(
+            "intelli-gen-search-replaced-link-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(root.join("actual")).unwrap();
+        let root = root.canonicalize().unwrap();
+        symlink(root.join("actual"), root.join("link")).unwrap();
+        let snapshots = vec![OpenDocumentSnapshot {
+            path: root.join("link/Missing.java"),
+            revision: 1,
+            text: Some("needle".into()),
+        }];
+        let query = SearchQuery {
+            text: "needle".into(),
+            case_sensitive: true,
+            file_globs: Vec::new(),
+        };
+        let result = search(&root, &query, snapshots, || false).unwrap();
+        assert!(result.matches.is_empty());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn missing_buffers_use_same_partial_ignore_rules_as_disk_files() {
+        let root = std::env::temp_dir().join(format!(
+            "intelli-gen-search-bad-ignore-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join(".ignore"), "[z-a]\nignored.java\n").unwrap();
+        std::fs::write(root.join("existing.java"), "needle\n").unwrap();
+        let root = root.canonicalize().unwrap();
+        let mut matcher = project_walker(&root).build_matchers().remove(0);
+        assert!(
+            matcher.matched_with_errors("first.java", false).1.is_some(),
+            "fixture must contain an invalid ignore rule"
+        );
+        let documents = ["first.java", "second.java", "ignored.java"]
+            .into_iter()
+            .map(|name| OpenDocumentSnapshot {
+                path: root.join(name),
+                revision: 1,
+                text: Some("needle\n".into()),
+            })
+            .collect();
+        let query = SearchQuery {
+            text: "needle".into(),
+            case_sensitive: true,
+            file_globs: Vec::new(),
+        };
+        let result = search(&root, &query, documents, || false).unwrap();
+        let paths: std::collections::HashSet<_> = result
+            .matches
+            .iter()
+            .map(|found| found.path.clone())
+            .collect();
+        assert_eq!(
+            paths,
+            std::collections::HashSet::from([
+                root.join("existing.java"),
+                root.join("first.java"),
+                root.join("second.java"),
+            ])
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 
