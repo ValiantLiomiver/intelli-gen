@@ -232,6 +232,289 @@ fn java_completion_trigger(
 mod completion_trigger_tests {
     use super::*;
 
+    fn frame(context: &egui::Context, tab: &mut EditorTab, time: f64, events: Vec<egui::Event>) {
+        let mut output = context.run_ui(
+            egui::RawInput {
+                time: Some(time),
+                events,
+                ..Default::default()
+            },
+            |ui| {
+                tab.render_editor(
+                    ui,
+                    true,
+                    &[],
+                    &[],
+                    &[],
+                    &[],
+                    &Default::default(),
+                    None,
+                    &[],
+                    None,
+                    &[],
+                    4,
+                    4,
+                    true,
+                    None,
+                    None,
+                );
+            },
+        );
+        output.textures_delta.clear();
+    }
+
+    #[test]
+    fn deleting_crlf_joins_lines_without_leaving_carriage_return() {
+        for (key, cursor) in [(egui::Key::Backspace, 4), (egui::Key::Delete, 2)] {
+            for (name, large) in [
+                ("Main.java", false),
+                ("notes.txt", false),
+                ("Main.java", true),
+            ] {
+                let context = egui::Context::default();
+                let prefix = if large {
+                    "x\r\n".repeat(90_000)
+                } else {
+                    String::new()
+                };
+                let original = format!("{prefix}a😀\r\nb");
+                let expected = format!("{prefix}a😀b");
+                let document = Document {
+                    path: PathBuf::from("/project").join(name),
+                    text: original.clone(),
+                    saved_text: original.clone(),
+                    cursor_line: 1,
+                    cursor_column: 1,
+                    revision: 0,
+                };
+                let mut tab = EditorTab::new(document);
+                tab.pending_character_index = Some(prefix.chars().count() + cursor);
+                frame(&context, &mut tab, 0.0, vec![]);
+                frame(
+                    &context,
+                    &mut tab,
+                    0.02,
+                    vec![egui::Event::Key {
+                        key,
+                        physical_key: None,
+                        pressed: true,
+                        repeat: false,
+                        modifiers: egui::Modifiers::NONE,
+                    }],
+                );
+                assert!(
+                    tab.document.text == expected,
+                    "{key:?}, {name}, large={large}"
+                );
+                frame(
+                    &context,
+                    &mut tab,
+                    0.04,
+                    vec![egui::Event::Key {
+                        key: egui::Key::Z,
+                        physical_key: None,
+                        pressed: true,
+                        repeat: false,
+                        modifiers: egui::Modifiers::COMMAND,
+                    }],
+                );
+                assert!(
+                    tab.document.text == original,
+                    "undo {key:?}, {name}, large={large}"
+                );
+                frame(
+                    &context,
+                    &mut tab,
+                    0.06,
+                    vec![egui::Event::Key {
+                        key: egui::Key::Z,
+                        physical_key: None,
+                        pressed: true,
+                        repeat: false,
+                        modifiers: egui::Modifiers {
+                            shift: true,
+                            ..egui::Modifiers::COMMAND
+                        },
+                    }],
+                );
+                assert!(
+                    tab.document.text == expected,
+                    "redo {key:?}, {name}, large={large}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn crlf_deletion_preserves_repeated_keys_and_modified_shortcuts() {
+        let context = egui::Context::default();
+        let document = Document {
+            path: "/project/Main.java".into(),
+            text: "a\r\nb".into(),
+            saved_text: "a\r\nb".into(),
+            cursor_line: 1,
+            cursor_column: 1,
+            revision: 0,
+        };
+        let mut tab = EditorTab::new(document);
+        tab.pending_character_index = Some(3);
+        frame(&context, &mut tab, 0.0, vec![]);
+        let backspace = egui::Event::Key {
+            key: egui::Key::Backspace,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        };
+        frame(&context, &mut tab, 0.02, vec![backspace.clone(), backspace]);
+        assert_eq!(tab.document.text, "b");
+
+        let context = egui::Context::default();
+        let mut tab = EditorTab::new(Document {
+            path: "/project/Main.java".into(),
+            text: "a\r\nb".into(),
+            saved_text: "a\r\nb".into(),
+            cursor_line: 1,
+            cursor_column: 1,
+            revision: 0,
+        });
+        tab.pending_character_index = Some(4);
+        frame(&context, &mut tab, 0.0, vec![]);
+        frame(
+            &context,
+            &mut tab,
+            0.02,
+            vec![
+                egui::Event::Key {
+                    key: egui::Key::ArrowLeft,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                },
+                egui::Event::Key {
+                    key: egui::Key::Backspace,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+        );
+        assert_eq!(tab.document.text, "ab");
+
+        for key in [egui::Key::Backspace, egui::Key::Delete] {
+            let context = egui::Context::default();
+            let cursor = if key == egui::Key::Backspace { 3 } else { 1 };
+            let mut expected = "a\r\nb".to_owned();
+            if key == egui::Key::Backspace {
+                egui::TextBuffer::delete_previous_word(
+                    &mut expected,
+                    egui::text::CCursor::new(cursor),
+                );
+            } else {
+                egui::TextBuffer::delete_next_word(&mut expected, egui::text::CCursor::new(cursor));
+            }
+            let document = Document {
+                path: "/project/Main.java".into(),
+                text: "a\r\nb".into(),
+                saved_text: "a\r\nb".into(),
+                cursor_line: 1,
+                cursor_column: 1,
+                revision: 0,
+            };
+            let mut tab = EditorTab::new(document);
+            tab.pending_character_index = Some(cursor);
+            frame(&context, &mut tab, 0.0, vec![]);
+            frame(
+                &context,
+                &mut tab,
+                0.02,
+                vec![egui::Event::Key {
+                    key,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::ALT,
+                }],
+            );
+            assert_eq!(tab.document.text, expected, "{key:?} with Alt");
+        }
+    }
+
+    #[test]
+    fn paged_editor_does_not_split_crlf_at_page_limit() {
+        let context = egui::Context::default();
+        let text = format!(
+            "{}\r\n{}",
+            "x".repeat(EDITOR_PAGE_BYTES - 1),
+            "y".repeat(PAGED_EDITOR_BYTES)
+        );
+        let document = Document {
+            path: "/project/large.txt".into(),
+            saved_text: text.clone(),
+            text,
+            cursor_line: 1,
+            cursor_column: 1,
+            revision: 0,
+        };
+        let mut tab = EditorTab::new(document);
+        frame(&context, &mut tab, 0.0, vec![]);
+        assert_eq!(tab.page_end, EDITOR_PAGE_BYTES - 1);
+    }
+
+    #[test]
+    fn undo_reverts_automatically_inserted_java_pair() {
+        let context = egui::Context::default();
+        let document = Document {
+            path: PathBuf::from("/project/Main.java"),
+            text: String::new(),
+            saved_text: String::new(),
+            cursor_line: 1,
+            cursor_column: 1,
+            revision: 0,
+        };
+        let mut tab = EditorTab::new(document);
+        tab.pending_character_index = Some(0);
+        frame(&context, &mut tab, 0.0, vec![]);
+        frame(
+            &context,
+            &mut tab,
+            0.02,
+            vec![egui::Event::Text("(".into())],
+        );
+        assert_eq!(tab.document.text, "()");
+        frame(
+            &context,
+            &mut tab,
+            0.04,
+            vec![egui::Event::Key {
+                key: egui::Key::Z,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::COMMAND,
+            }],
+        );
+        assert_eq!(tab.document.text, "");
+        frame(
+            &context,
+            &mut tab,
+            0.06,
+            vec![egui::Event::Key {
+                key: egui::Key::Z,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers {
+                    shift: true,
+                    ..egui::Modifiers::COMMAND
+                },
+            }],
+        );
+        assert_eq!(tab.document.text, "()");
+    }
+
     #[test]
     fn character_navigation_requests_scroll_to_target_line() {
         let document = Document {
@@ -271,6 +554,44 @@ enum JavaPairEdit {
     None,
     SkippedClosing,
     InsertedPair,
+}
+
+struct CrlfTextBuffer<'a>(&'a mut String);
+
+impl egui::TextBuffer for CrlfTextBuffer<'_> {
+    fn is_mutable(&self) -> bool {
+        true
+    }
+    fn as_str(&self) -> &str {
+        self.0
+    }
+    fn insert_text(&mut self, text: &str, index: egui::text::CharIndex) -> usize {
+        egui::TextBuffer::insert_text(self.0, text, index)
+    }
+    fn delete_char_range(&mut self, range: std::ops::Range<egui::text::CharIndex>) {
+        egui::TextBuffer::delete_char_range(self.0, range);
+    }
+    fn delete_previous_char(&mut self, cursor: egui::text::CCursor) -> egui::text::CCursor {
+        let byte = byte_index(self.0, cursor.index.into());
+        if self.0[..byte].ends_with("\r\n") {
+            self.0.replace_range(byte - 2..byte, "");
+            egui::text::CCursor::new(usize::from(cursor.index) - 2)
+        } else {
+            egui::TextBuffer::delete_previous_char(self.0, cursor)
+        }
+    }
+    fn delete_next_char(&mut self, cursor: egui::text::CCursor) -> egui::text::CCursor {
+        let byte = byte_index(self.0, cursor.index.into());
+        if self.0[byte..].starts_with("\r\n") {
+            self.0.replace_range(byte..byte + 2, "");
+            cursor
+        } else {
+            egui::TextBuffer::delete_next_char(self.0, cursor)
+        }
+    }
+    fn type_id(&self) -> std::any::TypeId {
+        std::any::TypeId::of::<CrlfTextBuffer<'static>>()
+    }
 }
 
 fn auto_delete_java_pair(ui: &egui::Ui, text: &mut String, editor_id: egui::Id) -> bool {
@@ -1127,7 +1448,8 @@ impl EditorTab {
                 ui.horizontal_top(|ui| {
                     ui.spacing_mut().item_spacing.x = 0.0;
                     ui.allocate_exact_size(egui::vec2(58.0, 0.0), egui::Sense::hover());
-                    let output = egui::TextEdit::multiline(&mut self.document.text)
+                    let mut buffer = CrlfTextBuffer(&mut self.document.text);
+                    let output = egui::TextEdit::multiline(&mut buffer)
                         .id(editor_id)
                         .code_editor()
                         .font(egui::FontId::monospace(14.0))
@@ -1416,7 +1738,9 @@ impl EditorTab {
             let line_start = self.document.text[..target]
                 .rfind('\n')
                 .map_or(0, |newline| newline + 1);
-            if target - line_start <= EDITOR_PAGE_BYTES {
+            if target == line_start && self.document.text[..target].ends_with("\r\n") {
+                line_start - 2
+            } else if target - line_start <= EDITOR_PAGE_BYTES {
                 line_start
             } else {
                 target
@@ -1493,6 +1817,20 @@ impl EditorTab {
             .min(self.page_start + EDITOR_PAGE_BYTES);
         while !self.document.text.is_char_boundary(self.page_end) {
             self.page_end -= 1;
+        }
+        let bytes = self.document.text.as_bytes();
+        if self.page_start > 0
+            && bytes.get(self.page_start - 1..self.page_start + 1) == Some(b"\r\n")
+        {
+            self.page_start -= 1;
+        }
+        if self.page_end > self.page_start
+            && bytes.get(self.page_end - 1..self.page_end + 1) == Some(b"\r\n")
+        {
+            self.page_end -= 1;
+        }
+        if reset && self.document.text[..self.page_start].ends_with("\r\n") {
+            self.page_start -= 2;
         }
         let editor_id = egui::Id::new(("paged_source_editor", &self.path));
         if reset {
@@ -1596,7 +1934,8 @@ impl EditorTab {
                 ui.horizontal_top(|ui| {
                     ui.spacing_mut().item_spacing.x = 0.0;
                     ui.allocate_exact_size(egui::vec2(58.0, 0.0), egui::Sense::hover());
-                    let output = egui::TextEdit::multiline(&mut page)
+                    let mut buffer = CrlfTextBuffer(&mut page);
+                    let output = egui::TextEdit::multiline(&mut buffer)
                         .id(editor_id)
                         .code_editor()
                         .font(egui::FontId::monospace(14.0))
