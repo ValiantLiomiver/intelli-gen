@@ -841,7 +841,6 @@ impl IdeaLikeApp {
         }
         actions::process_events(ctx, &mut self.state);
         if self.state.pending_run.is_some()
-            || self.state.terminal.has_workers()
             || self.state.build.has_workers()
             || self.state.project_open_loader.has_workers()
             || self.state.project_tree_loader.has_workers()
@@ -855,24 +854,27 @@ impl IdeaLikeApp {
             || self.state.maven_view_loader.has_workers()
             || self.state.gradle_task_loader.has_workers()
             || self.state.maven_cache_loader.has_workers()
-            || self
-                .state
-                .maven_pom_watcher
-                .as_ref()
-                .is_some_and(crate::project::maven_watch::MavenPomWatcher::has_worker)
             || !self.state.retiring_maven_watchers.is_empty()
-            || self
-                .state
-                .project_tree_watcher
-                .as_ref()
-                .is_some_and(crate::project::tree_watch::ProjectTreeWatcher::has_worker)
             || !self.state.retiring_project_tree_watchers.is_empty()
-            || self.state.language.has_workers()
             || self.state.language.has_pending_start()
             || self.state.run.has_workers()
             || self.state.debugger.has_workers()
         {
             ctx.request_repaint_after(std::time::Duration::from_millis(40));
+        } else if self.state.terminal.has_workers()
+            || self.state.language.has_workers()
+            || self
+                .state
+                .maven_pom_watcher
+                .as_ref()
+                .is_some_and(crate::project::maven_watch::MavenPomWatcher::has_worker)
+            || self
+                .state
+                .project_tree_watcher
+                .as_ref()
+                .is_some_and(crate::project::tree_watch::ProjectTreeWatcher::has_worker)
+        {
+            ctx.request_repaint_after(std::time::Duration::from_millis(250));
         }
         if self.state.quit_approved {
             self.state.run_configuration_loader.shutdown();

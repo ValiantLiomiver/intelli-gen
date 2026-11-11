@@ -362,6 +362,12 @@ A wrapper that rewrote a watched file triggered one follow-up, then stopped with
 a stale warning. A second check confirmed that a POM edit was processed and its
 new profile was ready while the IDE window was minimized. These runs denied
 network access and writes to the shared Maven cache and Intelli-gen settings/cache.
+An idle-process spot check on the same macOS host compared a visible disposable
+Maven workspace before and after reducing idle polling: the IDE process used
+about 4.3 CPU seconds over 16 wall seconds before, and 1.6 over 18 after. This
+is a short local observation, not a benchmark; child processes were not included.
+The project tree still reflected a new file, and a POM change was noticed while
+the window was minimized.
 
 For this test, use the `Main.java` with the `add` helper shown in the Maven
 fixture below, compiled into `bin/` with debug information. Use an Eclipse

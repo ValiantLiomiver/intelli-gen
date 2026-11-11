@@ -680,27 +680,41 @@ pub struct LanguageUpdate {
 struct LanguageEventSender {
     generation: u64,
     sender: mpsc::Sender<LanguageUpdate>,
+    repaint_context: Option<eframe::egui::Context>,
 }
 impl LanguageEventSender {
     async fn send(
         &self,
         event: LanguageEvent,
     ) -> Result<(), mpsc::error::SendError<LanguageUpdate>> {
-        self.sender
+        let result = self
+            .sender
             .send(LanguageUpdate {
                 generation: self.generation,
                 event,
             })
-            .await
+            .await;
+        if result.is_ok()
+            && let Some(context) = &self.repaint_context
+        {
+            context.request_repaint();
+        }
+        result
     }
     fn blocking_send(
         &self,
         event: LanguageEvent,
     ) -> Result<(), mpsc::error::SendError<LanguageUpdate>> {
-        self.sender.blocking_send(LanguageUpdate {
+        let result = self.sender.blocking_send(LanguageUpdate {
             generation: self.generation,
             event,
-        })
+        });
+        if result.is_ok()
+            && let Some(context) = &self.repaint_context
+        {
+            context.request_repaint();
+        }
+        result
     }
 }
 
@@ -761,6 +775,49 @@ fn main_project_name(
 #[cfg(test)]
 mod main_project_tests {
     use super::*;
+
+    #[test]
+    fn language_event_wakes_the_workbench() {
+        let context = eframe::egui::Context::default();
+        let wakeups = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed = wakeups.clone();
+        context.set_request_repaint_callback(move |_| {
+            observed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        });
+        let (sender, mut receiver) = mpsc::channel(1);
+        let sender = LanguageEventSender {
+            generation: 7,
+            sender,
+            repaint_context: Some(context),
+        };
+        sender
+            .blocking_send(LanguageEvent::ServerState("ready".into()))
+            .unwrap();
+        assert_eq!(receiver.try_recv().unwrap().generation, 7);
+        assert!(wakeups.load(std::sync::atomic::Ordering::Relaxed) > 0);
+    }
+
+    #[tokio::test]
+    async fn async_language_event_wakes_the_workbench() {
+        let context = eframe::egui::Context::default();
+        let wakeups = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed = wakeups.clone();
+        context.set_request_repaint_callback(move |_| {
+            observed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        });
+        let (sender, mut receiver) = mpsc::channel(1);
+        let sender = LanguageEventSender {
+            generation: 9,
+            sender,
+            repaint_context: Some(context),
+        };
+        sender
+            .send(LanguageEvent::ServerState("ready".into()))
+            .await
+            .unwrap();
+        assert_eq!(receiver.try_recv().unwrap().generation, 9);
+        assert!(wakeups.load(std::sync::atomic::Ordering::Relaxed) > 0);
+    }
 
     #[tokio::test]
     #[ignore = "requires disposable INTELLI_GEN_DAP_PROJECT, GRADLE_USER_HOME, INTELLI_GEN_JAVA_HOME and INTELLI_GEN_JAVA_RESOURCES"]
@@ -1574,20 +1631,25 @@ impl JavaLanguageService {
         project: &ProjectModel,
         config: &JdtlsConfig,
     ) -> Result<LanguageSession, LspError> {
-        Self::start_for_generation(project, config, 0)
+        Self::start_for_generation(project, config, 0, None)
     }
 
     fn start_for_generation(
         project: &ProjectModel,
         config: &JdtlsConfig,
         generation: u64,
+        repaint_context: Option<eframe::egui::Context>,
     ) -> Result<LanguageSession, LspError> {
         let project = project.clone();
         let config = config.clone();
         let debug_bundle = config.debug_bundle.clone();
         let (commands, requests) = mpsc::channel(64);
         let (sender, events) = mpsc::channel(128);
-        let sender = LanguageEventSender { generation, sender };
+        let sender = LanguageEventSender {
+            generation,
+            sender,
+            repaint_context,
+        };
         let (shutdown, cancellation) = watch::channel(false);
         let worker = std::thread::Builder::new()
             .name("java-language".into())
@@ -4170,6 +4232,7 @@ impl LanguageTool {
                         &project,
                         &config,
                         self.generation,
+                        self.repaint_context.clone(),
                     ) {
                         Ok(session) => {
                             self.gradle_import_warning = (project.kind == crate::project::ProjectKind::Gradle && config.gradle_home.is_none()).then(||
