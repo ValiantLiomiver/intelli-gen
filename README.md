@@ -131,6 +131,9 @@ directly does not identify a build located outside its ancestor directories;
 open the build root to use such a module.
 The ignored `live_gradle_worker_builds_enclosing_project_from_nested_module`
 test also passed using the real build worker and a fresh two-module project.
+It then replaces `app`'s `Main.java` with invalid code and checks that the worker
+reports the source path and line from the failed compilation; use a disposable
+project because this overwrites that file.
 To repeat it, set `INTELLI_GEN_GRADLE_PROJECT` to a disposable project with
 `app` and `lib` Java modules, `Main.java` and `Library.java` in their default
 source roots, and no existing class files. Its executable `gradlew` must invoke

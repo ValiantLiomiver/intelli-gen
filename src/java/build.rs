@@ -531,6 +531,55 @@ mod gradle_argument_tests {
         assert!(output.contains("BUILD SUCCESSFUL"), "{output}");
         assert!(app_class.is_file());
         assert!(lib_class.is_file());
+
+        let source = root.join("app/src/main/java/Main.java");
+        std::fs::write(&source, "class Main { MissingType value; }\n").unwrap();
+        let mut handle = BuildService::start_with_executable(
+            BuildRequest {
+                project: ProjectModel::discover(&workspace).unwrap(),
+                jdk: crate::java::jdk::JdkCatalog::add(&home).unwrap(),
+                task: BuildTask::Build,
+                gradle_offline: true,
+                module: None,
+                test_task: None,
+                test_filter: None,
+            },
+            Some(Path::new("/missing-configured-gradle")),
+        )
+        .unwrap();
+        let mut diagnostics = Vec::new();
+        tokio::time::timeout(Duration::from_secs(120), async {
+            loop {
+                match handle.events.recv().await.expect("build worker event") {
+                    BuildEvent::Diagnostic(diagnostic) => diagnostics.push(diagnostic),
+                    BuildEvent::Finished {
+                        exit_code,
+                        cancelled,
+                        error,
+                        ..
+                    } => {
+                        assert!(exit_code.is_some_and(|code| code != 0), "{error:?}");
+                        assert!(!cancelled);
+                        assert!(error.is_none(), "{error:?}");
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .expect("failed Gradle worker completed before timeout");
+        handle.worker.take().unwrap().join().unwrap();
+        assert!(
+            diagnostics
+                .iter()
+                .any(
+                    |diagnostic| diagnostic.path.as_deref() == Some(source.as_path())
+                        && diagnostic.line == Some(1)
+                        && diagnostic.message.contains("cannot find symbol")
+                ),
+            "{diagnostics:?}"
+        );
     }
 
     #[tokio::test]
