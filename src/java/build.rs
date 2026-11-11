@@ -1351,8 +1351,81 @@ fn test_source_line(stack_trace: &str, class_name: &str) -> Option<usize> {
 }
 
 #[cfg(test)]
-mod test_source_line_tests {
+mod build_ui_and_report_tests {
     use super::*;
+
+    #[test]
+    fn build_test_button_accessibility_click_enqueues_build() {
+        use crate::app::events::{AppEvent, BuildAction};
+        let context = egui::Context::default();
+        context.enable_accesskit();
+        let mut app = crate::app::IdeaLikeApp::new_with_context(context.clone(), None);
+        let root = PathBuf::from("/project");
+        app.state.project = Some(crate::project::Project {
+            root: root.clone(),
+            kind: ProjectKind::Gradle,
+            display_name: "project".into(),
+            discovery_error: None,
+            model: Some(ProjectModel {
+                root: root.clone(),
+                kind: ProjectKind::Gradle,
+                name: "project".into(),
+                modules: vec![],
+                wrapper: Some(root.join("gradlew")),
+            }),
+        });
+        app.state.translator =
+            crate::i18n::Translator::load(crate::i18n::LanguagePreference::English, None).0;
+        crate::i18n::install(&context, &app.state.translator);
+        let mut button = None;
+        let mut clicked = false;
+        for _ in 0..5 {
+            let mut events = Vec::new();
+            if !clicked && let Some(target_node) = button {
+                events.push(egui::Event::AccessKitActionRequest(
+                    egui::accesskit::ActionRequest {
+                        action: egui::accesskit::Action::Click,
+                        target_tree: egui::accesskit::TreeId::ROOT,
+                        target_node,
+                        data: None,
+                    },
+                ));
+                clicked = true;
+            }
+            let mut output = context.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1000.0, 700.0),
+                    )),
+                    events,
+                    ..Default::default()
+                },
+                |root| crate::app::layout::render(root, &mut app.state),
+            );
+            if let Some(update) = output.platform_output.accesskit_update.take() {
+                for (id, node) in update.nodes {
+                    if node.role() == egui::Role::Button
+                        && node.label() == Some("Test")
+                        && node.supports_action(egui::accesskit::Action::Click)
+                    {
+                        button = Some(id);
+                    }
+                }
+            }
+            output.textures_delta.clear();
+        }
+        assert!(
+            clicked
+                && app
+                    .state
+                    .events
+                    .iter()
+                    .any(|event| matches!(event, AppEvent::Build(BuildAction::Test)))
+        );
+        crate::app::actions::process_events(&context, &mut app.state);
+        assert!(app.state.pending_wrapper_approval.is_some());
+    }
 
     #[test]
     fn ignores_frames_from_same_named_class_in_another_package() {
