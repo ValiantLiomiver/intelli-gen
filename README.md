@@ -141,6 +141,11 @@ an installed Gradle offline; a standard wrapper may download its distribution
 even with `--offline`. Set `INTELLI_GEN_BUILD_JAVA_HOME` to a compatible JDK and
 `GRADLE_USER_HOME` to a disposable directory, then run the test with `--ignored`.
 It also passed with `app` linked to a directory inside the build.
+When Gradle prints no test totals, the Build panel uses fresh Gradle XML reports
+for the reported totals; console totals take precedence to avoid double counting.
+The optional `live_gradle_worker_reports_passing_tests_from_xml` test requires a
+disposable Gradle project with one passing and one skipped JUnit test, an offline
+wrapper and the same JDK and Gradle environment variables described above.
 
 For Maven, opening a module declared directly in an ancestor reactor keeps the
 opened directory as the workspace and discovers the reactor and its wrapper.

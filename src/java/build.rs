@@ -69,6 +69,7 @@ pub enum BuildEvent {
     },
     Diagnostic(BuildDiagnostic),
     Tests(diagnostics::TestSummary),
+    ReportTests(diagnostics::TestSummary),
     TestFailures(Vec<TestFailure>),
     Finished {
         exit_code: Option<i32>,
@@ -102,6 +103,14 @@ struct TestReportFile {
 struct XmlTestReport {
     #[serde(rename = "@name")]
     name: Option<String>,
+    #[serde(rename = "@tests")]
+    tests: Option<u32>,
+    #[serde(rename = "@failures", default)]
+    failures: u32,
+    #[serde(rename = "@errors", default)]
+    errors: u32,
+    #[serde(rename = "@skipped", default)]
+    skipped: u32,
     #[serde(rename = "testsuite", default)]
     suites: Vec<XmlTestReport>,
     #[serde(rename = "testcase", default)]
@@ -472,6 +481,59 @@ fn valid_gradle_task_path(path: &str) -> bool {
 #[cfg(test)]
 mod gradle_argument_tests {
     use super::*;
+
+    #[tokio::test]
+    #[ignore = "requires disposable INTELLI_GEN_GRADLE_PROJECT with passing Gradle tests, offline gradlew and INTELLI_GEN_BUILD_JAVA_HOME"]
+    async fn live_gradle_worker_reports_passing_tests_from_xml() {
+        let root = PathBuf::from(std::env::var_os("INTELLI_GEN_GRADLE_PROJECT").unwrap());
+        let home = PathBuf::from(std::env::var_os("INTELLI_GEN_BUILD_JAVA_HOME").unwrap());
+        let mut handle = BuildService::start_with_executable(
+            BuildRequest {
+                project: ProjectModel::discover(&root).unwrap(),
+                jdk: crate::java::jdk::JdkCatalog::add(&home).unwrap(),
+                task: BuildTask::Test,
+                gradle_offline: true,
+                module: None,
+                test_task: None,
+                test_filter: None,
+            },
+            Some(Path::new("/missing-configured-gradle")),
+        )
+        .unwrap();
+        let mut summary = None;
+        let mut output = String::new();
+        tokio::time::timeout(Duration::from_secs(120), async {
+            loop {
+                match handle.events.recv().await.expect("build worker event") {
+                    BuildEvent::Output { text, .. } => output.push_str(&text),
+                    BuildEvent::ReportTests(tests) => summary = Some(tests),
+                    BuildEvent::Finished {
+                        exit_code,
+                        cancelled,
+                        error,
+                        ..
+                    } => {
+                        assert_eq!(exit_code, Some(0), "{error:?}\n{output}");
+                        assert!(!cancelled);
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .expect("Gradle worker completed before timeout");
+        handle.worker.take().unwrap().join().unwrap();
+        assert_eq!(
+            summary,
+            Some(diagnostics::TestSummary {
+                total: 2,
+                passed: 1,
+                failed: 0,
+                skipped: 1
+            })
+        );
+    }
 
     #[tokio::test]
     #[ignore = "requires INTELLI_GEN_GRADLE_PROJECT disposable two-module fixture with offline gradlew and INTELLI_GEN_BUILD_JAVA_HOME"]
@@ -935,9 +997,12 @@ async fn run(
         Err(error) => (None, Some(error)),
     };
     if !cancelled {
-        let failures = collect_test_failures(&project, started_at);
+        let (failures, summary) = collect_test_failures(&project, started_at);
         if !failures.is_empty() {
             let _ = events.send(BuildEvent::TestFailures(failures)).await;
+        }
+        if let Some(summary) = summary {
+            let _ = events.send(BuildEvent::ReportTests(summary)).await;
         }
     }
     let _ = events
@@ -956,7 +1021,10 @@ const MAX_TEST_REPORT_BYTES: u64 = 1024 * 1024;
 const MAX_TEST_REPORT_TOTAL_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_TEST_FAILURES: usize = 1000;
 
-fn collect_test_failures(project: &ProjectModel, started_at: SystemTime) -> Vec<TestFailure> {
+fn collect_test_failures(
+    project: &ProjectModel,
+    started_at: SystemTime,
+) -> (Vec<TestFailure>, Option<diagnostics::TestSummary>) {
     let mut modules = vec![project.root.clone()];
     modules.extend(project.modules.iter().map(|module| {
         if module.root.is_absolute() {
@@ -1012,7 +1080,7 @@ fn collect_test_failures(project: &ProjectModel, started_at: SystemTime) -> Vec<
                     }
                 }
             }
-            ProjectKind::Unknown => return Vec::new(),
+            ProjectKind::Unknown => return (Vec::new(), None),
         }
         if report_files.len() >= MAX_TEST_REPORT_FILES {
             break;
@@ -1023,6 +1091,7 @@ fn collect_test_failures(project: &ProjectModel, started_at: SystemTime) -> Vec<
 
     let mut total_bytes = 0u64;
     let mut failures = Vec::new();
+    let mut summary = None;
     for report_file in report_files.into_iter().take(MAX_TEST_REPORT_FILES) {
         let Ok(metadata) = std::fs::metadata(&report_file.path) else {
             continue;
@@ -1039,13 +1108,38 @@ fn collect_test_failures(project: &ProjectModel, started_at: SystemTime) -> Vec<
         let Ok(report) = quick_xml::de::from_str::<XmlTestReport>(&xml) else {
             continue;
         };
+        if project.kind == ProjectKind::Gradle {
+            accumulate_report_summary(&report, &mut summary);
+        }
         append_test_failures(&report, None, &report_file, &mut failures);
         if failures.len() >= MAX_TEST_FAILURES {
             break;
         }
     }
     failures.truncate(MAX_TEST_FAILURES);
-    failures
+    (failures, summary)
+}
+
+fn accumulate_report_summary(
+    report: &XmlTestReport,
+    summary: &mut Option<diagnostics::TestSummary>,
+) {
+    if let Some(tests) = report.tests {
+        let skipped = report.skipped.min(tests);
+        let failed = report
+            .failures
+            .saturating_add(report.errors)
+            .min(tests - skipped);
+        let total = summary.get_or_insert_with(diagnostics::TestSummary::default);
+        total.total = total.total.saturating_add(tests);
+        total.failed = total.failed.saturating_add(failed);
+        total.skipped = total.skipped.saturating_add(skipped);
+        total.passed = total.passed.saturating_add(tests - skipped - failed);
+    } else {
+        for suite in &report.suites {
+            accumulate_report_summary(suite, summary);
+        }
+    }
 }
 
 fn add_test_report_files(
@@ -1191,12 +1285,73 @@ fn test_source_line(stack_trace: &str, class_name: &str) -> Option<usize> {
 
 #[cfg(test)]
 mod test_source_line_tests {
-    use super::test_source_line;
+    use super::*;
 
     #[test]
     fn ignores_frames_from_same_named_class_in_another_package() {
         let trace = "at other.ExampleTest.helper(ExampleTest.java:10)\n    at app.ExampleTest.fails(ExampleTest.java:42)";
         assert_eq!(test_source_line(trace, "app.ExampleTest"), Some(42));
+    }
+
+    #[test]
+    fn gradle_xml_reports_summarize_passing_and_skipped_tests() {
+        let root = std::env::temp_dir().join(format!(
+            "intelli-gen-gradle-report-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let reports = root.join("build/test-results/test");
+        std::fs::create_dir_all(&reports).unwrap();
+        std::fs::write(
+            root.join("settings.gradle"),
+            "rootProject.name = 'sample'\n",
+        )
+        .unwrap();
+        std::fs::write(reports.join("TEST-One.xml"), r#"<testsuite name="One" tests="3" failures="0" errors="0" skipped="1"><testcase name="a"/><testcase name="b"/><testcase name="c"><skipped/></testcase></testsuite>"#).unwrap();
+        std::fs::write(reports.join("TEST-Two.xml"), r#"<testsuites><testsuite name="Two" tests="2" failures="0" errors="0" skipped="0"/></testsuites>"#).unwrap();
+        let project = ProjectModel::discover(&root).unwrap();
+        let (failures, summary) = collect_test_failures(&project, SystemTime::UNIX_EPOCH);
+        assert!(failures.is_empty());
+        assert_eq!(
+            summary,
+            Some(diagnostics::TestSummary {
+                total: 5,
+                passed: 4,
+                failed: 0,
+                skipped: 1
+            })
+        );
+        let (_, stale) =
+            collect_test_failures(&project, SystemTime::now() + Duration::from_secs(60));
+        assert_eq!(stale, None);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn report_summary_does_not_duplicate_console_counts() {
+        let (sender, events) = mpsc::channel(8);
+        let (cancel, _) = watch::channel(false);
+        let console = diagnostics::TestSummary {
+            total: 2,
+            passed: 1,
+            failed: 1,
+            skipped: 0,
+        };
+        sender.try_send(BuildEvent::Tests(console)).unwrap();
+        sender.try_send(BuildEvent::ReportTests(console)).unwrap();
+        let mut tool = BuildTool {
+            handle: Some(BuildHandle {
+                events,
+                cancel,
+                worker: None,
+            }),
+            ..Default::default()
+        };
+        tool.poll();
+        assert_eq!(tool.test_summary, Some(console));
     }
 }
 
@@ -1506,6 +1661,9 @@ impl BuildTool {
                     total.passed = total.passed.saturating_add(summary.passed);
                     total.failed = total.failed.saturating_add(summary.failed);
                     total.skipped = total.skipped.saturating_add(summary.skipped);
+                }
+                BuildEvent::ReportTests(summary) => {
+                    self.test_summary.get_or_insert(summary);
                 }
                 BuildEvent::TestFailures(failures) => {
                     for failure in failures {
