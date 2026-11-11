@@ -320,9 +320,17 @@ struct Completion {
     result: Result<GitResult, GitError>,
 }
 struct GitResult {
-    status: GitStatus,
+    status: Result<GitStatus, GitError>,
     diff: Option<(PathBuf, String)>,
-    committed: bool,
+    outcome: GitOutcome,
+}
+
+enum GitOutcome {
+    Refreshed,
+    Diff,
+    Staged,
+    Unstaged,
+    Committed(String),
 }
 
 pub struct GitTool {
@@ -356,30 +364,35 @@ impl GitTool {
                 let result = (|| {
                     if matches!(&action, GitAction::Refresh) {
                         return Ok(GitResult {
-                            status: GitStatus::read(&root)?,
+                            status: GitStatus::read(&root),
                             diff: None,
-                            committed: false,
+                            outcome: GitOutcome::Refreshed,
                         });
                     }
                     let repo = repository(&root)?;
                     let mut selected_diff = None;
-                    let mut committed = false;
-                    match action {
-                        GitAction::Refresh => {}
+                    let outcome = match action {
+                        GitAction::Refresh => unreachable!(),
                         GitAction::Diff(path) => {
-                            selected_diff = Some((path.clone(), diff(&repo, &path)?))
+                            selected_diff = Some((path.clone(), diff(&repo, &path)?));
+                            GitOutcome::Diff
                         }
-                        GitAction::Stage(path) => stage(&repo, &path)?,
-                        GitAction::Unstage(path) => unstage(&repo, &path)?,
+                        GitAction::Stage(path) => {
+                            stage(&repo, &path)?;
+                            GitOutcome::Staged
+                        }
+                        GitAction::Unstage(path) => {
+                            unstage(&repo, &path)?;
+                            GitOutcome::Unstaged
+                        }
                         GitAction::Commit(message) => {
-                            commit(&repo, &message)?;
-                            committed = true;
+                            GitOutcome::Committed(commit(&repo, &message)?)
                         }
-                    }
+                    };
                     Ok(GitResult {
-                        status: GitStatus::from_repo(&repo)?,
+                        status: GitStatus::from_repo(&repo),
                         diff: selected_diff,
-                        committed,
+                        outcome,
                     })
                 })();
                 if results.send(Completion { epoch: id, result }).is_err() {
@@ -414,9 +427,7 @@ impl GitTool {
         if self.busy {
             return;
         }
-        if !matches!(&action, GitAction::Diff(_)) {
-            self.diff = None;
-        }
+        self.diff = None;
         self.busy = self
             .commands
             .send((self.epoch.load(Ordering::Relaxed), root, action))
@@ -436,22 +447,46 @@ impl GitTool {
             self.busy = false;
             match completion.result {
                 Ok(result) => {
-                    self.status = Some(result.status);
                     if let Some(diff) = result.diff {
                         self.diff = Some(diff);
                     }
-                    self.message = if result.committed {
+                    if matches!(result.outcome, GitOutcome::Committed(_)) {
                         self.commit_message.clear();
-                        "Commit created"
-                    } else {
-                        "Status refreshed"
                     }
-                    .into();
+                    match result.status {
+                        Ok(status) => {
+                            self.status = Some(status);
+                            self.message = if matches!(result.outcome, GitOutcome::Committed(_)) {
+                                "Commit created"
+                            } else {
+                                "Status refreshed"
+                            }
+                            .into();
+                        }
+                        Err(error) => {
+                            self.status = None;
+                            self.message = match result.outcome {
+                                GitOutcome::Committed(id) => format!(
+                                    "Commit {id} created; Git status refresh failed: {error}"
+                                ),
+                                GitOutcome::Staged => {
+                                    format!("File staged; Git status refresh failed: {error}")
+                                }
+                                GitOutcome::Unstaged => {
+                                    format!("File unstaged; Git status refresh failed: {error}")
+                                }
+                                GitOutcome::Diff => {
+                                    format!("Diff loaded; Git status refresh failed: {error}")
+                                }
+                                GitOutcome::Refreshed => {
+                                    format!("Git status refresh failed: {error}")
+                                }
+                            };
+                        }
+                    }
                 }
                 Err(error) => {
-                    if matches!(&error, GitError::Unavailable(_)) {
-                        self.status = None;
-                    }
+                    self.status = None;
                     self.message = error.to_string();
                 }
             }
@@ -462,6 +497,214 @@ impl Drop for GitTool {
     fn drop(&mut self) {
         self.stopped.store(true, Ordering::Relaxed);
         self.epoch.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn successful_commit_is_reported_when_followup_status_fails() {
+        let (commands, _requests) = mpsc::channel();
+        let (sender, completions) = mpsc::channel();
+        let mut tool = GitTool {
+            commands,
+            completions,
+            epoch: Arc::new(AtomicU64::new(0)),
+            stopped: Arc::new(AtomicBool::new(false)),
+            status: Some(GitStatus {
+                branch: "main".into(),
+                workdir: "/project".into(),
+                changed_paths: Vec::new(),
+                staged_path_count: 1,
+            }),
+            busy: true,
+            message: "Working…".into(),
+            diff: None,
+            commit_message: "message".into(),
+            page: 0,
+        };
+        sender
+            .send(Completion {
+                epoch: 0,
+                result: Ok(GitResult {
+                    status: Err(GitError::Operation("index unreadable".into())),
+                    diff: None,
+                    outcome: GitOutcome::Committed("abc12345".into()),
+                }),
+            })
+            .unwrap();
+        tool.poll();
+        assert!(!tool.busy);
+        assert!(tool.status.is_none());
+        assert!(tool.commit_message.is_empty());
+        assert!(tool.message.contains("abc12345"));
+        assert!(tool.message.contains("created"));
+        assert!(tool.message.contains("index unreadable"));
+        let translator =
+            crate::i18n::Translator::load(crate::i18n::LanguagePreference::Italian, None).0;
+        assert!(
+            translator
+                .message(&tool.message)
+                .contains("Commit abc12345 creato")
+        );
+
+        tool.busy = true;
+        tool.commit_message = "draft".into();
+        sender
+            .send(Completion {
+                epoch: 0,
+                result: Ok(GitResult {
+                    status: Err(GitError::Operation("index unreadable".into())),
+                    diff: None,
+                    outcome: GitOutcome::Staged,
+                }),
+            })
+            .unwrap();
+        tool.poll();
+        assert!(tool.message.contains("File staged"));
+        assert_eq!(tool.commit_message, "draft");
+        assert!(tool.status.is_none());
+
+        tool.busy = true;
+        sender
+            .send(Completion {
+                epoch: 0,
+                result: Ok(GitResult {
+                    status: Err(GitError::Operation("index unreadable".into())),
+                    diff: Some(("Main.java".into(), "diff contents".into())),
+                    outcome: GitOutcome::Diff,
+                }),
+            })
+            .unwrap();
+        tool.poll();
+        assert!(tool.message.contains("Diff loaded"));
+        assert_eq!(
+            tool.diff.as_ref().map(|(_, content)| content.as_str()),
+            Some("diff contents")
+        );
+        tool.dispatch("/project".into(), GitAction::Diff("Other.java".into()));
+        assert!(tool.diff.is_none());
+    }
+
+    #[test]
+    fn staging_and_committing_preserve_unstaged_and_other_staged_changes() {
+        let root = std::env::temp_dir().join(format!(
+            "intelli-gen-git-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let repo = Repository::init(&root).unwrap();
+        let mut config = repo.config().unwrap();
+        config.set_str("user.name", "Test User").unwrap();
+        config
+            .set_str("user.email", "test@example.invalid")
+            .unwrap();
+        let first = Path::new("Main[1].java");
+        let second = Path::new("Other.java");
+        std::fs::write(root.join(first), "initial\n").unwrap();
+        std::fs::write(root.join(second), "initial\n").unwrap();
+        stage(&repo, first).unwrap();
+        stage(&repo, second).unwrap();
+        commit(&repo, "initial").unwrap();
+
+        std::fs::write(root.join(first), "staged\n").unwrap();
+        stage(&repo, first).unwrap();
+        std::fs::write(root.join(first), "unstaged\n").unwrap();
+        std::fs::write(root.join(second), "other staged\n").unwrap();
+        stage(&repo, second).unwrap();
+        unstage(&repo, first).unwrap();
+        let status = GitStatus::from_repo(&repo).unwrap();
+        assert!(
+            status
+                .changed_paths
+                .iter()
+                .any(|entry| entry.path == first && !entry.staged && entry.unstaged)
+        );
+        assert!(
+            status
+                .changed_paths
+                .iter()
+                .any(|entry| entry.path == second && entry.staged)
+        );
+        assert!(diff(&repo, first).unwrap().contains("+unstaged"));
+        stage(&repo, first).unwrap();
+        std::fs::write(root.join(first), "newer edit\n").unwrap();
+        commit(&repo, "changes").unwrap();
+        let head = repo.head().unwrap().peel_to_tree().unwrap();
+        let blob = repo.find_blob(head.get_path(first).unwrap().id()).unwrap();
+        assert_eq!(blob.content(), b"unstaged\n");
+        assert_eq!(std::fs::read(root.join(first)).unwrap(), b"newer edit\n");
+        assert!(
+            GitStatus::from_repo(&repo)
+                .unwrap()
+                .changed_paths
+                .iter()
+                .any(|entry| entry.path == first && !entry.staged && entry.unstaged)
+        );
+        drop(blob);
+        drop(head);
+        drop(config);
+        drop(repo);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn git_worker_stages_and_commits_a_disposable_repository() {
+        let root = std::env::temp_dir().join(format!(
+            "intelli-gen-git-worker-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let repo = Repository::init(&root).unwrap();
+        let mut config = repo.config().unwrap();
+        config.set_str("user.name", "Test User").unwrap();
+        config
+            .set_str("user.email", "test@example.invalid")
+            .unwrap();
+        std::fs::write(root.join("Main.java"), "class Main {}\n").unwrap();
+        let mut tool = GitTool::new(egui::Context::default());
+        let wait = |tool: &mut GitTool| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+            while tool.busy {
+                tool.poll();
+                assert!(std::time::Instant::now() < deadline, "Git worker timed out");
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        };
+        tool.dispatch(root.clone(), GitAction::Refresh);
+        wait(&mut tool);
+        assert!(tool.status.is_some());
+        tool.dispatch(root.clone(), GitAction::Stage("Main.java".into()));
+        wait(&mut tool);
+        assert_eq!(tool.status.as_ref().unwrap().staged_path_count, 1);
+        tool.commit_message = "worker commit".into();
+        tool.dispatch(root.clone(), GitAction::Commit(tool.commit_message.clone()));
+        wait(&mut tool);
+        assert_eq!(tool.message, "Commit created");
+        assert!(tool.commit_message.is_empty());
+        assert_eq!(
+            repo.head()
+                .unwrap()
+                .peel_to_commit()
+                .unwrap()
+                .summary()
+                .unwrap(),
+            Some("worker commit")
+        );
+        drop(tool);
+        drop(config);
+        drop(repo);
+        std::fs::remove_dir_all(root).unwrap();
     }
 }
 
