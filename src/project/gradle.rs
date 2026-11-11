@@ -208,6 +208,7 @@ fn add_module(
             result.push(ProjectModule {
                 name: name.clone(),
                 root: normalize(&module_root),
+                resolved_root: None,
             });
         }
     }

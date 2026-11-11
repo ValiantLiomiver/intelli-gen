@@ -154,10 +154,13 @@ pub fn current_test_class_action(
     let module_root = model
         .modules
         .iter()
-        .map(|module| &module.root)
-        .chain(std::iter::once(&model.root))
-        .filter(|root| path.starts_with(root))
-        .max_by_key(|root| root.components().count())?;
+        .map(|module| (module.root.as_path(), module.identity_root()))
+        .chain(std::iter::once((
+            model.root.as_path(),
+            model.root.as_path(),
+        )))
+        .filter(|(_, identity)| path.starts_with(identity))
+        .max_by_key(|(_, identity)| identity.components().count())?;
     let (class_path, scope) = if let Some(source_root) = source_roots
         .iter()
         .filter(|root| root.test && path.starts_with(&root.path))
@@ -172,7 +175,7 @@ pub fn current_test_class_action(
             return None;
         }
         (
-            path.strip_prefix(module_root)
+            path.strip_prefix(module_root.1)
                 .ok()?
                 .strip_prefix(Path::new("src/test/java"))
                 .ok()?,
@@ -191,7 +194,7 @@ pub fn current_test_class_action(
     Some(BuildAction::RunTest {
         class_name,
         method_name: None,
-        module_root: module_root.clone(),
+        module_root: module_root.0.to_path_buf(),
         test_task: (model.kind == crate::project::ProjectKind::Gradle)
             .then(|| {
                 scope
@@ -4478,6 +4481,43 @@ mod maven_cache_tests {
 mod run_build_tests {
     use super::*;
 
+    #[cfg(unix)]
+    #[test]
+    fn linked_external_gradle_module_is_included_in_run_save_scope() {
+        use std::os::unix::fs::symlink;
+        let fixture = std::env::temp_dir().join(format!(
+            "intelli-gen-gradle-external-link-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let build = fixture.join("build");
+        let external = fixture.join("external");
+        std::fs::create_dir_all(&build).unwrap();
+        std::fs::create_dir_all(external.join("src/test/java")).unwrap();
+        symlink(&external, build.join("linked")).unwrap();
+        std::fs::write(
+            build.join("settings.gradle"),
+            "include ':external'\nproject(':external').projectDir = file('linked')\n",
+        )
+        .unwrap();
+        std::fs::write(external.join("build.gradle"), "plugins { id 'java' }\n").unwrap();
+        let source = external.join("src/test/java/SampleTest.java");
+        std::fs::write(&source, "class SampleTest {}\n").unwrap();
+        let build = build.canonicalize().unwrap();
+        let model = crate::project::ProjectModel::discover(&build).unwrap();
+        let mut document = crate::editor::Document::load(&source).unwrap();
+        document.text.push_str("// unsaved\n");
+        let path = document.path.clone();
+        let tabs = vec![EditorTab::new(document)];
+        assert!(unsaved_build_paths(&tabs, &build, &model).contains(&path));
+        assert!(matches!(current_test_class_action(&path, &model, &[]),
+            Some(BuildAction::RunTest { module_root, .. }) if module_root == build.join("linked")));
+        std::fs::remove_dir_all(fixture).unwrap();
+    }
+
     #[test]
     fn run_save_scope_includes_sibling_and_external_build_modules() {
         let model = crate::project::ProjectModel {
@@ -4487,6 +4527,7 @@ mod run_build_tests {
             modules: vec![crate::project::ProjectModule {
                 name: ":external".into(),
                 root: "/external/library".into(),
+                resolved_root: None,
             }],
             wrapper: None,
         };
@@ -4643,7 +4684,7 @@ fn unsaved_build_paths(
                 || model
                     .modules
                     .iter()
-                    .any(|module| tab.path.starts_with(&module.root)))
+                    .any(|module| tab.path.starts_with(module.identity_root())))
                 && (tab.document.is_dirty() || tab.saving || tab.pending_rename_to.is_some())
         })
         .map(|tab| tab.path.clone())

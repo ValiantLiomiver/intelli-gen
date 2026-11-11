@@ -57,11 +57,20 @@ pub(super) fn discover_model(path: &Path) -> Result<ProjectModel, ProjectError> 
         } else {
             root
         };
-        let modules = match kind {
+        let mut modules = match kind {
             ProjectKind::Maven => maven::modules(root)?,
             ProjectKind::Gradle => gradle::modules(root)?,
             ProjectKind::Unknown => unreachable!(),
         };
+        if kind == ProjectKind::Gradle {
+            for module in &mut modules {
+                if let Ok(resolved) = module.root.canonicalize()
+                    && resolved != module.root
+                {
+                    module.resolved_root = Some(resolved);
+                }
+            }
+        }
         let folder_name = root
             .file_name()
             .unwrap_or(root.as_os_str())
@@ -99,10 +108,13 @@ fn containing_gradle_build(module: &Path) -> Result<&Path, ProjectError> {
             || descriptor_exists(&ancestor.join("settings.gradle.kts"))?
         {
             if ancestor != module {
-                if gradle::modules(ancestor)?
-                    .iter()
-                    .any(|entry| entry.root == module)
-                {
+                let canonical_module = module.canonicalize().ok();
+                if gradle::modules(ancestor)?.iter().any(|entry| {
+                    entry.root == module
+                        || canonical_module.as_ref().is_some_and(|canonical| {
+                            entry.root.canonicalize().ok().as_ref() == Some(canonical)
+                        })
+                }) {
                     return Ok(ancestor);
                 }
                 return Err(ProjectError::invalid(
@@ -314,6 +326,37 @@ mod tests {
         let model = ProjectModel::discover(&child).unwrap();
         assert_eq!(model.root, workspace);
         assert_eq!(model.modules[0].root, child);
+        fs::remove_dir_all(workspace).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn linked_gradle_module_resolves_to_containing_build() {
+        use std::os::unix::fs::symlink;
+        let workspace = std::env::temp_dir().join(format!(
+            "intelli-gen-gradle-link-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let module = workspace.join("actual/app");
+        fs::create_dir_all(&module).unwrap();
+        symlink(&module, workspace.join("linked-app")).unwrap();
+        fs::write(
+            workspace.join("settings.gradle"),
+            "include ':app'\nproject(':app').projectDir = file('linked-app')\n",
+        )
+        .unwrap();
+        fs::write(module.join("build.gradle"), "plugins { id 'java' }\n").unwrap();
+        let project = ProjectModel::discover(&module).unwrap();
+        assert_eq!(project.root, workspace);
+        assert_eq!(project.modules[0].root, workspace.join("linked-app"));
+        assert_eq!(
+            project.modules[0].identity_root(),
+            module.canonicalize().unwrap()
+        );
         fs::remove_dir_all(workspace).unwrap();
     }
 

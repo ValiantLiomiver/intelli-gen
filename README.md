@@ -115,6 +115,10 @@ Building from that root can run tasks in multiple modules. A local offline
 Gradle 6.7.1 check confirmed the distinction between invoking an unqualified
 task at the root and in a child, and that an unrelated nested build requires
 its own settings file. The check used an isolated Gradle user home.
+Gradle module links retain their declared paths for run configurations while
+file matching uses the resolved directory. Opening an external link target
+directly does not identify a build located outside its ancestor directories;
+open the build root to use such a module.
 The ignored `live_gradle_worker_builds_enclosing_project_from_nested_module`
 test also passed using the real build worker and a fresh two-module project.
 To repeat it, set `INTELLI_GEN_GRADLE_PROJECT` to a disposable project with
@@ -123,6 +127,7 @@ source roots, and no existing class files. Its executable `gradlew` must invoke
 an installed Gradle offline; a standard wrapper may download its distribution
 even with `--offline`. Set `INTELLI_GEN_BUILD_JAVA_HOME` to a compatible JDK and
 `GRADLE_USER_HOME` to a disposable directory, then run the test with `--ignored`.
+It also passed with `app` linked to a directory inside the build.
 
 ## IntelliJ reverse-engineering evidence
 

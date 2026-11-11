@@ -528,6 +528,7 @@ mod tests {
             vec![ProjectModule {
                 name: "module-a".into(),
                 root: module.clone(),
+                resolved_root: None,
             }],
         );
 

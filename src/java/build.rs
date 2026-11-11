@@ -478,7 +478,7 @@ mod gradle_argument_tests {
     async fn live_gradle_worker_builds_enclosing_project_from_nested_module() {
         let root = PathBuf::from(std::env::var_os("INTELLI_GEN_GRADLE_PROJECT").unwrap());
         let home = PathBuf::from(std::env::var_os("INTELLI_GEN_BUILD_JAVA_HOME").unwrap());
-        let workspace = root.join("app/src/main/java");
+        let workspace = root.join("app/src/main/java").canonicalize().unwrap();
         let project = ProjectModel::discover(&workspace).unwrap();
         assert_eq!(project.root, root);
         assert_eq!(

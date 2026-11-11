@@ -32,6 +32,14 @@ pub struct ProjectModule {
     /// Maven reactor path or Gradle project path (for example `:app`).
     pub name: String,
     pub root: PathBuf,
+    /// Existing module's physical path, when it differs from its declared path.
+    pub resolved_root: Option<PathBuf>,
+}
+
+impl ProjectModule {
+    pub fn identity_root(&self) -> &Path {
+        self.resolved_root.as_deref().unwrap_or(&self.root)
+    }
 }
 
 #[derive(Clone, Debug)]

@@ -243,6 +243,7 @@ fn collect(
         result.push(ProjectModule {
             name: reactor_name,
             root: module_root.clone(),
+            resolved_root: None,
         });
         // Missing modules remain visible, including modules not checked out yet.
         if descriptor_exists(&module_root.join("pom.xml"))? {
