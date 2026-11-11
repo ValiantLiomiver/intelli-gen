@@ -105,6 +105,10 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
                     state.enqueue(AppEvent::SaveAllFiles);
                     ui.close();
                 }
+                if ui.add_enabled(has_document, egui::Button::new(crate::i18n::ui_text(ui, "Restore Deleted File"))).clicked() {
+                    state.enqueue(AppEvent::RestoreMissingActiveFile);
+                    ui.close();
+                }
                 if ui
                     .add_enabled(
                         has_document,

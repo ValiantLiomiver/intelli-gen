@@ -32,6 +32,7 @@ enum IoCommand {
         document: Document,
         destination: Option<PathBuf>,
     },
+    RestoreMissing(Document),
     CreateJavaClass {
         root: PathBuf,
         directory: PathBuf,
@@ -214,6 +215,18 @@ impl EditorIo {
                             result,
                         }
                     }
+                    IoCommand::RestoreMissing(mut document) => {
+                        let path = document.path.clone();
+                        let result = document
+                            .restore_missing()
+                            .map_err(|error| error.to_string());
+                        EditorCompletion::Saved {
+                            saved_path: path.clone(),
+                            path,
+                            snapshot: document.text,
+                            result,
+                        }
+                    }
                     IoCommand::CreateJavaClass {
                         root,
                         directory,
@@ -290,6 +303,10 @@ impl EditorIo {
             document,
             destination,
         })
+    }
+
+    pub fn restore_missing(&self, document: Document) -> Result<(), String> {
+        self.submit(IoCommand::RestoreMissing(document))
     }
 
     pub fn create_java_class(

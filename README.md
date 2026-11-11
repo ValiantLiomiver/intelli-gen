@@ -110,6 +110,10 @@ files on disk, including unsaved open files removed from disk. If an open file
 changes after the search starts, run the search again before navigating its
 results. Ignore rules and file filters still apply. Replacement also works on
 unsaved open files removed from disk; it changes only the editor buffer.
+Use **File → Restore Deleted File** to write an open buffer back to its original
+path when that path is still absent. It never overwrites an existing file; the
+parent directory must still exist. Restored files use new-file permissions and
+cannot retain the deleted file's metadata.
 
 When an opened directory is inside a Gradle module declared in a parent settings
 file, Intelli-gen keeps that directory as the workspace and uses the containing

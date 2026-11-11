@@ -268,6 +268,7 @@ impl SearchEverywhere {
             ),
             ("Save                        ⌘S", AppEvent::SaveActiveFile),
             ("Save All                 ⇧⌘S", AppEvent::SaveAllFiles),
+            ("Restore Deleted File", AppEvent::RestoreMissingActiveFile),
             ("Close File                ⌘W", AppEvent::CloseActiveFile),
             ("Build", AppEvent::Build(super::events::BuildAction::Build)),
             ("Test", AppEvent::Build(super::events::BuildAction::Test)),
@@ -374,6 +375,7 @@ fn action_search_aliases(label: &str) -> &'static [&'static str] {
             &["run_context", "run_current_test", "esegui_test_corrente"]
         }
         "Save All                 ⇧⌘S" => &["save_all_files", "salva_tutti_i_file"],
+        "Restore Deleted File" => &["restore_deleted_file", "ripristina_file_eliminato"],
         "Terminal" => &["command_line", "riga_di_comando"],
         _ => &[],
     }

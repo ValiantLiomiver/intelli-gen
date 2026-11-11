@@ -142,6 +142,67 @@ impl Document {
         Ok(())
     }
 
+    pub fn restore_missing(&mut self) -> Result<(), EditorError> {
+        static NEXT_TEMP: AtomicU64 = AtomicU64::new(2_000_000);
+        let path = &self.path;
+        let parent = path.parent().ok_or_else(|| {
+            EditorError::new(
+                path,
+                "restore",
+                io::Error::new(io::ErrorKind::InvalidInput, "file has no parent directory"),
+            )
+        })?;
+        let canonical_parent = parent
+            .canonicalize()
+            .map_err(|error| EditorError::new(path, "inspect parent directory", error))?;
+        if canonical_parent != parent {
+            return Err(EditorError::new(
+                path,
+                "restore",
+                io::Error::new(io::ErrorKind::InvalidInput, "parent directory has changed"),
+            ));
+        }
+        for _ in 0..128 {
+            let temporary = parent.join(format!(
+                ".intelli-gen-{}-{}.tmp",
+                std::process::id(),
+                NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
+            ));
+            let mut file = match OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&temporary)
+            {
+                Ok(file) => file,
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(error) => {
+                    return Err(EditorError::new(
+                        path,
+                        "create temporary restore file",
+                        error,
+                    ));
+                }
+            };
+            let result = file
+                .write_all(self.text.as_bytes())
+                .and_then(|()| file.sync_all())
+                .and_then(|()| fs::hard_link(&temporary, path));
+            drop(file);
+            let _ = fs::remove_file(&temporary);
+            result.map_err(|error| EditorError::new(path, "restore missing file", error))?;
+            self.saved_text.clone_from(&self.text);
+            return Ok(());
+        }
+        Err(EditorError::new(
+            path,
+            "restore",
+            io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "cannot allocate temporary restore file",
+            ),
+        ))
+    }
+
     pub fn save_as(&mut self, destination: &Path) -> Result<(), EditorError> {
         let source = self.path.clone();
         if destination == source {
@@ -411,8 +472,20 @@ fn atomic_write(path: &Path, bytes: &[u8], expected: &[u8]) -> Result<(), Editor
             io::Error::new(io::ErrorKind::InvalidInput, "file has no parent directory"),
         )
     })?;
-    let original =
-        fs::metadata(path).map_err(|e| EditorError::new(path, "inspect before saving", e))?;
+    let original = fs::metadata(path).map_err(|error| {
+        if error.kind() == io::ErrorKind::NotFound {
+            EditorError::new(
+                path,
+                "save",
+                io::Error::new(
+                    io::ErrorKind::NotFound,
+                    "file is missing; use File → Restore Deleted File to recreate it",
+                ),
+            )
+        } else {
+            EditorError::new(path, "inspect before saving", error)
+        }
+    })?;
     // Atomic replacement must not turn a read-only file into a writable one.
     if original.permissions().readonly() {
         return Err(EditorError::new(
@@ -776,6 +849,68 @@ mod tests {
         assert!(!destination.exists());
         assert!(document.is_dirty());
 
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn restore_missing_file_never_overwrites_an_existing_path() {
+        let root = std::env::temp_dir().join(format!(
+            "intelli-gen-restore-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir(&root).unwrap();
+        let root = root.canonicalize().unwrap();
+        let path = root.join("Main.java");
+        fs::write(&path, "original").unwrap();
+        let mut document = Document::load(&path).unwrap();
+        document.text = "local edits".into();
+        fs::remove_file(&path).unwrap();
+        assert!(
+            document
+                .save()
+                .unwrap_err()
+                .to_string()
+                .contains("Restore Deleted File")
+        );
+        document.restore_missing().unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "local edits");
+        assert!(!document.is_dirty());
+        document.text = "later edits".into();
+        fs::write(&path, "external").unwrap();
+        assert!(document.restore_missing().is_err());
+        assert_eq!(fs::read_to_string(&path).unwrap(), "external");
+        assert!(document.is_dirty());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn restore_rejects_a_replaced_parent_directory() {
+        use std::os::unix::fs::symlink;
+        let root = std::env::temp_dir().join(format!(
+            "intelli-gen-restore-parent-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(root.join("project")).unwrap();
+        fs::create_dir(root.join("elsewhere")).unwrap();
+        let root = root.canonicalize().unwrap();
+        let path = root.join("project/Main.java");
+        fs::write(&path, "original").unwrap();
+        let mut document = Document::load(&path).unwrap();
+        document.text = "edited".into();
+        fs::remove_file(path).unwrap();
+        fs::remove_dir(root.join("project")).unwrap();
+        symlink(root.join("elsewhere"), root.join("project")).unwrap();
+        assert!(document.restore_missing().is_err());
+        assert!(!root.join("elsewhere/Main.java").exists());
         fs::remove_dir_all(root).unwrap();
     }
 

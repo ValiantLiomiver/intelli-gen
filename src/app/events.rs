@@ -70,6 +70,7 @@ pub enum AppEvent {
     Find(crate::editor::find_replace::FindAction),
     Search(SearchAction),
     SaveActiveFile,
+    RestoreMissingActiveFile,
     SaveAllFiles,
     SaveFile(PathBuf),
     CloseActiveFile,

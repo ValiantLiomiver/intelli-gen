@@ -1938,6 +1938,26 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
                     save_file(state, &path);
                 }
             }
+            AppEvent::RestoreMissingActiveFile => {
+                if let Some(index) = state.active_tab
+                    && let Some(tab) = state.editor_tabs.get_mut(index)
+                {
+                    if tab.saving || tab.pending_rename_to.is_some() {
+                        state.last_error = Some(
+                            "Wait for the current save or rename before restoring the file".into(),
+                        );
+                    } else {
+                        match state.editor_io.restore_missing(tab.document.clone()) {
+                            Ok(()) => {
+                                tab.saving = true;
+                                state.last_error = None;
+                                state.status = format!("Restoring {}…", tab.path.display());
+                            }
+                            Err(error) => state.last_error = Some(error),
+                        }
+                    }
+                }
+            }
             AppEvent::SaveAllFiles => {
                 let paths: Vec<_> = state
                     .editor_tabs
@@ -4708,6 +4728,48 @@ mod run_build_tests {
 #[cfg(test)]
 mod editor_save_tests {
     use super::*;
+
+    #[test]
+    fn restore_action_keeps_edits_made_while_worker_runs() {
+        let root = std::env::temp_dir().join(format!(
+            "intelli-gen-restore-action-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let path = root.join("Main.java");
+        std::fs::write(&path, "original").unwrap();
+        let mut document = crate::editor::Document::load(&path).unwrap();
+        document.text = "first edit".into();
+        std::fs::remove_file(&path).unwrap();
+        let context = egui::Context::default();
+        let mut app = crate::app::IdeaLikeApp::new_with_context(context.clone(), None);
+        app.state.editor_tabs.push(EditorTab::new(document));
+        app.state.active_tab = Some(0);
+        app.state.enqueue(AppEvent::RestoreMissingActiveFile);
+        process_events(&context, &mut app.state);
+        assert!(app.state.editor_tabs[0].saving);
+        app.state.editor_tabs[0].document.text = "newer edit".into();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            let completions = app.state.editor_io.drain();
+            if !completions.is_empty() {
+                for completion in completions {
+                    editor_completed(&mut app.state, completion);
+                }
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "first edit");
+        assert_eq!(app.state.editor_tabs[0].document.text, "newer edit");
+        assert!(app.state.editor_tabs[0].document.is_dirty());
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn failed_save_clears_saving_status_and_keeps_unsaved_edits() {
