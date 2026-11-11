@@ -566,6 +566,8 @@ mod gradle_argument_tests {
     ) {
         let discovery_path = if kind == ProjectKind::Maven {
             root.join("custom/app/src/main/java")
+                .canonicalize()
+                .unwrap()
         } else {
             root.clone()
         };

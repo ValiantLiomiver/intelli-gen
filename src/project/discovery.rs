@@ -62,13 +62,18 @@ pub(super) fn discover_model(path: &Path) -> Result<ProjectModel, ProjectError> 
             ProjectKind::Gradle => gradle::modules(root)?,
             ProjectKind::Unknown => unreachable!(),
         };
-        if kind == ProjectKind::Gradle {
-            for module in &mut modules {
-                if let Ok(resolved) = module.root.canonicalize()
-                    && resolved != module.root
-                {
-                    module.resolved_root = Some(resolved);
-                }
+        let maven_root = (kind == ProjectKind::Maven)
+            .then(|| root.canonicalize().ok())
+            .flatten();
+        for module in &mut modules {
+            if let Ok(resolved) = module.root.canonicalize()
+                && resolved != module.root
+                && (kind != ProjectKind::Maven
+                    || maven_root
+                        .as_ref()
+                        .is_some_and(|root| resolved.starts_with(root)))
+            {
+                module.resolved_root = Some(resolved);
             }
         }
         let folder_name = root

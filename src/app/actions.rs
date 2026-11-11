@@ -4483,6 +4483,76 @@ mod run_build_tests {
 
     #[cfg(unix)]
     #[test]
+    fn linked_maven_module_resolves_test_to_declared_reactor_path() {
+        use std::os::unix::fs::symlink;
+        let fixture = std::env::temp_dir().join(format!(
+            "intelli-gen-maven-link-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let actual = fixture.join("actual");
+        std::fs::create_dir_all(actual.join("src/test/java")).unwrap();
+        symlink(&actual, fixture.join("linked")).unwrap();
+        std::fs::write(
+            fixture.join("pom.xml"),
+            "<project><modules><module>linked</module></modules></project>",
+        )
+        .unwrap();
+        std::fs::write(
+            actual.join("pom.xml"),
+            "<project><artifactId>module</artifactId></project>",
+        )
+        .unwrap();
+        let source = actual.join("src/test/java/SampleTest.java");
+        std::fs::write(&source, "class SampleTest {}\n").unwrap();
+        let build = fixture.canonicalize().unwrap();
+        let path = source.canonicalize().unwrap();
+        let model = crate::project::ProjectModel::discover(&path).unwrap();
+        assert_eq!(model.root, build);
+        assert!(matches!(current_test_class_action(&path, &model, &[]),
+            Some(BuildAction::RunTest { module_root, .. }) if module_root == build.join("linked")));
+        std::fs::remove_dir_all(fixture).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn maven_test_target_outside_reactor_is_not_offered() {
+        use std::os::unix::fs::symlink;
+        let fixture = std::env::temp_dir().join(format!(
+            "intelli-gen-maven-external-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let build = fixture.join("reactor");
+        let external = fixture.join("external");
+        std::fs::create_dir_all(&build).unwrap();
+        std::fs::create_dir_all(external.join("src/test/java")).unwrap();
+        symlink(&external, build.join("linked")).unwrap();
+        std::fs::write(
+            build.join("pom.xml"),
+            "<project><modules><module>linked</module></modules></project>",
+        )
+        .unwrap();
+        std::fs::write(
+            external.join("pom.xml"),
+            "<project><artifactId>external</artifactId></project>",
+        )
+        .unwrap();
+        let source = external.join("src/test/java/SampleTest.java");
+        std::fs::write(&source, "class SampleTest {}\n").unwrap();
+        let model = crate::project::ProjectModel::discover(&build.canonicalize().unwrap()).unwrap();
+        assert!(current_test_class_action(&source.canonicalize().unwrap(), &model, &[]).is_none());
+        std::fs::remove_dir_all(fixture).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn linked_external_gradle_module_is_included_in_run_save_scope() {
         use std::os::unix::fs::symlink;
         let fixture = std::env::temp_dir().join(format!(

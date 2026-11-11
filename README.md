@@ -136,6 +136,11 @@ A nearer module wrapper takes precedence. Literal module entries ending in
 infer membership declared only in Maven profiles, including profiles active by
 default; open the reactor root in that case. A Maven 3.9.9 offline check covered
 an explicit module POM, the build/test/clean worker, and the Maven project view.
+Linked Maven modules inside the reactor retain their declared paths for build
+selection while source matching uses their resolved paths. The test action
+does not offer modules whose links resolve outside the reactor, which the build
+worker does not support. The build/test/clean check also passed with a linked
+module inside the reactor.
 
 ## IntelliJ reverse-engineering evidence
 
