@@ -1,4 +1,7 @@
-use std::{collections::HashSet, path::PathBuf};
+use std::{
+    collections::{HashSet, VecDeque},
+    path::PathBuf,
+};
 
 use eframe::egui;
 
@@ -346,6 +349,204 @@ mod completion_trigger_tests {
     }
 
     #[test]
+    fn enter_preserves_crlf_in_project_files() {
+        for name in ["pom.xml", "build.gradle", "notes.txt"] {
+            let context = egui::Context::default();
+            let text = "first\r\nsecond";
+            let mut tab = EditorTab::new(Document {
+                path: PathBuf::from("/project").join(name),
+                text: text.into(),
+                saved_text: text.into(),
+                cursor_line: 1,
+                cursor_column: 1,
+                revision: 0,
+            });
+            tab.pending_character_index = Some(text.chars().count());
+            frame(&context, &mut tab, 0.0, vec![]);
+            frame(
+                &context,
+                &mut tab,
+                0.02,
+                vec![egui::Event::Key {
+                    key: egui::Key::Enter,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                }],
+            );
+            assert_eq!(tab.document.text, "first\r\nsecond\r\n", "{name}");
+        }
+        let context = egui::Context::default();
+        let text = "first\nsecond";
+        let mut tab = EditorTab::new(Document {
+            path: "/project/pom.xml".into(),
+            text: text.into(),
+            saved_text: text.into(),
+            cursor_line: 1,
+            cursor_column: 1,
+            revision: 0,
+        });
+        tab.pending_character_index = Some(text.chars().count());
+        frame(&context, &mut tab, 0.0, vec![]);
+        frame(
+            &context,
+            &mut tab,
+            0.02,
+            vec![egui::Event::Key {
+                key: egui::Key::Enter,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+        assert_eq!(tab.document.text, "first\nsecond\n");
+    }
+
+    #[test]
+    fn crlf_enter_and_paste_keep_their_event_order() {
+        let enter = egui::Event::Key {
+            key: egui::Key::Enter,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let paste = egui::Event::Paste("\n".into());
+        for (events, suffix) in [
+            (vec![paste.clone()], "\n"),
+            (vec![enter.clone(), paste.clone()], "\r\n\n"),
+            (vec![paste.clone(), enter.clone()], "\n\r\n"),
+        ] {
+            let context = egui::Context::default();
+            let original = "a\r\nb";
+            let mut tab = EditorTab::new(Document {
+                path: "/project/pom.xml".into(),
+                text: original.into(),
+                saved_text: original.into(),
+                cursor_line: 1,
+                cursor_column: 1,
+                revision: 0,
+            });
+            tab.pending_character_index = Some(original.chars().count());
+            frame(&context, &mut tab, 0.0, vec![]);
+            frame(&context, &mut tab, 0.02, events);
+            assert_eq!(tab.document.text, format!("{original}{suffix}"));
+        }
+
+        let context = egui::Context::default();
+        let original = "a\r\nb";
+        let mut tab = EditorTab::new(Document {
+            path: "/project/pom.xml".into(),
+            text: original.into(),
+            saved_text: original.into(),
+            cursor_line: 1,
+            cursor_column: 1,
+            revision: 0,
+        });
+        let editor_id = egui::Id::new(("source_editor", &tab.path));
+        tab.pending_character_index = Some(original.chars().count());
+        frame(&context, &mut tab, 0.0, vec![]);
+        let accessible_paste =
+            egui::Event::AccessKitActionRequest(egui::accesskit::ActionRequest {
+                action: egui::accesskit::Action::ReplaceSelectedText,
+                target_tree: egui::accesskit::TreeId::ROOT,
+                target_node: editor_id.accesskit_id(),
+                data: Some(egui::accesskit::ActionData::Value("\n".into())),
+            });
+        frame(&context, &mut tab, 0.02, vec![accessible_paste, enter]);
+        assert_eq!(tab.document.text, "a\r\nb\n\r\n");
+    }
+
+    #[test]
+    fn crlf_enter_preserves_undo_selection_and_paged_document_style() {
+        let context = egui::Context::default();
+        let original = "first\r\nsecond\nthird";
+        let mut tab = EditorTab::new(Document {
+            path: "/project/pom.xml".into(),
+            text: original.into(),
+            saved_text: original.into(),
+            cursor_line: 1,
+            cursor_column: 1,
+            revision: 0,
+        });
+        tab.pending_character_index = Some(original.chars().count());
+        frame(&context, &mut tab, 0.0, vec![]);
+        let enter = egui::Event::Key {
+            key: egui::Key::Enter,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        };
+        frame(&context, &mut tab, 0.02, vec![enter.clone()]);
+        assert_eq!(tab.document.text, format!("{original}\r\n"));
+        frame(
+            &context,
+            &mut tab,
+            0.04,
+            vec![egui::Event::Key {
+                key: egui::Key::Z,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::COMMAND,
+            }],
+        );
+        assert_eq!(tab.document.text, original);
+        frame(
+            &context,
+            &mut tab,
+            0.06,
+            vec![egui::Event::Key {
+                key: egui::Key::Z,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers {
+                    shift: true,
+                    ..egui::Modifiers::COMMAND
+                },
+            }],
+        );
+        assert_eq!(tab.document.text, format!("{original}\r\n"));
+
+        let context = egui::Context::default();
+        let original = "a\r\nb";
+        let mut tab = EditorTab::new(Document {
+            path: "/project/pom.xml".into(),
+            text: original.into(),
+            saved_text: original.into(),
+            cursor_line: 1,
+            cursor_column: 1,
+            revision: 0,
+        });
+        tab.pending_selection = Some((0, original.chars().count()));
+        frame(&context, &mut tab, 0.0, vec![]);
+        frame(&context, &mut tab, 0.02, vec![enter.clone()]);
+        assert_eq!(tab.document.text, "\r\n");
+
+        let context = egui::Context::default();
+        let original = format!("first\r\n{}", "x".repeat(PAGED_EDITOR_BYTES + 100));
+        let mut tab = EditorTab::new(Document {
+            path: "/project/large.xml".into(),
+            text: original.clone(),
+            saved_text: original.clone(),
+            cursor_line: 1,
+            cursor_column: 1,
+            revision: 0,
+        });
+        let caret = EDITOR_PAGE_BYTES * 2;
+        tab.pending_character_index = Some(caret);
+        frame(&context, &mut tab, 0.0, vec![]);
+        frame(&context, &mut tab, 0.02, vec![enter]);
+        let mut expected = original;
+        expected.insert_str(caret, "\r\n");
+        assert!(tab.document.text == expected);
+    }
+
+    #[test]
     fn crlf_deletion_preserves_repeated_keys_and_modified_shortcuts() {
         let context = egui::Context::default();
         let document = Document {
@@ -556,7 +757,7 @@ enum JavaPairEdit {
     InsertedPair,
 }
 
-struct CrlfTextBuffer<'a>(&'a mut String);
+struct CrlfTextBuffer<'a>(&'a mut String, VecDeque<bool>);
 
 impl egui::TextBuffer for CrlfTextBuffer<'_> {
     fn is_mutable(&self) -> bool {
@@ -566,10 +767,18 @@ impl egui::TextBuffer for CrlfTextBuffer<'_> {
         self.0
     }
     fn insert_text(&mut self, text: &str, index: egui::text::CharIndex) -> usize {
+        let text = if text == "\n" && self.1.pop_front().unwrap_or(false) {
+            "\r\n"
+        } else {
+            text
+        };
         egui::TextBuffer::insert_text(self.0, text, index)
     }
     fn delete_char_range(&mut self, range: std::ops::Range<egui::text::CharIndex>) {
         egui::TextBuffer::delete_char_range(self.0, range);
+    }
+    fn replace_with(&mut self, text: &str) {
+        egui::TextBuffer::replace_with(self.0, text);
     }
     fn delete_previous_char(&mut self, cursor: egui::text::CCursor) -> egui::text::CCursor {
         let byte = byte_index(self.0, cursor.index.into());
@@ -591,6 +800,26 @@ impl egui::TextBuffer for CrlfTextBuffer<'_> {
     }
     fn type_id(&self) -> std::any::TypeId {
         std::any::TypeId::of::<CrlfTextBuffer<'static>>()
+    }
+}
+
+// Match egui's newline insertions in order so pasted text stays verbatim.
+fn crlf_newline_operations(ui: &egui::Ui, text: &str, editor_id: egui::Id) -> VecDeque<bool> {
+    let operations: VecDeque<_> = ui.input(|input| input.events.iter().filter_map(|event| match event {
+        egui::Event::Key { key: egui::Key::Enter, pressed: true, modifiers, .. }
+            if modifiers.matches_logically(egui::Modifiers::NONE) => Some(true),
+        egui::Event::Paste(text) if text == "\n" => Some(false),
+        egui::Event::AccessKitActionRequest(request)
+            if request.action == egui::accesskit::Action::ReplaceSelectedText
+                && request.target_node == editor_id.accesskit_id()
+                && request.target_tree == egui::accesskit::TreeId::ROOT
+                && matches!(&request.data, Some(egui::accesskit::ActionData::Value(value)) if value.as_ref() == "\n") => Some(false),
+        _ => None,
+    }).collect());
+    if operations.contains(&true) && text.contains("\r\n") {
+        operations
+    } else {
+        VecDeque::new()
     }
 }
 
@@ -1448,7 +1677,8 @@ impl EditorTab {
                 ui.horizontal_top(|ui| {
                     ui.spacing_mut().item_spacing.x = 0.0;
                     ui.allocate_exact_size(egui::vec2(58.0, 0.0), egui::Sense::hover());
-                    let mut buffer = CrlfTextBuffer(&mut self.document.text);
+                    let operations = crlf_newline_operations(ui, &self.document.text, editor_id);
+                    let mut buffer = CrlfTextBuffer(&mut self.document.text, operations);
                     let output = egui::TextEdit::multiline(&mut buffer)
                         .id(editor_id)
                         .code_editor()
@@ -1934,7 +2164,8 @@ impl EditorTab {
                 ui.horizontal_top(|ui| {
                     ui.spacing_mut().item_spacing.x = 0.0;
                     ui.allocate_exact_size(egui::vec2(58.0, 0.0), egui::Sense::hover());
-                    let mut buffer = CrlfTextBuffer(&mut page);
+                    let operations = crlf_newline_operations(ui, &self.document.text, editor_id);
+                    let mut buffer = CrlfTextBuffer(&mut page, operations);
                     let output = egui::TextEdit::multiline(&mut buffer)
                         .id(editor_id)
                         .code_editor()
