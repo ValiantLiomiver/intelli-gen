@@ -947,6 +947,26 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
             state.enqueue(action);
         }
     }
+    if let Some(pending) = state.pending_wrapper_approval.as_ref() {
+        let mut decision = None;
+        super::show_modal(ui.ctx(), egui::Id::unique("wrapper_approval_modal"), |ui| {
+            ui.heading(crate::i18n::ui_text(ui, "Allow project wrapper?"));
+            ui.label(crate::i18n::ui_text(ui, "This project wrapper may download Maven or Gradle. Allow it to run for this IDE session?"));
+            ui.label(pending.wrapper.display().to_string());
+            if ui
+                .button(crate::i18n::ui_text(ui, "Allow for this session"))
+                .clicked()
+            {
+                decision = Some(true);
+            }
+            if ui.button(crate::i18n::ui_text(ui, "Cancel")).clicked() {
+                decision = Some(false);
+            }
+        });
+        if let Some(allowed) = decision {
+            state.enqueue(AppEvent::WrapperDecision(allowed));
+        }
+    }
     if let Some(dialog) = state.new_java_class.as_mut() {
         let mut create = false;
         let mut cancel = false;

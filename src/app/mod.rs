@@ -245,6 +245,8 @@ pub struct AppState {
     pub gradle_collapsed: bool,
     pub run: crate::java::run_config::RunTool,
     pub pending_run: Option<PendingRun>,
+    pub pending_wrapper_approval: Option<PendingWrapperApproval>,
+    pub wrapper_approvals: HashSet<(PathBuf, PathBuf)>,
     pub run_configuration_loader: crate::java::run_config::RunConfigurationLoader,
     pub run_configuration_generation: u64,
     pub language: crate::java::lsp::LanguageTool,
@@ -334,6 +336,12 @@ pub struct PendingRun {
     pub jdk: crate::java::jdk::JdkInstallation,
     pub stage: PendingRunStage,
     pub save_paths: HashSet<PathBuf>,
+}
+
+pub struct PendingWrapperApproval {
+    pub root: PathBuf,
+    pub wrapper: PathBuf,
+    pub event: AppEvent,
 }
 
 pub struct NewJavaClassDialog {
@@ -564,6 +572,8 @@ impl IdeaLikeApp {
             gradle_collapsed: false,
             run: crate::java::run_config::RunTool::default(),
             pending_run: None,
+            pending_wrapper_approval: None,
+            wrapper_approvals: HashSet::new(),
             run_configuration_loader: crate::java::run_config::RunConfigurationLoader::default(),
             run_configuration_generation: 0,
             language: crate::java::lsp::LanguageTool::default(),

@@ -22,7 +22,7 @@ Pass a project directory to open it on startup, or a file path to open its conta
 cargo run -- /path/to/project-or-file
 ```
 
-`cargo check` compile-checks the app. Java, Maven, and Gradle are not downloaded by these commands. When available, project Maven and Gradle wrappers are preferred for builds; otherwise configure installed executables under **Settings**.
+`cargo check` compile-checks the app. Java, Maven, and Gradle are not downloaded by these commands. When available, project Maven and Gradle wrappers are preferred for builds; otherwise configure installed executables under **Settings**. Before running a project wrapper, Intelli-gen asks for permission because it may download the build tool; approval lasts for that project wrapper until the IDE exits.
 
 ## Java setup
 

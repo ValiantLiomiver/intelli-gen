@@ -105,6 +105,12 @@ pub enum AppEvent {
     },
     JdksDiscovered(crate::java::jdk::JdkDiscoveryEvent),
     Build(BuildAction),
+    WrapperDecision(bool),
+    WrapperApproved {
+        root: PathBuf,
+        wrapper: PathBuf,
+        event: Box<AppEvent>,
+    },
     Maven(MavenAction),
     Gradle(GradleAction),
     GradleTasksCompleted(crate::project::gradle_tasks::GradleTaskEvent),

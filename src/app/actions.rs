@@ -1090,6 +1090,34 @@ fn double_shift_pressed(input: &egui::InputState, last_release: &mut Option<f64>
     triggered
 }
 
+fn wrapper_action_key(
+    state: &AppState,
+    event: &AppEvent,
+) -> Option<(std::path::PathBuf, std::path::PathBuf)> {
+    use super::events::{BuildAction, GradleAction, MavenAction, RunAction};
+    let model = state.project.as_ref()?.model.as_ref()?;
+    let relevant = match event {
+        AppEvent::Build(action) => !matches!(action, BuildAction::Cancel),
+        AppEvent::Run(RunAction::Start) => true,
+        AppEvent::Maven(
+            MavenAction::Reload { root }
+            | MavenAction::ToggleProfile { root, .. }
+            | MavenAction::RunTask { root, .. },
+        ) => root == &model.root,
+        AppEvent::Gradle(
+            GradleAction::Reload { root }
+            | GradleAction::SelectProject { root, .. }
+            | GradleAction::RunTask { root, .. },
+        ) => root == &model.root,
+        _ => false,
+    };
+    if relevant {
+        Some((model.root.clone(), model.wrapper.clone()?))
+    } else {
+        None
+    }
+}
+
 /// The sole shell reducer. Later tasks dispatch service commands here and return
 /// completions as AppEvents; no file contents are read in the rendering pass.
 pub fn process_events(context: &egui::Context, state: &mut AppState) {
@@ -1112,8 +1140,59 @@ pub fn process_events(context: &egui::Context, state: &mut AppState) {
         {
             continue;
         }
+        let event = match event {
+            AppEvent::WrapperDecision(allow) => {
+                if let Some(pending) = state.pending_wrapper_approval.take()
+                    && allow
+                    && wrapper_action_key(state, &pending.event)
+                        == Some((pending.root.clone(), pending.wrapper.clone()))
+                    && !state.project_opening
+                {
+                    state
+                        .wrapper_approvals
+                        .insert((pending.root.clone(), pending.wrapper.clone()));
+                    state.enqueue(AppEvent::WrapperApproved {
+                        root: pending.root,
+                        wrapper: pending.wrapper,
+                        event: Box::new(pending.event),
+                    });
+                }
+                continue;
+            }
+            AppEvent::WrapperApproved {
+                root,
+                wrapper,
+                event,
+            } => {
+                if state.project_opening
+                    || wrapper_action_key(state, &event) != Some((root, wrapper))
+                {
+                    continue;
+                }
+                *event
+            }
+            event => {
+                if let Some((root, wrapper)) = wrapper_action_key(state, &event)
+                    && !state
+                        .wrapper_approvals
+                        .contains(&(root.clone(), wrapper.clone()))
+                {
+                    if state.pending_wrapper_approval.is_none() {
+                        state.pending_wrapper_approval = Some(super::PendingWrapperApproval {
+                            root,
+                            wrapper,
+                            event,
+                        });
+                    }
+                    continue;
+                }
+                event
+            }
+        };
         match event {
+            AppEvent::WrapperDecision(_) | AppEvent::WrapperApproved { .. } => unreachable!(),
             AppEvent::OpenProject(path) => {
+                state.pending_wrapper_approval = None;
                 state.pending_symbol_navigation = None;
                 state.references_popup_anchor = None;
                 cancel_pending_workspace_applies(
@@ -3341,6 +3420,128 @@ mod maven_cache_tests {
     use std::path::Path;
 
     #[test]
+    fn wrapper_execution_requires_session_consent() {
+        let context = egui::Context::default();
+        let mut app = crate::app::IdeaLikeApp::new_with_context(context.clone(), None);
+        app.state.settings = crate::settings::UserSettings::default();
+        let root = std::path::PathBuf::from("/workspace/maven");
+        app.state.project = Some(crate::project::Project {
+            root: root.clone(),
+            kind: crate::project::ProjectKind::Maven,
+            display_name: "maven".into(),
+            discovery_error: None,
+            model: Some(crate::project::ProjectModel {
+                root: root.clone(),
+                name: "maven".into(),
+                kind: crate::project::ProjectKind::Maven,
+                modules: Vec::new(),
+                wrapper: Some(root.join("mvnw")),
+            }),
+        });
+        app.state.enqueue(crate::app::events::AppEvent::Build(
+            crate::app::events::BuildAction::Build,
+        ));
+        super::process_events(&context, &mut app.state);
+        assert!(app.state.pending_wrapper_approval.is_some());
+        assert!(!app.state.build.running());
+        app.state
+            .enqueue(crate::app::events::AppEvent::WrapperDecision(false));
+        super::process_events(&context, &mut app.state);
+        assert!(app.state.pending_wrapper_approval.is_none());
+        assert!(app.state.wrapper_approvals.is_empty());
+        app.state.enqueue(crate::app::events::AppEvent::Build(
+            crate::app::events::BuildAction::Build,
+        ));
+        super::process_events(&context, &mut app.state);
+        app.state
+            .enqueue(crate::app::events::AppEvent::WrapperDecision(true));
+        super::process_events(&context, &mut app.state);
+        assert!(
+            app.state
+                .wrapper_approvals
+                .contains(&(root.clone(), root.join("mvnw")))
+        );
+        super::process_events(&context, &mut app.state);
+        assert!(app.state.pending_wrapper_approval.is_none());
+        assert_eq!(
+            app.state.last_error.as_deref(),
+            Some("Choose a JDK in Settings or Project Structure")
+        );
+    }
+
+    #[test]
+    fn all_wrapper_entry_points_are_gated_and_stale_approval_is_rejected() {
+        use crate::app::events::{AppEvent, BuildAction, GradleAction, MavenAction, RunAction};
+        let context = egui::Context::default();
+        let mut app = crate::app::IdeaLikeApp::new_with_context(context.clone(), None);
+        app.state.settings = crate::settings::UserSettings::default();
+        let root = std::path::PathBuf::from("/workspace/project");
+        let wrapper = root.join("gradlew");
+        app.state.project = Some(crate::project::Project {
+            root: root.clone(),
+            kind: crate::project::ProjectKind::Gradle,
+            display_name: "project".into(),
+            discovery_error: None,
+            model: Some(crate::project::ProjectModel {
+                root: root.clone(),
+                name: "project".into(),
+                kind: crate::project::ProjectKind::Gradle,
+                modules: Vec::new(),
+                wrapper: Some(wrapper.clone()),
+            }),
+        });
+        for action in [
+            AppEvent::Build(BuildAction::Test),
+            AppEvent::Run(RunAction::Start),
+            AppEvent::Maven(MavenAction::Reload { root: root.clone() }),
+            AppEvent::Maven(MavenAction::ToggleProfile {
+                root: root.clone(),
+                profile: "dev".into(),
+            }),
+            AppEvent::Maven(MavenAction::RunTask {
+                root: root.clone(),
+                generation: 0,
+                module: None,
+                goal: "test".into(),
+            }),
+            AppEvent::Gradle(GradleAction::Reload { root: root.clone() }),
+            AppEvent::Gradle(GradleAction::SelectProject {
+                root: root.clone(),
+                project_path: None,
+            }),
+            AppEvent::Gradle(GradleAction::RunTask {
+                root: root.clone(),
+                generation: 0,
+                project_path: None,
+                task_path: ":test".into(),
+                refresh_dependencies: false,
+            }),
+        ] {
+            assert_eq!(
+                super::wrapper_action_key(&app.state, &action),
+                Some((root.clone(), wrapper.clone()))
+            );
+        }
+        assert!(
+            super::wrapper_action_key(&app.state, &AppEvent::Build(BuildAction::Cancel)).is_none()
+        );
+        app.state.enqueue(AppEvent::Build(BuildAction::Build));
+        super::process_events(&context, &mut app.state);
+        app.state
+            .project
+            .as_mut()
+            .unwrap()
+            .model
+            .as_mut()
+            .unwrap()
+            .wrapper = Some(root.join("other-wrapper"));
+        app.state.enqueue(AppEvent::WrapperDecision(true));
+        super::process_events(&context, &mut app.state);
+        assert!(app.state.wrapper_approvals.is_empty());
+        assert!(!app.state.build.running());
+    }
+
+    #[test]
     fn cache_without_tool_identity_attempts_refresh_even_when_poms_match() {
         let context = egui::Context::default();
         let mut app = crate::app::IdeaLikeApp::new_with_context(context.clone(), None);
@@ -3744,6 +3945,11 @@ mod maven_cache_tests {
                 root: app.state.maven_view_root.clone().unwrap(),
             },
         ));
+        super::process_events(&context, &mut app.state);
+        assert!(app.state.pending_wrapper_approval.is_some());
+        app.state
+            .enqueue(crate::app::events::AppEvent::WrapperDecision(true));
+        super::process_events(&context, &mut app.state);
         super::process_events(&context, &mut app.state);
         assert_eq!(
             app.state.maven_generation, 2,
