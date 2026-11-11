@@ -105,6 +105,17 @@ Bookmarks below an inserted or removed line move with the edit; replacing a sele
 
 **Navigate → Test / production source** (`⌘⇧T`) switches between matching files in JDT LS imported test and production source roots when the counterpart exists. The conventional `src/main/java` and `src/test/java` layout remains the fallback until Java intelligence returns project metadata.
 
+When an opened directory is inside a Gradle module declared in a parent settings
+file, Intelli-gen keeps that directory as the workspace and uses the containing
+build and its wrapper. Module discovery supports literal includes and supported
+literal `projectDir` assignments; unsupported dynamic settings are reported
+instead of guessing the build root. Before Run builds, confirmation includes
+unsaved open files in the build root and its discovered modules.
+Building from that root can run tasks in multiple modules. A local offline
+Gradle 6.7.1 check confirmed the distinction between invoking an unqualified
+task at the root and in a child, and that an unrelated nested build requires
+its own settings file. The check used an isolated Gradle user home.
+
 ## IntelliJ reverse-engineering evidence
 
 The local reference is IntelliJ IDEA Ultimate 2026.3, currently installed as

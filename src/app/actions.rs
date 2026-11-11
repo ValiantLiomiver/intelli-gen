@@ -4479,6 +4479,46 @@ mod run_build_tests {
     use super::*;
 
     #[test]
+    fn run_save_scope_includes_sibling_and_external_build_modules() {
+        let model = crate::project::ProjectModel {
+            root: "/build".into(),
+            name: "build".into(),
+            kind: ProjectKind::Gradle,
+            modules: vec![crate::project::ProjectModule {
+                name: ":external".into(),
+                root: "/external/library".into(),
+            }],
+            wrapper: None,
+        };
+        let tab = |path: &str, dirty: bool| {
+            EditorTab::new(crate::editor::Document {
+                path: path.into(),
+                text: if dirty { "edited" } else { "saved" }.into(),
+                saved_text: "saved".into(),
+                cursor_line: 1,
+                cursor_column: 1,
+                revision: 1,
+            })
+        };
+        let tabs = vec![
+            tab("/build/app/Main.java", true),
+            tab("/build/lib/Library.java", true),
+            tab("/external/library/Library.java", true),
+            tab("/build/lib/Clean.java", false),
+            tab("/unrelated/Other.java", true),
+        ];
+        let paths = unsaved_build_paths(&tabs, Path::new("/build/app"), &model);
+        assert_eq!(
+            paths,
+            HashSet::from([
+                PathBuf::from("/build/app/Main.java"),
+                PathBuf::from("/build/lib/Library.java"),
+                PathBuf::from("/external/library/Library.java"),
+            ])
+        );
+    }
+
+    #[test]
     fn run_build_uses_project_jdk_and_preserves_launch_override() {
         let context = egui::Context::default();
         let mut app = crate::app::IdeaLikeApp::new_with_context(context, None);
@@ -4591,6 +4631,25 @@ fn active_path(state: &AppState) -> Option<std::path::PathBuf> {
         .map(|tab| tab.path.clone())
 }
 
+fn unsaved_build_paths(
+    tabs: &[EditorTab],
+    workspace_root: &Path,
+    model: &crate::project::ProjectModel,
+) -> HashSet<PathBuf> {
+    tabs.iter()
+        .filter(|tab| {
+            (tab.path.starts_with(workspace_root)
+                || tab.path.starts_with(&model.root)
+                || model
+                    .modules
+                    .iter()
+                    .any(|module| tab.path.starts_with(&module.root)))
+                && (tab.document.is_dirty() || tab.saving || tab.pending_rename_to.is_some())
+        })
+        .map(|tab| tab.path.clone())
+        .collect()
+}
+
 fn begin_run_flow(state: &mut AppState) {
     if state.pending_run.is_some() || state.run.has_workers() {
         return;
@@ -4628,15 +4687,7 @@ fn begin_run_flow(state: &mut AppState) {
             return;
         }
     };
-    let save_paths: HashSet<_> = state
-        .editor_tabs
-        .iter()
-        .filter(|tab| {
-            tab.path.starts_with(&root)
-                && (tab.document.is_dirty() || tab.saving || tab.pending_rename_to.is_some())
-        })
-        .map(|tab| tab.path.clone())
-        .collect();
+    let save_paths = unsaved_build_paths(&state.editor_tabs, &root, &model);
     let stage = if save_paths.is_empty() {
         super::PendingRunStage::Building
     } else {
@@ -4703,16 +4754,7 @@ fn advance_pending_run_saves(state: &mut AppState) {
         state.run.summary = "Project or run configuration changed; Run was cancelled".into();
         return;
     }
-    let root = pending.root.clone();
-    let newly_dirty: Vec<_> = state
-        .editor_tabs
-        .iter()
-        .filter(|tab| {
-            tab.path.starts_with(&root)
-                && (tab.document.is_dirty() || tab.saving || tab.pending_rename_to.is_some())
-        })
-        .map(|tab| tab.path.clone())
-        .collect();
+    let newly_dirty = unsaved_build_paths(&state.editor_tabs, &pending.root, &pending.model);
     if let Some(pending) = state.pending_run.as_mut() {
         pending.save_paths.extend(newly_dirty);
     }
