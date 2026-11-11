@@ -103,6 +103,7 @@ With a Java test open under a test source root imported by JDT LS, use **Run →
 Use **Navigate → Show Bookmarks** (`⌘F3`) to revisit or remove project line bookmarks; **F3** toggles a bookmark at the caret. Bookmarks are saved with Intelli-gen settings.
 Bookmarks below an inserted or removed line move with the edit; replacing a selection across multiple lines may require repositioning affected bookmarks.
 For files shown in pages, changing the visible page resets that page's undo history.
+Find/replace rejects results larger than 16 MiB per file; project-wide replacement also limits the combined result to 128 MiB and applies no files if a limit is exceeded.
 
 **Navigate → Test / production source** (`⌘⇧T`) switches between matching files in JDT LS imported test and production source roots when the counterpart exists. The conventional `src/main/java` and `src/test/java` layout remains the fallback until Java intelligence returns project metadata.
 

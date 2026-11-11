@@ -141,6 +141,7 @@ impl EditorIo {
                                 );
                             }
                             let mut total_bytes = 0usize;
+                            let mut output_bytes = 0usize;
                             let mut replaced = Vec::with_capacity(targets.len());
                             for mut target in targets {
                                 if target.document.text != target.expected_text {
@@ -175,7 +176,19 @@ impl EditorIo {
                                         &query,
                                         &replacement,
                                         case_sensitive,
-                                    );
+                                    )
+                                    .map_err(|error| {
+                                        format!("{}: {error}", target.document.path.display())
+                                    })?;
+                                output_bytes = output_bytes
+                                    .checked_add(text.len())
+                                    .ok_or("Workspace replace size overflow")?;
+                                if output_bytes > MAX_WORKSPACE_EDIT_BYTES {
+                                    return Err(format!(
+                                        "Workspace replace exceeds the {} MiB limit",
+                                        MAX_WORKSPACE_EDIT_BYTES / (1024 * 1024)
+                                    ));
+                                }
                                 if count == 0 || count != target.expected_matches {
                                     return Err(format!(
                                         "{} no longer matches the replace preview; run it again",
@@ -760,6 +773,50 @@ mod editor_io_tests {
 mod workspace_replace_tests {
     use super::*;
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn oversized_workspace_replacement_rejects_the_whole_batch() {
+        let make_target = |name: &str, text: &str| WorkspaceReplaceTarget {
+            document: Document {
+                path: PathBuf::from(name),
+                text: text.into(),
+                saved_text: text.into(),
+                cursor_line: 1,
+                cursor_column: 1,
+                revision: 0,
+            },
+            expected_text: text.into(),
+            expected_matches: 1,
+            recheck_disk: false,
+        };
+        let io = EditorIo::new(eframe::egui::Context::default());
+        io.replace_many(
+            7,
+            vec![
+                make_target("First.java", "a"),
+                make_target("Second.java", "ab"),
+            ],
+            "a".into(),
+            "x".repeat(document::MAX_DOCUMENT_BYTES),
+            true,
+        )
+        .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let completion = loop {
+            if let Some(completion) = io.drain().into_iter().next() {
+                break completion;
+            }
+            assert!(Instant::now() < deadline, "replacement worker timed out");
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        assert!(matches!(
+            completion,
+            EditorCompletion::ReplacedMany {
+                request: 7,
+                result: Err(_)
+            }
+        ));
+    }
 
     #[test]
     fn replacement_of_deleted_open_file_only_changes_the_buffer() {

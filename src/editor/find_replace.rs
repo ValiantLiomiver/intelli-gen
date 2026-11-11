@@ -43,7 +43,10 @@ enum FindResult {
     Search(Option<(usize, usize, bool)>, bool),
     ReplaceOne(Option<(String, usize, usize)>),
     ReplaceAll(String, usize, Option<usize>),
+    Error(&'static str),
 }
+
+const REPLACE_SIZE_ERROR: &str = "Replacement exceeds the 16 MiB file limit; no changes were made";
 
 impl Default for FindReplace {
     fn default() -> Self {
@@ -283,16 +286,25 @@ impl FindReplace {
                             find_range(&text, &query, case_sensitive, cursor, false)
                                 .map(|(start, end, _)| (start, end))
                         });
-                        FindResult::ReplaceOne(found.map(|(start, end)| {
-                            let mut output = text;
-                            replace_char_range(&mut output, start, end, &replacement);
-                            (output, start, start + replacement.chars().count())
-                        }))
+                        let result = found
+                            .map(|(start, end)| {
+                                let mut output = text;
+                                replace_char_range(&mut output, start, end, &replacement)?;
+                                Ok((output, start, start + replacement.chars().count()))
+                            })
+                            .transpose();
+                        match result {
+                            Ok(result) => FindResult::ReplaceOne(result),
+                            Err(error) => FindResult::Error(error),
+                        }
                     }
                     FindAction::ReplaceAll => {
-                        let (output, count, first) =
-                            replace_all_text(&text, &query, &replacement, case_sensitive);
-                        FindResult::ReplaceAll(output, count, first)
+                        match replace_all_text(&text, &query, &replacement, case_sensitive) {
+                            Ok((output, count, first)) => {
+                                FindResult::ReplaceAll(output, count, first)
+                            }
+                            Err(error) => FindResult::Error(error),
+                        }
                     }
                     FindAction::Open { .. } | FindAction::Close => return,
                 };
@@ -341,25 +353,42 @@ impl FindReplace {
                     self.status = "No match in this file".into();
                 }
                 FindResult::ReplaceOne(Some((text, start, end))) => {
-                    tab.document.text = text;
-                    tab.document.mark_changed();
+                    let changed = text != tab.document.text;
+                    if changed {
+                        tab.document.text = text;
+                        tab.document.mark_changed();
+                    }
                     tab.document.set_cursor(end);
+                    if changed
+                        && tab.document.text.len() > crate::editor::document::PAGED_EDITOR_BYTES
+                    {
+                        tab.refresh_after_workspace_edit();
+                    }
                     tab.select_char_range(start, end);
                     self.last_match = None;
                     self.status = "Replaced one match".into();
                 }
                 FindResult::ReplaceOne(None) => self.status = "No match in this file".into(),
                 FindResult::ReplaceAll(text, count, first_start) if count > 0 => {
-                    tab.document.text = text;
-                    tab.document.mark_changed();
+                    let changed = text != tab.document.text;
+                    if changed {
+                        tab.document.text = text;
+                        tab.document.mark_changed();
+                    }
                     let start = first_start.unwrap_or(0);
                     let end = start + self.replacement.chars().count();
                     tab.document.set_cursor(end);
+                    if changed
+                        && tab.document.text.len() > crate::editor::document::PAGED_EDITOR_BYTES
+                    {
+                        tab.refresh_after_workspace_edit();
+                    }
                     tab.select_char_range(start, end);
                     self.last_match = None;
                     self.status = format!("Replaced {count} matches");
                 }
                 FindResult::ReplaceAll(_, _, _) => self.status = "No match in this file".into(),
+                FindResult::Error(error) => self.status = error.into(),
             }
         }
         let mut active = Vec::new();
@@ -426,11 +455,16 @@ pub(crate) fn replace_all_text(
     query: &str,
     replacement: &str,
     case_sensitive: bool,
-) -> (String, usize, Option<usize>) {
+) -> Result<(String, usize, Option<usize>), &'static str> {
     if query.is_empty() {
-        return (text.to_owned(), 0, None);
+        return if text.len() <= crate::editor::document::MAX_DOCUMENT_BYTES {
+            Ok((text.to_owned(), 0, None))
+        } else {
+            Err(REPLACE_SIZE_ERROR)
+        };
     }
-    let mut output = String::with_capacity(text.len());
+    let mut output =
+        String::with_capacity(text.len().min(crate::editor::document::MAX_DOCUMENT_BYTES));
     let mut cursor_byte = 0;
     let mut count = 0;
     let mut first_start = None;
@@ -443,6 +477,14 @@ pub(crate) fn replace_all_text(
         }
         if let Some(end_byte) = match_end_at(text, start_byte, query, &folded_query, case_sensitive)
         {
+            if output
+                .len()
+                .checked_add(start_byte - cursor_byte)
+                .and_then(|len| len.checked_add(replacement.len()))
+                .is_none_or(|len| len > crate::editor::document::MAX_DOCUMENT_BYTES)
+            {
+                return Err(REPLACE_SIZE_ERROR);
+            }
             output.push_str(&text[cursor_byte..start_byte]);
             output.push_str(replacement);
             cursor_byte = end_byte;
@@ -450,8 +492,15 @@ pub(crate) fn replace_all_text(
             count += 1;
         }
     }
+    if output
+        .len()
+        .checked_add(text.len() - cursor_byte)
+        .is_none_or(|len| len > crate::editor::document::MAX_DOCUMENT_BYTES)
+    {
+        return Err(REPLACE_SIZE_ERROR);
+    }
     output.push_str(&text[cursor_byte..]);
-    (output, count, first_start)
+    Ok((output, count, first_start))
 }
 
 fn char_range_matches(
@@ -525,7 +574,12 @@ pub(crate) fn contains_text(text: &str, query: &str, case_sensitive: bool) -> bo
     }
 }
 
-fn replace_char_range(text: &mut String, start: usize, end: usize, replacement: &str) {
+fn replace_char_range(
+    text: &mut String,
+    start: usize,
+    end: usize,
+    replacement: &str,
+) -> Result<(), &'static str> {
     let byte_start = text
         .char_indices()
         .nth(start)
@@ -536,12 +590,58 @@ fn replace_char_range(text: &mut String, start: usize, end: usize, replacement: 
         .nth(end)
         .map(|(byte, _)| byte)
         .unwrap_or(text.len());
+    if text
+        .len()
+        .saturating_sub(byte_end - byte_start)
+        .checked_add(replacement.len())
+        .is_none_or(|len| len > crate::editor::document::MAX_DOCUMENT_BYTES)
+    {
+        return Err(REPLACE_SIZE_ERROR);
+    }
     text.replace_range(byte_start..byte_end, replacement);
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::{find_range, replace_all_text};
+
+    #[test]
+    fn replacements_are_bounded_before_allocating_oversized_output() {
+        let limit = crate::editor::document::MAX_DOCUMENT_BYTES;
+        assert!(replace_all_text("aa", "a", &"x".repeat(limit / 2 + 1), true).is_err());
+        let (text, count, _) = replace_all_text("a", "a", &"x".repeat(limit), true).unwrap();
+        assert_eq!(text.len(), limit);
+        assert_eq!(count, 1);
+        assert!(replace_all_text("aa", "a", &"é".repeat(limit / 4 + 1), true).is_err());
+    }
+
+    #[test]
+    fn oversized_replacements_leave_the_document_unchanged() {
+        for action in [super::FindAction::Replace, super::FindAction::ReplaceAll] {
+            let mut tab = crate::editor::EditorTab::new(crate::editor::Document {
+                path: "/project/Main.java".into(),
+                text: "a".into(),
+                saved_text: "a".into(),
+                cursor_line: 1,
+                cursor_column: 1,
+                revision: 0,
+            });
+            let mut find = super::FindReplace::default();
+            find.query = "a".into();
+            find.replacement = "x".repeat(crate::editor::document::MAX_DOCUMENT_BYTES + 1);
+            find.apply(action, Some(&mut tab));
+            let completion = find
+                .receiver
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .unwrap();
+            find.sender.send(completion).unwrap();
+            find.poll(Some(&mut tab));
+            assert_eq!(tab.document.text, "a");
+            assert_eq!(tab.document.revision, 0);
+            assert_eq!(find.status, super::REPLACE_SIZE_ERROR);
+        }
+    }
 
     #[test]
     fn case_insensitive_search_and_replace_handle_unicode_case_mappings() {
@@ -550,11 +650,11 @@ mod tests {
             Some((0, 1, false))
         );
         assert_eq!(
-            replace_all_text("Äpfel", "ä", "A", false),
+            replace_all_text("Äpfel", "ä", "A", false).unwrap(),
             ("Apfel".into(), 1, Some(0))
         );
         assert_eq!(
-            replace_all_text("İstanbul", "i", "x", false),
+            replace_all_text("İstanbul", "i", "x", false).unwrap(),
             ("xstanbul".into(), 1, Some(0))
         );
     }

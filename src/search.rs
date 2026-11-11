@@ -1022,7 +1022,7 @@ fn append_replace_preview(
         results.skipped += 1;
         return Ok(());
     }
-    let (_, match_count, _) = replace_all_text(&text, &query.text, "", query.case_sensitive);
+    let (_, match_count, _) = replace_all_text(&text, &query.text, "", query.case_sensitive)?;
     if match_count == 0 {
         return Ok(());
     }
@@ -1040,7 +1040,7 @@ fn append_replace_preview(
     }
     let mut matches = Vec::new();
     for (line_index, line) in text.lines().enumerate() {
-        let (_, count, _) = replace_all_text(line, &query.text, "", query.case_sensitive);
+        let (_, count, _) = replace_all_text(line, &query.text, "", query.case_sensitive)?;
         if count > 0 {
             if *preview_lines < 5_000 {
                 matches.push(ReplacePreviewMatch {

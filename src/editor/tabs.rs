@@ -300,6 +300,143 @@ mod completion_trigger_tests {
     }
 
     #[test]
+    fn navigating_within_large_file_page_preserves_undo() {
+        let context = egui::Context::default();
+        let original = "line\n".repeat(60_000);
+        let mut tab = EditorTab::new(Document {
+            path: "/project/Main.java".into(),
+            text: original.clone(),
+            saved_text: original.clone(),
+            cursor_line: 1,
+            cursor_column: 1,
+            revision: 0,
+        });
+        frame(&context, &mut tab, 0.0, vec![]);
+        frame(&context, &mut tab, 0.1, vec![egui::Event::Text("X".into())]);
+        assert_ne!(tab.document.text, original);
+        tab.navigate_to_line(2);
+        frame(&context, &mut tab, 0.2, vec![]);
+        assert_eq!(tab.document.cursor_line, 2);
+        frame(
+            &context,
+            &mut tab,
+            0.3,
+            vec![egui::Event::Key {
+                key: egui::Key::Z,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::COMMAND,
+            }],
+        );
+        assert!(tab.document.text == original);
+        frame(
+            &context,
+            &mut tab,
+            0.4,
+            vec![egui::Event::Key {
+                key: egui::Key::Z,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers {
+                    shift: true,
+                    ..egui::Modifiers::COMMAND
+                },
+            }],
+        );
+        assert!(tab.document.text.starts_with("Xline\n"));
+    }
+
+    #[test]
+    fn replacement_does_not_restore_stale_page_contents_on_undo() {
+        let context = egui::Context::default();
+        let original = "line\n".repeat(60_000);
+        let mut tab = EditorTab::new(Document {
+            path: "/project/Main.java".into(),
+            text: original.clone(),
+            saved_text: original,
+            cursor_line: 1,
+            cursor_column: 1,
+            revision: 0,
+        });
+        frame(&context, &mut tab, 0.0, vec![]);
+        frame(&context, &mut tab, 0.1, vec![egui::Event::Text("X".into())]);
+        let mut find = crate::editor::find_replace::FindReplace::default();
+        find.query = "line".into();
+        find.replacement = "changed".into();
+        find.apply(
+            crate::editor::find_replace::FindAction::Replace,
+            Some(&mut tab),
+        );
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while find.status == "Replacing…" {
+            find.poll(Some(&mut tab));
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert!(tab.document.text.starts_with("Xchanged\n"));
+        frame(&context, &mut tab, 0.2, vec![]);
+        frame(
+            &context,
+            &mut tab,
+            0.3,
+            vec![egui::Event::Key {
+                key: egui::Key::Z,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::COMMAND,
+            }],
+        );
+        assert!(tab.document.text.starts_with("Xchanged\n"));
+    }
+
+    #[test]
+    fn identical_replacement_preserves_previous_page_undo() {
+        let context = egui::Context::default();
+        let original = "line\n".repeat(60_000);
+        let mut tab = EditorTab::new(Document {
+            path: "/project/Main.java".into(),
+            text: original.clone(),
+            saved_text: original.clone(),
+            cursor_line: 1,
+            cursor_column: 1,
+            revision: 0,
+        });
+        frame(&context, &mut tab, 0.0, vec![]);
+        frame(&context, &mut tab, 0.1, vec![egui::Event::Text("X".into())]);
+        let mut find = crate::editor::find_replace::FindReplace::default();
+        find.query = "line".into();
+        find.replacement = "line".into();
+        find.apply(
+            crate::editor::find_replace::FindAction::ReplaceAll,
+            Some(&mut tab),
+        );
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while find.status == "Replacing all matches…" {
+            find.poll(Some(&mut tab));
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert_eq!(tab.document.revision, 1);
+        frame(&context, &mut tab, 0.2, vec![]);
+        frame(
+            &context,
+            &mut tab,
+            0.3,
+            vec![egui::Event::Key {
+                key: egui::Key::Z,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::COMMAND,
+            }],
+        );
+        assert!(tab.document.text == original);
+    }
+
+    #[test]
     fn paged_selection_edit_remaps_bookmarks_using_document_lines() {
         let context = egui::Context::default();
         let root = PathBuf::from("/project");
@@ -2096,6 +2233,16 @@ impl EditorTab {
                 target
             }
         });
+        if let Some(index) = target_cursor {
+            let target = byte_index(&self.document.text, index);
+            if self.page_end > self.page_start
+                && target >= self.page_start
+                && (target < self.page_end
+                    || (target == self.page_end && target == self.document.text.len()))
+            {
+                start = None;
+            }
+        }
         ui.horizontal(|ui| {
             if ui
                 .add_enabled(
@@ -2183,8 +2330,12 @@ impl EditorTab {
             self.page_start -= 2;
         }
         let editor_id = egui::Id::new(("paged_source_editor", &self.path));
-        if reset {
-            let mut state = egui::text_edit::TextEditState::default();
+        if reset || target_cursor.is_some() {
+            let mut state = if reset {
+                egui::text_edit::TextEditState::default()
+            } else {
+                egui::text_edit::TextEditState::load(ui.ctx(), editor_id).unwrap_or_default()
+            };
             if let Some(index) = target_cursor {
                 let page_offset = self.document.text[..self.page_start].chars().count();
                 state
