@@ -463,6 +463,8 @@ fn atomic_write(path: &Path, bytes: &[u8], expected: &[u8]) -> Result<(), Editor
     let result = (|| {
         file.set_permissions(original.permissions())?;
         file.write_all(bytes)?;
+        #[cfg(target_os = "macos")]
+        copy_macos_metadata(path, &file)?;
         file.sync_all()?;
         drop(file);
         if !disk_matches(path, expected)? {
@@ -524,6 +526,8 @@ fn atomic_write_new(
         let result = (|| {
             file.set_permissions(original.permissions())?;
             file.write_all(bytes)?;
+            #[cfg(target_os = "macos")]
+            copy_macos_metadata(source, &file)?;
             file.sync_all()?;
             drop(file);
             if !disk_matches(source, expected)? {
@@ -547,6 +551,27 @@ fn atomic_write_new(
             "cannot allocate temporary rename file",
         ),
     ))
+}
+
+#[cfg(target_os = "macos")]
+fn copy_macos_metadata(source: &Path, destination: &fs::File) -> io::Result<()> {
+    use std::os::fd::AsRawFd;
+
+    let source = open_regular_document(source).map_err(|error| error.source)?;
+    // SAFETY: both descriptors are live files and a null state requests default behavior.
+    let result = unsafe {
+        libc::fcopyfile(
+            source.as_raw_fd(),
+            destination.as_raw_fd(),
+            std::ptr::null_mut(),
+            libc::COPYFILE_ACL | libc::COPYFILE_XATTR,
+        )
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
 }
 
 fn disk_matches(path: &Path, expected: &[u8]) -> io::Result<bool> {
@@ -654,6 +679,62 @@ mod tests {
 
         assert_eq!(fs::read_to_string(&path).unwrap(), document.text);
         assert!(!document.is_dirty());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn save_and_rename_preserve_extended_attributes_and_acl() {
+        let root = std::env::temp_dir().join(format!(
+            "intelli-gen-document-xattr-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir(&root).unwrap();
+        let path = root.join("Example.java");
+        fs::write(&path, "class Example {}\n").unwrap();
+        assert!(
+            std::process::Command::new("/usr/bin/xattr")
+                .args(["-w", "org.intelli-gen.test", "metadata"])
+                .arg(&path)
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            std::process::Command::new("/bin/chmod")
+                .args(["+a", "everyone allow readattr"])
+                .arg(&path)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let mut document = Document::load(&path).unwrap();
+        document.text = "class Example { int value; }\n".into();
+        document.save().unwrap();
+        let attribute = |path: &Path| {
+            let output = std::process::Command::new("/usr/bin/xattr")
+                .args(["-p", "org.intelli-gen.test"])
+                .arg(path)
+                .output()
+                .unwrap();
+            assert!(output.status.success());
+            assert_eq!(output.stdout, b"metadata\n");
+            let acl = std::process::Command::new("/bin/ls")
+                .arg("-le")
+                .arg(path)
+                .output()
+                .unwrap();
+            assert!(acl.status.success());
+            assert!(String::from_utf8_lossy(&acl.stdout).contains("group:everyone allow readattr"));
+        };
+        attribute(&path);
+        let renamed = root.join("Renamed.java");
+        document.save_as(&renamed).unwrap();
+        attribute(&renamed);
         fs::remove_dir_all(root).unwrap();
     }
 

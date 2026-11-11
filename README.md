@@ -329,7 +329,8 @@ and allowed writes only to its isolated JDT workspace within the app settings.
 On 2026-11-11, a native macOS quit check with a dirty disposable Java file
 verified that the system termination request opens the save confirmation;
 cancel kept the edit open, and discarding on a second request closed both the
-IDE and its JDT LS process without changing the file on disk.
+IDE and its JDT LS process without changing the file on disk. A separate run
+confirmed that Save and Close wrote the edited text and stopped JDT LS.
 On 2026-11-09, a native accessibility smoke check launched the then-current debug
 build and opened a disposable Gradle project from the recent-project list. The
 project status, tree, and window title confirmed the result. A separate native
