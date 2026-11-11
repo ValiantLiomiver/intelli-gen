@@ -1552,6 +1552,69 @@ mod build_menu_tests {
     use super::*;
 
     #[test]
+    fn wrapper_confirmation_exposes_localized_accessible_controls() {
+        for (language, title, allow) in [
+            (
+                crate::i18n::LanguagePreference::English,
+                "Allow project wrapper?",
+                "Allow for this session",
+            ),
+            (
+                crate::i18n::LanguagePreference::Italian,
+                "Consentire il wrapper del progetto?",
+                "Consenti per questa sessione",
+            ),
+        ] {
+            let context = egui::Context::default();
+            context.enable_accesskit();
+            let mut app = crate::app::IdeaLikeApp::new_with_context(context.clone(), None);
+            app.state.settings = crate::settings::UserSettings::default();
+            app.state.translator = crate::i18n::Translator::load(language, None).0;
+            app.state.pending_wrapper_approval = Some(super::super::PendingWrapperApproval {
+                root: "/project".into(),
+                wrapper: "/project/mvnw".into(),
+                event: AppEvent::Build(super::super::events::BuildAction::Build),
+            });
+            let mut dialog = false;
+            let mut heading = false;
+            let mut button = false;
+            for _ in 0..3 {
+                let mut output = context.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            egui::vec2(800.0, 600.0),
+                        )),
+                        ..Default::default()
+                    },
+                    |ui| render(ui, &mut app.state),
+                );
+                if let Some(update) = output.platform_output.accesskit_update.take() {
+                    for (_, node) in update.nodes {
+                        dialog |= node.role() == egui::Role::Dialog
+                            && node.bounds().is_some_and(|bounds| {
+                                bounds.x1 > bounds.x0 && bounds.y1 > bounds.y0
+                            });
+                        button |= node.role() == egui::Role::Button
+                            && node.label() == Some(allow)
+                            && node.supports_action(egui::accesskit::Action::Click);
+                    }
+                }
+                let mut positions = Vec::new();
+                for shape in &output.shapes {
+                    text_positions(&shape.shape, title, &mut positions);
+                }
+                heading |= !positions.is_empty();
+                output.textures_delta.clear();
+            }
+            assert!(
+                dialog && heading && button,
+                "wrapper dialog must be accessible in {language:?}: dialog={dialog}, heading={heading}, button={button}"
+            );
+        }
+    }
+
+    #[test]
     fn window_title_tracks_the_workspace_and_language() {
         let context = egui::Context::default();
         let mut app = crate::app::IdeaLikeApp::new_with_context(context, None);

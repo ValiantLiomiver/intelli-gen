@@ -348,6 +348,10 @@ followed an intentionally failing test report to line 5 of `MainTest.java`.
 The resulting class printed the edited value `73`. The same check exposed an
 unnamed project-tree disclosure control; after the fix, its localized expand
 and collapse buttons both worked through macOS accessibility.
+On 2026-11-11, a native MCP accessibility check on `426bd52` used a disposable
+Maven project with a local marker-only wrapper. Cancelling the localized wrapper
+dialog left the marker absent; allowing it ran the wrapper, and a second task ran
+without another prompt in the same session. The fixture performed no download.
 
 For this test, use the `Main.java` with the `add` helper shown in the Maven
 fixture below, compiled into `bin/` with debug information. Use an Eclipse
