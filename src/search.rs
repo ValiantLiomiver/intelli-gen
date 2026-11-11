@@ -470,25 +470,13 @@ fn search(
         if cancelled() {
             break;
         }
-        let relative = path.strip_prefix(&root).unwrap_or(&path);
-        if (!query.file_globs.is_empty() && !globs.is_match(relative))
-            || relative
-                .components()
-                .any(|part| EXCLUDED.iter().any(|name| part.as_os_str() == *name))
-            || !matches!(std::fs::symlink_metadata(&path), Err(error) if error.kind() == std::io::ErrorKind::NotFound)
-        {
-            continue;
-        }
-        match missing_path_has_blocked_parent(&root, relative) {
-            Ok(true) => continue,
-            Ok(false) => {}
+        match eligible_missing_path(&root, &path, query, &globs, &mut matcher) {
+            Ok(true) => {}
+            Ok(false) => continue,
             Err(_) => {
                 results.skipped += 1;
                 continue;
             }
-        }
-        if matcher.matched(relative, false).is_ignore() {
-            continue;
         }
         if text.len() as u64 > MAX_SEARCH_FILE_BYTES || text.as_bytes().contains(&0) {
             results.skipped += 1;
@@ -499,6 +487,26 @@ fn search(
         }
     }
     Ok(results)
+}
+
+fn eligible_missing_path(
+    root: &Path,
+    path: &Path,
+    query: &SearchQuery,
+    globs: &globset::GlobSet,
+    matcher: &mut ignore::IncrementalIgnore,
+) -> std::io::Result<bool> {
+    let relative = path.strip_prefix(root).unwrap_or(path);
+    if (!query.file_globs.is_empty() && !globs.is_match(relative))
+        || relative
+            .components()
+            .any(|part| EXCLUDED.iter().any(|name| part.as_os_str() == *name))
+        || !matches!(std::fs::symlink_metadata(path), Err(error) if error.kind() == std::io::ErrorKind::NotFound)
+        || missing_path_has_blocked_parent(root, relative)?
+    {
+        return Ok(false);
+    }
+    Ok(!matcher.matched(relative, false).is_ignore())
 }
 
 fn missing_path_has_blocked_parent(root: &Path, relative: &Path) -> std::io::Result<bool> {
@@ -587,6 +595,14 @@ mod search_buffer_tests {
         assert_eq!(missing.matches.len(), 1);
         assert_eq!(missing.matches[0].path, path);
         assert_eq!(missing.matches[0].line, 2);
+        let preview =
+            preview_replacements(&root, &query("unsaved"), snapshots(), || false).unwrap();
+        assert_eq!(preview.files.len(), 1);
+        assert_eq!(preview.files[0].path, path);
+        assert_eq!(preview.files[0].open_revision, Some(1));
+        assert!(!preview.files[0].recheck_disk);
+        assert_eq!(preview.files[0].source_text, "first\nunsaved content\n");
+        assert!(!path.exists());
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -642,6 +658,15 @@ mod search_buffer_tests {
                 root.join("nested/Keep.java"),
                 root.join("removed-directory/StillOpen.java"),
             ])
+        );
+        let preview = preview_replacements(&root, &query, documents(), || false).unwrap();
+        assert_eq!(
+            preview
+                .files
+                .iter()
+                .map(|file| file.path.clone())
+                .collect::<std::collections::HashSet<_>>(),
+            paths
         );
         query.file_globs = vec!["*.txt".into()];
         assert!(
@@ -739,8 +764,14 @@ mod search_buffer_tests {
             case_sensitive: true,
             file_globs: Vec::new(),
         };
-        let result = search(&root, &query, snapshots, || false).unwrap();
+        let result = search(&root, &query, snapshots.clone(), || false).unwrap();
         assert!(result.matches.is_empty());
+        assert!(
+            preview_replacements(&root, &query, snapshots, || false)
+                .unwrap()
+                .files
+                .is_empty()
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -866,8 +897,6 @@ fn preview_replacements(
     open_documents: Vec<OpenDocumentSnapshot>,
     cancelled: impl Fn() -> bool,
 ) -> Result<ReplaceSearchResults, String> {
-    use crate::editor::find_replace::replace_all_text;
-
     if query.text.is_empty() {
         return Err("Enter text to replace".into());
     }
@@ -932,53 +961,109 @@ fn preview_replacements(
                 }
             }
         };
-        if text.len() > MAX_SEARCH_FILE_BYTES as usize || text.as_bytes().contains(&0) {
-            results.skipped += 1;
-            continue;
-        }
-        let (_, match_count, _) = replace_all_text(&text, &query.text, "", query.case_sensitive);
-        if match_count == 0 {
-            continue;
-        }
-        if results.files.len() >= 200 {
-            return Err("Replace preview exceeds the 200-file limit; narrow the file globs".into());
-        }
-        total_bytes = total_bytes
-            .checked_add(text.len())
-            .ok_or("Replace preview size overflow")?;
-        if total_bytes > crate::editor::MAX_WORKSPACE_EDIT_BYTES {
-            return Err(format!(
-                "Replace preview exceeds the {} MiB workspace edit limit; narrow the file globs",
-                crate::editor::MAX_WORKSPACE_EDIT_BYTES / (1024 * 1024)
-            ));
-        }
-        let mut matches = Vec::new();
-        for (line_index, line) in text.lines().enumerate() {
-            let (_, count, _) = replace_all_text(line, &query.text, "", query.case_sensitive);
-            if count > 0 {
-                if preview_lines < 5_000 {
-                    matches.push(ReplacePreviewMatch {
-                        line: line_index + 1,
-                        count,
-                        preview: line.chars().take(300).collect(),
-                    });
-                    preview_lines += 1;
-                } else {
-                    results.truncated_preview = true;
-                }
-            }
-        }
-        results.files.push(ReplacePreviewFile {
+        append_replace_preview(
+            &mut results,
+            &mut total_bytes,
+            &mut preview_lines,
+            query,
             path,
-            source_text: text,
+            text,
             open_revision,
             recheck_disk,
-            matches,
-            match_count,
-            selected: true,
-        });
+        )?;
+    }
+    let mut matcher = walker
+        .build_matchers()
+        .into_iter()
+        .next()
+        .expect("one project root");
+    let mut missing: Vec<_> = buffers.into_values().collect();
+    missing.sort_by(|left, right| left.path.cmp(&right.path));
+    for document in missing {
+        if cancelled() {
+            break;
+        }
+        let Some(text) = document.text else { continue };
+        match eligible_missing_path(&root, &document.path, query, &globs, &mut matcher) {
+            Ok(true) => {}
+            Ok(false) => continue,
+            Err(_) => {
+                results.skipped += 1;
+                continue;
+            }
+        }
+        append_replace_preview(
+            &mut results,
+            &mut total_bytes,
+            &mut preview_lines,
+            query,
+            document.path,
+            text,
+            Some(document.revision),
+            false,
+        )?;
     }
     Ok(results)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn append_replace_preview(
+    results: &mut ReplaceSearchResults,
+    total_bytes: &mut usize,
+    preview_lines: &mut usize,
+    query: &SearchQuery,
+    path: PathBuf,
+    text: String,
+    open_revision: Option<u64>,
+    recheck_disk: bool,
+) -> Result<(), String> {
+    use crate::editor::find_replace::replace_all_text;
+    if text.len() > MAX_SEARCH_FILE_BYTES as usize || text.as_bytes().contains(&0) {
+        results.skipped += 1;
+        return Ok(());
+    }
+    let (_, match_count, _) = replace_all_text(&text, &query.text, "", query.case_sensitive);
+    if match_count == 0 {
+        return Ok(());
+    }
+    if results.files.len() >= 200 {
+        return Err("Replace preview exceeds the 200-file limit; narrow the file globs".into());
+    }
+    *total_bytes = total_bytes
+        .checked_add(text.len())
+        .ok_or("Replace preview size overflow")?;
+    if *total_bytes > crate::editor::MAX_WORKSPACE_EDIT_BYTES {
+        return Err(format!(
+            "Replace preview exceeds the {} MiB workspace edit limit; narrow the file globs",
+            crate::editor::MAX_WORKSPACE_EDIT_BYTES / (1024 * 1024)
+        ));
+    }
+    let mut matches = Vec::new();
+    for (line_index, line) in text.lines().enumerate() {
+        let (_, count, _) = replace_all_text(line, &query.text, "", query.case_sensitive);
+        if count > 0 {
+            if *preview_lines < 5_000 {
+                matches.push(ReplacePreviewMatch {
+                    line: line_index + 1,
+                    count,
+                    preview: line.chars().take(300).collect(),
+                });
+                *preview_lines += 1;
+            } else {
+                results.truncated_preview = true;
+            }
+        }
+    }
+    results.files.push(ReplacePreviewFile {
+        path,
+        source_text: text,
+        open_revision,
+        recheck_disk,
+        matches,
+        match_count,
+        selected: true,
+    });
+    Ok(())
 }
 
 fn compile_globs(query: &SearchQuery) -> Result<globset::GlobSet, String> {

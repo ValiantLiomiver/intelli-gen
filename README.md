@@ -108,8 +108,8 @@ Bookmarks below an inserted or removed line move with the edit; replacing a sele
 **Find in Project** searches unsaved contents of open project files as well as
 files on disk, including unsaved open files removed from disk. If an open file
 changes after the search starts, run the search again before navigating its
-results. Ignore rules and file filters still apply. Replacement preview requires
-the file to exist on disk.
+results. Ignore rules and file filters still apply. Replacement also works on
+unsaved open files removed from disk; it changes only the editor buffer.
 
 When an opened directory is inside a Gradle module declared in a parent settings
 file, Intelli-gen keeps that directory as the workspace and uses the containing

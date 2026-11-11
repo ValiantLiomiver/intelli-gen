@@ -745,6 +745,56 @@ mod workspace_replace_tests {
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     #[test]
+    fn replacement_of_deleted_open_file_only_changes_the_buffer() {
+        let root = std::env::temp_dir().join(format!(
+            "intelli-gen-replace-missing-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let path = root.join("Main.java");
+        std::fs::write(&path, "old").unwrap();
+        let document = Document::load(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        let io = EditorIo::new(eframe::egui::Context::default());
+        io.replace_many(
+            1,
+            vec![WorkspaceReplaceTarget {
+                expected_text: document.text.clone(),
+                document,
+                expected_matches: 1,
+                recheck_disk: false,
+            }],
+            "old".into(),
+            "new".into(),
+            true,
+        )
+        .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let completion = loop {
+            if let Some(completion) = io.drain().into_iter().next() {
+                break completion;
+            }
+            assert!(Instant::now() < deadline, "replacement worker timed out");
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        match completion {
+            EditorCompletion::ReplacedMany {
+                result: Ok(documents),
+                ..
+            } => {
+                assert_eq!(documents[0].0.text, "new");
+            }
+            _ => panic!("replacement failed"),
+        }
+        assert!(!path.exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn changed_disk_target_rejects_the_whole_workspace_replacement() {
         let root = std::env::temp_dir().join(format!(
             "intelli-gen-replace-{}-{}",
